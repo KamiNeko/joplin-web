@@ -1,188 +1,179 @@
+<div align="center">
+
 # Joplin Web
 
-A modern, responsive, and lightweight web client for [Joplin Server](https://joplinapp.org/help/apps/sync/joplin_server/) and Joplin Cloud. Joplin Web allows you to browse, search, create, and edit your Joplin notes and notebooks from any modern web browser without requiring desktop or mobile client installations.
+**Your Joplin notes, in any browser.**
 
----
+A fast, modern web client for your self-hosted [Joplin Server](https://joplinapp.org/help/apps/sync/joplin_server/).<br>
+Read, write and organize your notes from any device, with nothing to install.
 
-## Screenshot
+[![CI](https://github.com/KamiNeko/joplin-web/actions/workflows/ci.yml/badge.svg)](https://github.com/KamiNeko/joplin-web/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-```text
-+-----------------------------------------------------------------------------------+
-|  Joplin Web                                              [Search notes...]   (o)  |
-+-------------------+-----------------------------+---------------------------------+
-|  NOTEBOOKS        |  NOTES                      |  My First Note                  |
-|  > Work           |  * Project Roadmap          |  ====================           |
-|  v Personal       |    Updated 2h ago           |                                 |
-|    - Reading List |                             |  This is a full-featured        |
-|    - Travel Ideas |  * Book Recommendations     |  Markdown note editor with      |
-|  > Archive        |    Updated yesterday        |  split preview and Joplin       |
-|                   |                             |  server synchronization!        |
-|  TAGS             |  * Grocery Checklist        |                                 |
-|  #todo  #ideas    |    Updated 3 days ago       |  - [x] Check emails             |
-|                   |                             |  - [ ] Deploy Joplin Web        |
-+-------------------+-----------------------------+---------------------------------+
-```
-*(Placeholder: add screenshot to `docs/images/screenshot.png`)*
+![Joplin Web showing a note with a table and task list in dark mode](docs/images/notes-dark.png)
 
----
+</div>
+
+## Why Joplin Web?
+
+You already run Joplin Server to sync your notes. Joplin's desktop and mobile apps work well, but sometimes you are on a work laptop, a borrowed computer or a tablet where you can't (or don't want to) install anything. **Joplin Web gives you your notes in a browser tab.** It talks directly to your Joplin Server, so your notes never leave your own infrastructure.
+
+- 🏠 **Self-hosted, all the way.** One small Docker container next to your Joplin Server. No database, no third-party services.
+- 🔄 **Stays in sync.** Changes are written in Joplin's own sync format, so they show up in your desktop and mobile apps.
+- 🔐 **Uses your Joplin account.** Sign in with your Joplin Server email and password. Nothing is stored on the web server.
 
 ## Features
 
-- **Direct Joplin Server Integration**: Connects with Joplin Server or Joplin Cloud sync APIs.
-- **Notebook Tree Navigation**: Hierarchical notebook and sub-notebook browsing with folder management.
-- **Full Note Management**: Create, view, edit, organize, and delete notes and to-dos.
-- **Rich Markdown Editor**:
-  - Live split-view or toggle preview.
-  - GitHub Flavored Markdown (GFM) support (tables, task lists, formatting).
-  - Code syntax highlighting.
-  - Math expressions and diagram rendering.
-- **Tag Management**: Assign tags to notes and browse notes filtered by tag.
-- **Fast Search**: Instant full-text search across titles and note content.
-- **Responsive & Modern UI**: Built with React, Vite, and modern styling, fully usable on desktop, tablet, and mobile browsers.
-- **Single-Container Deployment**: Multi-stage lightweight Alpine Docker build serving both the Express API and compiled static React client on a single port.
-- **Health Monitoring**: Integrated Docker health checks for production reliability.
+| | |
+| :--- | :--- |
+| 📚 **Notebooks** | Browse nested notebooks; create, rename, move and delete them. |
+| 📝 **Markdown editor** | CodeMirror editor with *Edit*, *Split* and *Preview* modes, autosave and `Ctrl+S`. |
+| ✨ **Rich rendering** | GitHub-flavored Markdown: tables, task lists, syntax-highlighted code blocks. |
+| 🖼️ **Images & attachments** | Shows Joplin resources inline. Drop, paste or attach files to upload them. |
+| ✅ **To-dos** | Create to-dos and tick them off, right from the note list. |
+| 🏷️ **Tags** | Tag notes, browse by tag, rename and delete tags. |
+| 🔎 **Search** | Instant full-text search across titles and content (`Ctrl+K`). |
+| 🗑️ **Trash** | Deleted notes go to Joplin's trash and can be restored. |
+| ⚔️ **Conflict detection** | If a note was changed elsewhere while you edited it, you choose which version to keep. |
+| 🌗 **Light & dark mode** | Switch themes with one click. |
+| 📱 **Responsive** | Works on phones and tablets as well as on the desktop. |
 
----
+## Screenshots
 
-## Tech Stack
+<table>
+  <tr>
+    <td colspan="2"><img src="docs/images/notes-light.png" alt="Light mode with an embedded image"></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><em>Light mode, with images stored as Joplin resources</em></td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="docs/images/editor-split.png" alt="Split-view Markdown editor"></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><em>Split-view editor with live preview</em></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/images/mobile-list.png" alt="Note list on a phone" width="300"></td>
+    <td align="center"><img src="docs/images/mobile-note.png" alt="Note on a phone" width="300"></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><em>On a phone</em></td>
+  </tr>
+</table>
 
-### Frontend (`client/`)
-- **Framework**: React 18
-- **Language**: TypeScript
-- **Build Tool**: Vite
-- **Icons**: Lucide Icons
-- **Markdown**: React Markdown with remark & rehype plugins
+## Getting started
 
-### Backend (`server/`)
-- **Runtime**: Node.js 20+
-- **Framework**: Express.js
-- **Language**: TypeScript
-- **API Communication**: Joplin Server REST & sync item endpoints
-- **Static Hosting**: Express static file server serving compiled frontend assets in production
+You need a running **Joplin Server** and **Docker** with Docker Compose.
 
-### DevOps & Infrastructure
-- **Containerization**: Docker (multi-stage build based on `node:20-alpine`)
-- **Orchestration**: Docker Compose
-
----
-
-## Project Structure
-
-```
-joplin-web/
-├── client/                   # Frontend React + Vite application
-│   ├── src/                  # React components, hooks, contexts, and styles
-│   ├── index.html            # Vite entry HTML
-│   ├── package.json          # Frontend dependencies and scripts
-│   ├── tsconfig.json         # Frontend TypeScript configuration
-│   └── vite.config.ts        # Vite configuration & dev proxy
-├── server/                   # Backend Express application
-│   ├── src/                  # Express routes, Joplin client proxy, controllers
-│   ├── package.json          # Backend dependencies and scripts
-│   └── tsconfig.json         # Backend TypeScript configuration
-├── docker/
-│   └── Dockerfile            # Multi-stage production Docker build
-├── .env.example              # Template for environment variables
-├── .env                      # Local environment configuration (gitignored)
-├── .gitignore                # Comprehensive Git ignore rules
-├── docker-compose.yml        # Docker Compose deployment setup
-├── LICENSE                   # MIT License
-└── README.md                 # Project documentation
-```
-
----
-
-## Quick Start (Development)
-
-### Prerequisites
-- [Node.js](https://nodejs.org/) (version 20 or higher recommended)
-- `npm` (version 9 or higher)
-
-### 1. Configure Environment
-Clone the repository and copy the environment template:
 ```bash
-cp .env.example .env
-```
-Edit `.env` with your Joplin Server instance URL:
-```env
-JOPLIN_SERVER_URL=https://notes.your-domain.com
-PORT=3001
-CORS_ORIGIN=http://localhost:5173
-NODE_ENV=development
+git clone https://github.com/KamiNeko/joplin-web.git
+cd joplin-web
+cp .env.example .env    # then set JOPLIN_SERVER_URL in .env
+docker compose up -d --build
 ```
 
-### 2. Start the Backend Server
+Open `http://localhost:3001` and sign in with your Joplin Server account.
+
+> [!IMPORTANT]
+> Your Joplin password passes through Joplin Web on its way to your Joplin Server. Put Joplin Web behind a reverse proxy with **HTTPS** (Caddy, Traefik, nginx, …) before you use it outside your home network.
+
+<details>
+<summary>Without Docker Compose</summary>
+
 ```bash
-cd server
-npm install
-npm run dev
+docker build -t joplin-web -f docker/Dockerfile .
+docker run -d --name joplin-web -p 3001:3001 \
+  -e JOPLIN_SERVER_URL=https://notes.example.com \
+  --restart unless-stopped joplin-web
 ```
-The backend API server will start on `http://localhost:3001`.
 
-### 3. Start the Frontend Development Client
-In a separate terminal window:
+</details>
+
+### Configuration
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `JOPLIN_SERVER_URL` | *(required)* | Base URL of your Joplin Server, e.g. `https://notes.example.com`. |
+| `PORT` | `3001` | Port Joplin Web listens on. |
+| `CORS_ORIGIN` | `http://localhost:5173` | Allowed origins for API calls (comma-separated). Only needed when the UI is served from another origin. |
+| `CACHE_TTL_MS` | `30000` | How long the note cache is used before it is re-synced with Joplin Server. |
+| `AUTH_CACHE_TTL_MS` | `300000` | How long a validated session is trusted before it is checked again. |
+
+### Try it without a Joplin Server
+
+Want to look around first? The demo mode starts a built-in mock Joplin Server with sample notes. It needs Node.js 20+:
+
 ```bash
-cd client
-npm install
-npm run dev
+npm --prefix server install && npm --prefix client install
+npm --prefix server run demo     # terminal 1
+npm --prefix client run dev      # terminal 2
 ```
-The frontend Vite server will start on `http://localhost:5173` with Hot Module Replacement (HMR).
 
----
+Open `http://localhost:5173` and sign in with `demo@joplin-web.test` / `demo`. Everything stays in memory and disappears when you stop the demo.
 
-## Docker Deployment
+### Current limitations
 
-Joplin Web includes a multi-stage Dockerfile that compiles both the frontend and backend, serving everything from a single lightweight container.
+- **End-to-end encrypted (E2EE) notes are not supported.** Encrypted items can't be read or edited.
+- Joplin Web is built and tested against self-hosted Joplin Server. Joplin Cloud is untested.
+- Note history (revisions) and plugins are not available.
 
-### Using Docker Compose (Recommended)
+## How it works
 
-1. Ensure `.env` is configured in the root directory.
-2. Build and start the container:
-   ```bash
-   docker compose up -d --build
-   ```
-3. Check container status:
-   ```bash
-   docker compose ps
-   ```
-4. Access Joplin Web in your browser at `http://localhost:3001`.
+Joplin Server is a *sync target*. It stores your notes as raw files in Joplin's own text format, and it has no regular REST API for notes. Joplin Web adds a small backend that speaks this sync protocol for you:
 
-To stop the service:
+```mermaid
+flowchart LR
+    Browser["🌐 Browser<br/>React app"] -- "JSON REST API<br/>/api/*" --> Backend["⚙️ Joplin Web backend<br/>Express · cache · serializer"]
+    Backend -- "Joplin sync protocol<br/>/api/sessions, /api/items/*" --> Joplin["🗄️ Your Joplin Server"]
+```
+
+1. **Sign-in.** The backend opens a session on your Joplin Server with your credentials and returns the session token to the browser. Passwords are never stored.
+2. **Reading.** The backend lists all items on Joplin Server, parses notes, notebooks, tags and attachments, and keeps them in a short-lived in-memory cache per session. Only changed items are fetched again.
+3. **Writing.** Edits are serialized back into Joplin's format, keeping every property Joplin desktop expects, and uploaded. Your other Joplin apps pick them up on their next sync.
+
+The production build is a single container: the backend serves the compiled React app and the API on the same port. More detail is in [docs/architecture.md](docs/architecture.md).
+
+## Contributing
+
+Contributions are welcome: bug reports, ideas and pull requests.
+
+**Tech stack:** React 18, TypeScript, Vite, Tailwind CSS, shadcn/ui, TanStack Query and CodeMirror 6 on the frontend; Node.js 20, Express and TypeScript on the backend.
+
+```text
+client/   React single-page app (Vite)
+server/   Express backend: auth, cache, Joplin serializer, REST API
+  demo/   Mock Joplin Server + sample notes (demo mode & tests)
+  test/   Serializer and API tests (Node test runner)
+docker/   Production Dockerfile
+docs/     Architecture notes and screenshots
+```
+
+### Development setup
+
 ```bash
-docker compose down
+cp .env.example server/.env              # point JOPLIN_SERVER_URL at a test server
+npm --prefix server install && npm --prefix server run dev   # API on :3001
+npm --prefix client install && npm --prefix client run dev   # UI on :5173
 ```
 
-### Using Plain Docker
+No test server at hand? Use `npm --prefix server run demo` instead of `run dev`.
 
-1. Build the production image:
-   ```bash
-   docker build -t joplin-web -f docker/Dockerfile .
-   ```
-2. Run the container:
-   ```bash
-   docker run -d \
-     --name joplin-web \
-     -p 3001:3001 \
-     -e JOPLIN_SERVER_URL=https://notes.your-domain.com \
-     -e PORT=3001 \
-     -e NODE_ENV=production \
-     --restart unless-stopped \
-     joplin-web
-   ```
+### Before opening a pull request
 
----
+```bash
+npm --prefix server run typecheck && npm --prefix server test
+npm --prefix client run lint && npm --prefix client run build
+```
 
-## Environment Variables
+CI runs the same checks and also builds the Docker image. If your change affects the UI, refresh the screenshots with `npm --prefix client run screenshots` while the demo is running.
 
-| Variable | Required | Default | Description |
-| :--- | :---: | :---: | :--- |
-| `JOPLIN_SERVER_URL` | **Yes** | — | Base URL of your Joplin Server or Joplin Cloud instance (e.g., `https://notes.example.com`). |
-| `PORT` | No | `3001` | Network port for the Express application server. |
-| `CORS_ORIGIN` | No | `http://localhost:5173` | Allowed origin for Cross-Origin Resource Sharing during development. |
-| `NODE_ENV` | No | `development` | Runtime mode: `development` or `production`. In production, static assets from `client/dist` are served directly. |
+**Never run tests or experiments against a Joplin Server that holds real notes.** The demo server exists so you don't have to.
 
----
+### Working with AI assistants
+
+The repository ships with context for [Claude Code](https://claude.com/claude-code): [`CLAUDE.md`](CLAUDE.md) describes the architecture and conventions, and [`.claude/agents/`](.claude/agents) has specialized agents for testing, documentation, refactoring, reviews, UI/UX, security, deployment and the Joplin sync protocol.
 
 ## License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+[MIT](LICENSE)

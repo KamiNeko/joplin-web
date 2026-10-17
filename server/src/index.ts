@@ -107,7 +107,7 @@ if (fs.existsSync(config.clientDistPath)) {
 app.use(errorHandler);
 
 // Start server
-const server = app.listen(config.port, () => {
+export const server = app.listen(config.port, () => {
   console.log('====================================================');
   console.log(` Joplin Web Backend Server running on port ${config.port}`);
   console.log(` Mode: ${config.nodeEnv}`);

@@ -264,6 +264,9 @@ export function stripMarkdown(markdown?: string, maxChars = 150): string {
     .replace(/(\*|_)(.*?)\1/g, '$2')
     // Remove strikethrough
     .replace(/~~(.*?)~~/g, '$1')
+    // Remove table separator rows (| --- | :---: |) and the remaining cell pipes
+    .replace(/^\s*\|?(\s*:?-{3,}:?\s*\|)+\s*:?-*:?\s*$/gm, '')
+    .replace(/\s*\|\s*/g, ' ')
     // Remove HTML tags
     .replace(/<[^>]+>/g, '')
     // Collapse consecutive whitespaces and newlines into single spaces

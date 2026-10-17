@@ -8,8 +8,9 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "tsx test/api.test.ts",
-    "test:unit": "tsx test/serializer.test.ts"
+    "demo": "tsx demo/run-demo.ts",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json"
   },
   "keywords": [
     "joplin",
