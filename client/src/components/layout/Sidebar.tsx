@@ -1,0 +1,223 @@
+import { useNotebooks } from "@/hooks/use-notebooks";
+import { useTags } from "@/hooks/use-tags";
+import { NotebookTree } from "@/components/notebooks/NotebookTree";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import {
+  BookOpen,
+  Files,
+  Hash,
+  Search,
+  X,
+  FolderTree,
+} from "lucide-react";
+import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+
+interface SidebarProps {
+  selectedNotebookId?: string | null;
+  selectedTagId?: string | null;
+  isAllNotesSelected?: boolean;
+  onSelectAllNotes: () => void;
+  onSelectNotebook: (id: string) => void;
+  onSelectTag: (id: string) => void;
+  searchQuery: string;
+  onSearchChange: (query: string) => void;
+  onCloseMobile?: () => void;
+  className?: string;
+}
+
+export function Sidebar({
+  selectedNotebookId,
+  selectedTagId,
+  isAllNotesSelected,
+  onSelectAllNotes,
+  onSelectNotebook,
+  onSelectTag,
+  searchQuery,
+  onSearchChange,
+  onCloseMobile,
+  className,
+}: SidebarProps) {
+  const { data: notebooks, isLoading: isLoadingNotebooks } = useNotebooks();
+  const { data: tags, isLoading: isLoadingTags } = useTags();
+
+  return (
+    <aside
+      className={cn(
+        "flex flex-col h-full w-full bg-[#0a0e1a]/95 dark:bg-[#070b14]/95 text-sidebar-foreground border-r border-border/40 select-none",
+        className
+      )}
+    >
+      {/* Brand & App Logo */}
+      <div className="flex items-center justify-between px-4 py-3.5 border-b border-border/40">
+        <div className="flex items-center gap-2.5">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary/15 text-primary border border-primary/25 shadow-sm">
+            <BookOpen className="h-5 w-5" />
+          </div>
+          <div>
+            <h1 className="text-sm font-bold text-foreground tracking-tight">
+              Joplin Web
+            </h1>
+            <span className="text-[10px] text-muted-foreground font-mono">
+              v1.0 &bull; Synced
+            </span>
+          </div>
+        </div>
+
+        {onCloseMobile && (
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onCloseMobile}
+            className="md:hidden h-8 w-8 text-muted-foreground hover:text-foreground"
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        )}
+      </div>
+
+      {/* Search Input Bar */}
+      <div className="p-3 border-b border-border/30">
+        <div className="relative">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+          <Input
+            type="text"
+            placeholder="Search notes... (Ctrl+K)"
+            value={searchQuery}
+            onChange={(e) => onSearchChange(e.target.value)}
+            className="h-8 pl-8 pr-7 text-xs bg-muted/30 border-border/40 focus-visible:ring-primary/80"
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => onSearchChange("")}
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded text-muted-foreground hover:text-foreground"
+              aria-label="Clear search text"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Navigable Sidebar Items */}
+      <ScrollArea className="flex-1 px-3 py-2">
+        <div className="space-y-5">
+          {/* Main Views */}
+          <div className="space-y-1">
+            <button
+              type="button"
+              onClick={onSelectAllNotes}
+              className={cn(
+                "w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm transition-all duration-150 font-medium",
+                isAllNotesSelected
+                  ? "bg-primary text-primary-foreground shadow-sm shadow-primary/30"
+                  : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <Files className="h-4 w-4" />
+                <span>All Notes</span>
+              </div>
+            </button>
+          </div>
+
+          {/* Notebooks Section */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between px-2 text-[11px] font-semibold text-muted-foreground/80 uppercase tracking-wider">
+              <span className="flex items-center gap-1.5">
+                <FolderTree className="h-3 w-3" />
+                Notebooks
+              </span>
+            </div>
+
+            {isLoadingNotebooks ? (
+              <div className="space-y-2 px-2 py-1">
+                <Skeleton className="h-4 w-3/4" />
+                <Skeleton className="h-4 w-5/6" />
+                <Skeleton className="h-4 w-2/3" />
+              </div>
+            ) : (
+              <NotebookTree
+                notebooks={notebooks || []}
+                selectedNotebookId={selectedNotebookId}
+                onSelectNotebook={onSelectNotebook}
+              />
+            )}
+          </div>
+
+          {/* Tags Section */}
+          <div className="space-y-1.5 pt-2">
+            <div className="flex items-center justify-between px-2 text-[11px] font-semibold text-muted-foreground/80 uppercase tracking-wider">
+              <span className="flex items-center gap-1.5">
+                <Hash className="h-3 w-3" />
+                Tags
+              </span>
+              {tags && tags.length > 0 && (
+                <span className="text-[10px] text-muted-foreground font-mono">
+                  {tags.length}
+                </span>
+              )}
+            </div>
+
+            {isLoadingTags ? (
+              <div className="space-y-2 px-2 py-1">
+                <Skeleton className="h-4 w-1/2" />
+                <Skeleton className="h-4 w-2/3" />
+              </div>
+            ) : !tags || tags.length === 0 ? (
+              <div className="px-2 py-1 text-xs text-muted-foreground/60 italic">
+                No tags
+              </div>
+            ) : (
+              <div className="space-y-0.5">
+                {tags.map((tag) => {
+                  const isSelected = selectedTagId === tag.id;
+                  return (
+                    <button
+                      key={tag.id}
+                      type="button"
+                      onClick={() => onSelectTag(tag.id)}
+                      className={cn(
+                        "w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm transition-all duration-150",
+                        isSelected
+                          ? "bg-primary/15 text-primary font-medium"
+                          : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                      )}
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Hash
+                          className={cn(
+                            "h-3.5 w-3.5 shrink-0",
+                            isSelected ? "text-primary" : "text-muted-foreground"
+                          )}
+                        />
+                        <span className="truncate">{tag.title}</span>
+                      </div>
+                      {typeof tag.noteCount === "number" && (
+                        <Badge
+                          variant="secondary"
+                          className={cn(
+                            "px-1.5 py-0 text-[10px] font-mono h-4 min-w-[18px] flex items-center justify-center",
+                            isSelected
+                              ? "bg-primary/20 text-primary border-primary/30"
+                              : "bg-muted text-muted-foreground"
+                          )}
+                        >
+                          {tag.noteCount}
+                        </Badge>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      </ScrollArea>
+    </aside>
+  );
+}
