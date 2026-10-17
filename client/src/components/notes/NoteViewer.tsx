@@ -3,7 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Note, Notebook } from "@/lib/types";
 import { flattenNotebooks } from "@/lib/notebooks";
-import { setTaskChecked } from "@/lib/tasks";
+import { setTaskChecked, type TaskLocation } from "@/lib/tasks";
 import { getConflictNote, updateNote as updateNoteRequest } from "@/lib/api";
 import { MarkdownRenderer } from "@/components/common/MarkdownRenderer";
 import { ConfirmDialog } from "@/components/common/Dialogs";
@@ -477,11 +477,11 @@ function useTaskToggle(noteId: string | undefined) {
 
   saveRef.current = save;
 
-  return (index: number, checked: boolean) => {
+  return (location: TaskLocation, checked: boolean) => {
     if (!noteId) return;
     const cached = queryClient.getQueryData<Note>(["note", noteId]);
     if (!cached) return;
-    const body = setTaskChecked(cached.body, index, checked);
+    const body = setTaskChecked(cached.body, location, checked);
     if (body === null) return;
     queryClient.setQueryData<Note>(["note", noteId], { ...cached, body });
     if (timerRef.current !== null) window.clearTimeout(timerRef.current);

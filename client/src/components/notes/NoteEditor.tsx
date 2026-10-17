@@ -415,8 +415,11 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
               {deferredBody.trim() ? (
                 <MarkdownRenderer
                   content={deferredBody}
-                  onToggleTask={(index, checked) => {
-                    const body = setTaskChecked(draftRef.current.body, index, checked);
+                  onToggleTask={(location, checked) => {
+                    // The location refers to the rendered text; ignore clicks on a preview that
+                    // hasn't caught up with the latest typing yet
+                    if (deferredBody !== draftRef.current.body) return;
+                    const body = setTaskChecked(draftRef.current.body, location, checked);
                     if (body !== null) updateDraft({ body });
                   }}
                 />
