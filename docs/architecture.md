@@ -42,6 +42,7 @@ In production the backend also serves the compiled client (`client/dist`) on the
 | `GET /api/items/root:/:/children?cursor=` | Paginated listing of all items (`{ items, has_more, cursor }`) |
 | `GET /api/items/root:/<id>.md:/content` | Raw item text |
 | `GET /api/items/root:/.resource/<id>:/content` | Attachment binary |
+| `GET /api/items/root:/info.json:/content` | Sync target info (E2EE state), read before every write; 404 means none yet |
 | `PUT /api/items/root:/<name>:/content` | Create or replace an item (multipart, field `file`) |
 | `DELETE /api/items/root:/<name>:` | Delete an item |
 
@@ -64,8 +65,9 @@ is_todo: 0
 type_: 1
 ```
 
-- Properties are parsed **bottom-up** until the first blank line; line 1 above it is the title, the rest (after one blank line) is the body.
-- Newlines in property values are escaped as `\n`.
+- Properties are parsed **bottom-up** until the first blank line; line 1 above it is the title, the rest (after one blank line) is the body. Property order is kept on a round trip.
+- Like Joplin's `BaseItem.unserialize`, content is split on `\n` only: a `\r` in the body (CRLF line endings) is part of the text and is written back unchanged. Only property lines are trimmed.
+- Newlines in property values are escaped as `\n`, with Joplin's exact escape/unescape chain. That format cannot tell a backslash followed by a real newline from a literal `\n`; Joplin has the same limitation (#55), and matching it keeps values read identically by all clients.
 - Notes reference attachments as `![alt](:/<resourceId>)` and other notes as `[text](:/<noteId>)`; the client resolves these to `/api/resources/:id` and in-app links.
 
 ### Write rules
@@ -74,10 +76,12 @@ type_: 1
 - Updates start from the item's **original property set** and change only the edited fields plus `updated_time` / `user_updated_time`. Unknown properties round-trip untouched.
 - New items get the full default property set Joplin desktop writes (32-hex id, `markup_language: 1`, `source: joplin-web`, …).
 - Ids in paths are validated against `^[0-9a-f]{32}$` before any request is made.
-- Encrypted items (`encryption_applied: 1`) are rejected for writing.
+- **E2EE:** Joplin Web cannot encrypt. Before every write it reads `info.json`; if `e2ee.value` is true (or the file is unreadable) the write is refused with `422`, so nothing is uploaded in plaintext to an encrypted account. Encrypted items (`encryption_applied: 1`) are refused as well, as targets too: no notes or sub-notebooks in an encrypted notebook, no links to an encrypted tag.
+- Target notebooks (create, move) are re-read from Joplin Server, so one trashed or deleted elsewhere is refused even while the cache still shows it. A note in the trash (or in a trashed notebook) cannot be tagged.
 - **Conflicts:** writes carry the `baseUpdatedTime` the editor started from; the writer re-reads the item and answers `409` with the current version if it changed. The UI offers *Overwrite* (`force: true`) or *Load theirs*.
-- **Trash:** deleting sets `deleted_time`. Trashing a notebook also trashes its sub-notebooks and their notes; restoring a note restores its trashed parent notebooks. Permanent deletion also removes note–tag links.
-- After each write the cache is updated immediately, so lists reflect the change without waiting for the TTL.
+- **Trash:** deleting sets `deleted_time`. Trashing a notebook also trashes its sub-notebooks and their notes; restoring a note restores its trashed parent notebooks. Cascades read every affected item first and write only if all pass (no encrypted item), so they never stop halfway on such an item.
+- **Permanent deletion** only applies to items in the trash, like Joplin's *Delete permanently*. A note is re-read and must be a note (not a notebook, tag or resource), not encrypted, and trashed itself or inside a trashed notebook. Purging a notebook refreshes the cache and re-reads each item, so notes another client moved out are kept. Note–tag links are removed too.
+- After each write the cache is updated immediately, so lists reflect the change without waiting for the TTL. Written items get a negative "local write" timestamp, so the next refresh re-reads them and removes them if another client deleted them meanwhile.
 
 ## REST API (backend → browser)
 

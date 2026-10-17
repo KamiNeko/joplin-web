@@ -168,6 +168,7 @@ describe('writing', () => {
     assert.ok((await api(`/api/notes/${noteId}`)).data.deletedTime > 0);
     assert.equal((await api(`/api/notes/${noteId}/restore`, { method: 'POST' })).status, 200);
     assert.equal((await api(`/api/notes/${noteId}`)).data.deletedTime, 0);
+    assert.equal((await api(`/api/notes/${noteId}`, { method: 'DELETE' })).status, 204); // only trashed notes can be purged
     assert.equal((await api(`/api/notes/${noteId}?permanent=true`, { method: 'DELETE' })).status, 204);
     assert.ok(!mock.items.has(`${noteId}.md`));
   });

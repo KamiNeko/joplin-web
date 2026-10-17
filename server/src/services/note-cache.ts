@@ -13,6 +13,13 @@ import {
   TagItem,
 } from '../types/index.js';
 
+/**
+ * Items written by Joplin Web are recorded with a negative timestamp (minus the write time).
+ * It never matches a server timestamp, so the next refresh re-reads the item, and it keeps the
+ * item in the removal check, so an item deleted on the server afterwards does not stay as a ghost.
+ */
+const localWriteMarker = (now = Date.now()): number => -now;
+
 export interface CacheEntry {
   lastFetched: number;
   fetchPromise: Promise<void> | null;
@@ -89,6 +96,7 @@ export class NoteCacheService {
     const startTime = Date.now();
 
     // 1. Fetch listing of all items from Joplin Server
+    const listingStartedAt = Date.now();
     const childItems = await joplinApi.listAllItems(sessionId);
     const currentItemNames = new Set<string>();
 
@@ -107,8 +115,10 @@ export class NoteCacheService {
     }
 
     // Remove deleted items from the local cache
-    for (const [name] of entry.itemTimestamps) {
-      if (!currentItemNames.has(name)) {
+    for (const [name, timestamp] of entry.itemTimestamps) {
+      // Written by Joplin Web while the listing was loading, so it may be missing from it
+      const writtenDuringListing = timestamp < 0 && -timestamp > listingStartedAt;
+      if (!currentItemNames.has(name) && !writtenDuringListing) {
         const id = name.replace(/\.md$/i, '');
         entry.itemTimestamps.delete(name);
         entry.notebooks.delete(id);
@@ -212,12 +222,13 @@ export class NoteCacheService {
 
   /**
    * Inserts or replaces an item after it was written to Joplin Server, so reads reflect
-   * the change immediately. The stored sync timestamp is dropped so the next refresh
-   * re-reads the item from the server.
+   * the change immediately. The stored sync timestamp is replaced by a local-write marker
+   * (see `localWriteMarker`): the next refresh re-reads the item, and still removes it if it was
+   * deleted on the server in the meantime.
    */
   public upsertItem(sessionId: string, item: RawJoplinItem): void {
     const entry = this.getOrCreateEntry(sessionId);
-    entry.itemTimestamps.delete(`${item.id}.md`);
+    entry.itemTimestamps.set(`${item.id}.md`, localWriteMarker());
     if (item.type_ === JoplinItemType.Note) {
       entry.notes.set(item.id, item);
     } else if (item.type_ === JoplinItemType.Folder) {
