@@ -1,59 +1,25 @@
 import assert from 'node:assert/strict';
-import { createServer, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { after, before, describe, test } from 'node:test';
-import { startMockJoplinServer, type MockJoplinServer } from '../demo/mock-joplin-server.js';
-import { buildDemoItems, DEMO_EMAIL, DEMO_PASSWORD, demoId } from '../demo/seed.js';
+import type { MockJoplinServer } from '../demo/mock-joplin-server.js';
+import { DEMO_EMAIL, DEMO_PASSWORD, demoId } from '../demo/seed.js';
+import { startTestApp, type TestApp } from './helpers.js';
 
 /**
  * End-to-end tests of the Express API against the in-memory mock Joplin Server (no network access).
  */
 
-async function freePort(): Promise<number> {
-  const probe = createServer();
-  await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve));
-  const { port } = probe.address() as AddressInfo;
-  await new Promise((resolve) => probe.close(resolve));
-  return port;
-}
-
+let app: TestApp;
 let mock: MockJoplinServer;
-let server: Server;
-let baseUrl: string;
 let session: string;
 
-async function api(path: string, init: RequestInit = {}, auth = true) {
-  const headers = new Headers(init.headers);
-  if (auth && session) headers.set('Authorization', `Bearer ${session}`);
-  if (init.body && typeof init.body === 'string') headers.set('Content-Type', 'application/json');
-  const res = await fetch(`${baseUrl}${path}`, { ...init, headers });
-  const text = await res.text();
-  let data: any = text;
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    // binary or plain text response
-  }
-  return { status: res.status, data, headers: res.headers };
-}
+const api = (path: string, init: RequestInit = {}, auth = true) => app.api(path, init, auth);
 
 before(async () => {
-  mock = await startMockJoplinServer({ email: DEMO_EMAIL, password: DEMO_PASSWORD, items: buildDemoItems(), pageSize: 7 });
-  const port = await freePort();
-  // Must be set before the backend's config module is loaded
-  process.env.JOPLIN_SERVER_URL = mock.url;
-  process.env.PORT = String(port);
-  process.env.CACHE_TTL_MS = '0';
-  baseUrl = `http://127.0.0.1:${port}`;
-  ({ server } = await import('../src/index.js'));
-  if (!server.listening) await new Promise((resolve) => server.once('listening', resolve));
+  app = await startTestApp({ pageSize: 7 });
+  mock = app.mock;
 });
 
-after(async () => {
-  server.closeAllConnections();
-  await new Promise((resolve) => server.close(resolve));
-  await mock.close();
-});
+after(() => app.close());
 
 describe('auth', () => {
   test('health check is public', async () => {
@@ -76,7 +42,7 @@ describe('auth', () => {
     const res = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: DEMO_EMAIL, password: DEMO_PASSWORD }) }, false);
     assert.equal(res.status, 200);
     assert.ok(res.data.sessionId);
-    session = res.data.sessionId;
+    session = app.session = res.data.sessionId;
     assert.equal((await api('/api/auth/check')).status, 200);
   });
 });
