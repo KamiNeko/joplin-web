@@ -318,6 +318,26 @@ export class JoplinApiService {
       this.handleError(error, `createOrUpdateItem(${itemName})`);
     }
   }
+
+  /**
+   * Permanently deletes a raw item from Joplin Server. Missing items are treated as already deleted.
+   *
+   * @param sessionId Active session ID
+   * @param itemName Name of the file (e.g. "<id>.md")
+   */
+  public async deleteItem(sessionId: string, itemName: string): Promise<void> {
+    try {
+      const cleanName = itemName.endsWith('.md') ? itemName : `${itemName}.md`;
+      await this.client.delete(`/api/items/root:/${encodeURIComponent(cleanName)}:`, {
+        headers: { 'X-API-AUTH': sessionId },
+      });
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        return;
+      }
+      this.handleError(error, `deleteItem(${itemName})`);
+    }
+  }
 }
 
 // Export singleton instance

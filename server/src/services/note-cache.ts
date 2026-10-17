@@ -13,7 +13,7 @@ import {
   TagItem,
 } from '../types/index.js';
 
-interface CacheEntry {
+export interface CacheEntry {
   lastFetched: number;
   fetchPromise: Promise<void> | null;
   notebooks: Map<string, RawJoplinItem>;
@@ -204,6 +204,41 @@ export class NoteCacheService {
   }
 
   /**
+   * Returns the (fresh) cache entry for direct read access by the write service
+   */
+  public async getEntry(sessionId: string): Promise<CacheEntry> {
+    return this.ensureFresh(sessionId);
+  }
+
+  /**
+   * Inserts or replaces an item after it was written to Joplin Server, so reads reflect
+   * the change immediately. The stored sync timestamp is dropped so the next refresh
+   * re-reads the item from the server.
+   */
+  public upsertItem(sessionId: string, item: RawJoplinItem): void {
+    const entry = this.getOrCreateEntry(sessionId);
+    entry.itemTimestamps.delete(`${item.id}.md`);
+    if (item.type_ === JoplinItemType.Note) {
+      entry.notes.set(item.id, item);
+    } else if (item.type_ === JoplinItemType.Folder) {
+      entry.notebooks.set(item.id, item);
+    }
+  }
+
+  /**
+   * Removes an item that was permanently deleted from Joplin Server
+   */
+  public removeItem(sessionId: string, id: string): void {
+    const entry = this.getOrCreateEntry(sessionId);
+    entry.itemTimestamps.delete(`${id}.md`);
+    entry.notebooks.delete(id);
+    entry.notes.delete(id);
+    entry.tags.delete(id);
+    entry.resources.delete(id);
+    entry.noteTags = entry.noteTags.filter((link) => link.id !== id);
+  }
+
+  /**
    * Builds and returns the nested notebook tree (excluding deleted notebooks)
    */
   public async getNotebooks(sessionId: string): Promise<Notebook[]> {
@@ -322,7 +357,7 @@ export class NoteCacheService {
     // Map to NoteListItem
     return matchingNotes.map((n) => ({
       id: n.id,
-      title: n.title || 'Untitled Note',
+      title: n.title,
       parentId: n.parentId || '',
       createdTime: n.createdTime,
       updatedTime: n.updatedTime,
@@ -372,7 +407,7 @@ export class NoteCacheService {
 
     return {
       id: note.id,
-      title: note.title || 'Untitled Note',
+      title: note.title,
       body: note.body,
       parentId: note.parentId || '',
       notebook,
@@ -380,6 +415,8 @@ export class NoteCacheService {
       createdTime: note.createdTime,
       updatedTime: note.updatedTime,
       deletedTime: effectiveDeletedTime,
+      notebookId: note.parentId || '',
+      notebookTitle: notebook?.title || '',
       isTodo: note.isTodo,
       todoCompleted: Boolean(note.todoCompleted),
       todoDue: note.todoDue,
@@ -484,7 +521,7 @@ export class NoteCacheService {
 
         results.push({
           id: note.id,
-          title: title || 'Untitled Note',
+          title,
           parentId: note.parentId || '',
           createdTime: note.createdTime,
           updatedTime: note.updatedTime,

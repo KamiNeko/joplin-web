@@ -1,38 +1,79 @@
-import { Note } from "@/lib/types";
+import { useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { Note, Notebook } from "@/lib/types";
+import { flattenNotebooks } from "@/lib/notebooks";
+import { setTaskChecked } from "@/lib/tasks";
+import { getConflictNote, updateNote as updateNoteRequest } from "@/lib/api";
 import { MarkdownRenderer } from "@/components/common/MarkdownRenderer";
+import { ConfirmDialog } from "@/components/common/Dialogs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   Calendar,
   Clock,
   Folder,
+  FolderInput,
   Tag as TagIcon,
   CheckCircle2,
+  Circle,
   AlertCircle,
   FileText,
+  MoreHorizontal,
+  PencilLine,
+  RotateCcw,
+  Trash2,
   X,
 } from "lucide-react";
 import { formatRelativeTime } from "./NoteListItem";
+import { NoteEditor } from "./NoteEditor";
 import { Button } from "@/components/ui/button";
+import { invalidateLists, useDeleteNote, useRestoreNote, useUpdateNote } from "@/hooks/use-mutations";
+import { cn } from "@/lib/utils";
 
 interface NoteViewerProps {
   note?: Note | null;
   isLoading?: boolean;
   error?: Error | null;
+  notebooks?: Notebook[];
+  /** Open the note directly in the editor (e.g. right after creating it) */
+  startInEdit?: boolean;
   onTagClick?: (tagId: string) => void;
   onNotebookClick?: (notebookId: string) => void;
   onClose?: () => void;
+  /** Called after the note was moved to the trash or deleted permanently */
+  onRemoved?: () => void;
 }
 
 export function NoteViewer({
   note,
   isLoading = false,
   error = null,
+  notebooks,
+  startInEdit = false,
   onTagClick,
   onNotebookClick,
   onClose,
+  onRemoved,
 }: NoteViewerProps) {
+  const [isEditing, setIsEditing] = useState(startInEdit);
+  const [confirmPurge, setConfirmPurge] = useState(false);
+  const updateNote = useUpdateNote();
+  const deleteNote = useDeleteNote();
+  const restoreNote = useRestoreNote();
+  const toggleTask = useTaskToggle(note?.id);
+
   if (isLoading) {
     return (
       <div className="flex flex-col h-full bg-background p-6 lg:p-8 space-y-6">
@@ -78,12 +119,14 @@ export function NoteViewer({
         </div>
         <h3 className="text-lg font-semibold text-foreground">No note selected</h3>
         <p className="text-xs text-muted-foreground mt-1 max-w-xs leading-relaxed">
-          Select a note from the list on the left to read its contents or switch notebooks.
+          Select a note from the list or create a new one.
         </p>
       </div>
     );
   }
 
+  const isTrashed = Boolean(note.deletedTime && note.deletedTime > 0);
+  const editing = isEditing && !isTrashed;
   const updatedRelative = formatRelativeTime(note.updatedTime);
   const createdDate = note.createdTime
     ? new Date(
@@ -94,13 +137,67 @@ export function NoteViewer({
         day: "numeric",
       })
     : null;
+  const flatNotebooks = flattenNotebooks(notebooks);
+
+  const handleToggleTodo = () => {
+    updateNote.mutate(
+      { id: note.id, changes: { todoCompleted: !note.todoCompleted } },
+      { onError: (err) => toast.error("Could not update to-do", { description: err.message }) }
+    );
+  };
+
+  const handleMove = (notebookId: string, title: string) => {
+    updateNote.mutate(
+      { id: note.id, changes: { parentId: notebookId } },
+      {
+        onSuccess: () => toast.success(`Moved to "${title}"`),
+        onError: (err) => toast.error("Could not move note", { description: err.message }),
+      }
+    );
+  };
+
+  const handleTrash = () => {
+    const noteId = note.id;
+    deleteNote.mutate(
+      { id: noteId },
+      {
+        onSuccess: () => {
+          toast.success("Note moved to trash", {
+            action: { label: "Undo", onClick: () => restoreNote.mutate(noteId) },
+          });
+          onRemoved?.();
+        },
+        onError: (err) => toast.error("Could not move note to trash", { description: err.message }),
+      }
+    );
+  };
+
+  const handleRestore = () => {
+    restoreNote.mutate(note.id, {
+      onSuccess: () => toast.success("Note restored"),
+      onError: (err) => toast.error("Could not restore note", { description: err.message }),
+    });
+  };
+
+  const handlePurge = () => {
+    deleteNote.mutate(
+      { id: note.id, permanent: true },
+      {
+        onSuccess: () => {
+          setConfirmPurge(false);
+          toast.success("Note deleted permanently");
+          onRemoved?.();
+        },
+        onError: (err) => toast.error("Could not delete note", { description: err.message }),
+      }
+    );
+  };
 
   return (
     <div className="flex flex-col h-full bg-background relative overflow-hidden">
-      {/* Top Mobile/Header Bar */}
-      <div className="px-6 py-4 border-b border-border/40 flex items-center justify-between gap-3 bg-background/80 backdrop-blur-sm z-10">
+      {/* Header bar */}
+      <div className="px-4 sm:px-6 py-3 border-b border-border/40 flex items-center justify-between gap-3 bg-background/80 backdrop-blur-sm z-10">
         <div className="flex flex-wrap items-center gap-2 min-w-0">
-          {/* Notebook badge */}
           {note.notebookTitle && (
             <button
               type="button"
@@ -112,23 +209,25 @@ export function NoteViewer({
             </button>
           )}
 
-          {/* Todo status badge if applicable */}
           {note.isTodo && (
-            <Badge
-              variant={note.todoCompleted ? "secondary" : "outline"}
-              className={`text-xs gap-1 ${
+            <button
+              type="button"
+              onClick={handleToggleTodo}
+              disabled={isTrashed || updateNote.isPending}
+              title={note.todoCompleted ? "Mark as not done" : "Mark as done"}
+              className={cn(
+                "inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors disabled:opacity-60",
                 note.todoCompleted
-                  ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
-                  : "bg-amber-500/10 text-amber-400 border-amber-500/30"
-              }`}
+                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/20"
+                  : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30 hover:bg-amber-500/20"
+              )}
             >
-              <CheckCircle2 className="h-3 w-3" />
-              {note.todoCompleted ? "Completed Task" : "Pending Task"}
-            </Badge>
+              {note.todoCompleted ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Circle className="h-3.5 w-3.5" />}
+              {note.todoCompleted ? "Done" : "To do"}
+            </button>
           )}
 
-          {/* In Trash badge if soft-deleted */}
-          {Boolean(note.deletedTime && note.deletedTime > 0) && (
+          {isTrashed && (
             <Badge
               variant="destructive"
               className="text-xs gap-1 bg-destructive/15 text-destructive border-destructive/30"
@@ -139,80 +238,262 @@ export function NoteViewer({
           )}
         </div>
 
-        {/* Close button for responsive mobile view */}
-        {onClose && (
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={onClose}
-            className="h-8 w-8 md:hidden text-muted-foreground hover:text-foreground"
-            aria-label="Close note view"
-          >
-            <X className="h-4 w-4" />
-          </Button>
-        )}
-      </div>
-
-      {/* Main Note Scroll Area */}
-      <ScrollArea className="flex-1 px-6 sm:px-10 lg:px-12 py-8">
-        <div className="max-w-4xl mx-auto space-y-6 pb-20">
-          {/* Trashed Banner */}
-          {Boolean(note.deletedTime && note.deletedTime > 0) && (
-            <div className="flex items-center gap-2.5 p-3.5 rounded-xl bg-destructive/10 border border-destructive/25 text-destructive text-xs">
-              <AlertCircle className="h-4 w-4 shrink-0" />
-              <span>
-                <strong>This note is in the trash.</strong> It was moved to trash in Joplin and is excluded from active notebooks.
-              </span>
-            </div>
+        <div className="flex items-center gap-1 shrink-0">
+          {isTrashed ? (
+            <>
+              <Button size="sm" variant="outline" className="h-8" onClick={handleRestore} disabled={restoreNote.isPending}>
+                <RotateCcw className="h-3.5 w-3.5" />
+                Restore
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-8 text-destructive hover:text-destructive hover:bg-destructive/10"
+                onClick={() => setConfirmPurge(true)}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Delete permanently</span>
+              </Button>
+            </>
+          ) : (
+            <>
+              {!editing && (
+                <Button size="sm" variant="outline" className="h-8" onClick={() => setIsEditing(true)}>
+                  <PencilLine className="h-3.5 w-3.5" />
+                  Edit
+                </Button>
+              )}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                    aria-label="More note actions"
+                  >
+                    <MoreHorizontal className="h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-52">
+                  <DropdownMenuSub>
+                    <DropdownMenuSubTrigger className="gap-2">
+                      <FolderInput className="h-4 w-4" />
+                      Move to notebook
+                    </DropdownMenuSubTrigger>
+                    <DropdownMenuSubContent className="max-h-80 overflow-y-auto w-56">
+                      {flatNotebooks.map((nb) => (
+                        <DropdownMenuItem
+                          key={nb.id}
+                          disabled={nb.id === note.notebookId}
+                          onClick={() => handleMove(nb.id, nb.title)}
+                          style={{ paddingLeft: `${8 + nb.depth * 12}px` }}
+                        >
+                          <Folder className="h-3.5 w-3.5 text-muted-foreground" />
+                          <span className="truncate">{nb.title}</span>
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuSubContent>
+                  </DropdownMenuSub>
+                  {note.isTodo && (
+                    <DropdownMenuItem onClick={handleToggleTodo}>
+                      {note.todoCompleted ? <Circle className="h-4 w-4" /> : <CheckCircle2 className="h-4 w-4" />}
+                      {note.todoCompleted ? "Mark as not done" : "Mark as done"}
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={handleTrash}
+                    className="text-destructive focus:text-destructive"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    Move to trash
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </>
           )}
 
-          {/* Note Title */}
-          <div className="space-y-3">
-            <h1 className="text-2xl sm:text-3xl lg:text-4xl font-extrabold tracking-tight text-foreground leading-tight">
-              {note.title || "Untitled Note"}
-            </h1>
+          {onClose && (
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={onClose}
+              className="h-8 w-8 md:hidden text-muted-foreground hover:text-foreground"
+              aria-label="Close note view"
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          )}
+        </div>
+      </div>
 
-            {/* Note Metadata Bar */}
-            <div className="flex flex-wrap items-center gap-y-2 gap-x-4 text-xs text-muted-foreground pt-1 border-b border-border/40 pb-4">
-              {updatedRelative && (
-                <div className="flex items-center gap-1.5">
-                  <Clock className="h-3.5 w-3.5" />
-                  <span>Updated {updatedRelative}</span>
-                </div>
-              )}
+      {editing ? (
+        <NoteEditor note={note} focusTitle={startInEdit && !note.title} onDone={() => setIsEditing(false)} />
+      ) : (
+        <ScrollArea className="flex-1 px-6 sm:px-10 lg:px-12 py-8">
+          <div className="max-w-4xl mx-auto space-y-6 pb-20">
+            {isTrashed && (
+              <div className="flex items-center gap-2.5 p-3.5 rounded-xl bg-destructive/10 border border-destructive/25 text-destructive text-xs">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <span>
+                  <strong>This note is in the trash.</strong> Restore it to edit it again, or delete it permanently.
+                </span>
+              </div>
+            )}
 
-              {createdDate && (
-                <div className="flex items-center gap-1.5">
-                  <Calendar className="h-3.5 w-3.5" />
-                  <span>Created {createdDate}</span>
-                </div>
-              )}
+            <div className="space-y-3">
+              <h1
+                className="text-2xl sm:text-3xl lg:text-4xl font-bold tracking-tight text-foreground leading-tight"
+                onDoubleClick={() => !isTrashed && setIsEditing(true)}
+              >
+                {note.title || "Untitled Note"}
+              </h1>
 
-              {/* Tags */}
-              {note.tags && note.tags.length > 0 && (
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <TagIcon className="h-3.5 w-3.5" />
-                  {note.tags.map((tag) => (
-                    <button
-                      key={tag.id}
-                      type="button"
-                      onClick={() => onTagClick?.(tag.id)}
-                      className="inline-flex items-center rounded-full bg-muted/60 hover:bg-muted text-muted-foreground hover:text-foreground px-2 py-0.5 text-[11px] font-medium transition-colors"
-                    >
-                      #{tag.title}
-                    </button>
-                  ))}
-                </div>
+              <div className="flex flex-wrap items-center gap-y-2 gap-x-4 text-xs text-muted-foreground pt-1 border-b border-border/40 pb-4">
+                {updatedRelative && (
+                  <div className="flex items-center gap-1.5">
+                    <Clock className="h-3.5 w-3.5" />
+                    <span>Updated {updatedRelative}</span>
+                  </div>
+                )}
+
+                {createdDate && (
+                  <div className="flex items-center gap-1.5">
+                    <Calendar className="h-3.5 w-3.5" />
+                    <span>Created {createdDate}</span>
+                  </div>
+                )}
+
+                {note.tags && note.tags.length > 0 && (
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <TagIcon className="h-3.5 w-3.5" />
+                    {note.tags.map((tag) => (
+                      <button
+                        key={tag.id}
+                        type="button"
+                        onClick={() => onTagClick?.(tag.id)}
+                        className="inline-flex items-center rounded-full bg-muted/60 hover:bg-muted text-muted-foreground hover:text-foreground px-2 py-0.5 text-[11px] font-medium transition-colors"
+                      >
+                        #{tag.title}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="pt-2">
+              {note.body.trim() ? (
+                <MarkdownRenderer content={note.body} onToggleTask={isTrashed ? undefined : toggleTask} />
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => !isTrashed && setIsEditing(true)}
+                  className="text-sm text-muted-foreground italic hover:text-foreground"
+                >
+                  {isTrashed ? "This note is empty." : "This note is empty. Click to start writing."}
+                </button>
               )}
             </div>
           </div>
+        </ScrollArea>
+      )}
 
-          {/* Markdown Content */}
-          <div className="pt-2">
-            <MarkdownRenderer content={note.body} />
-          </div>
-        </div>
-      </ScrollArea>
+      <ConfirmDialog
+        open={confirmPurge}
+        onOpenChange={setConfirmPurge}
+        title="Delete note permanently?"
+        description={
+          <>
+            "{note.title || "Untitled Note"}" will be removed from your Joplin server and all synced devices.
+            This cannot be undone.
+          </>
+        }
+        confirmLabel="Delete permanently"
+        destructive
+        isPending={deleteNote.isPending}
+        onConfirm={handlePurge}
+      />
     </div>
   );
+}
+
+const TASK_SAVE_DELAY_MS = 600;
+
+/**
+ * Checkbox toggling in read mode: updates the cached note immediately and saves the body
+ * shortly after (one save at a time, so quick successive clicks don't conflict with each other).
+ */
+function useTaskToggle(noteId: string | undefined) {
+  const queryClient = useQueryClient();
+  const baseUpdatedTimeRef = useRef<number | null>(null);
+  const savingRef = useRef(false);
+  const timerRef = useRef<number | null>(null);
+
+  // Flush a pending save when the note is closed instead of dropping it
+  const saveRef = useRef<() => Promise<void>>();
+  useEffect(
+    () => () => {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current);
+        void saveRef.current?.();
+      }
+    },
+    []
+  );
+
+  const save = async () => {
+    timerRef.current = null;
+    if (!noteId) return;
+    if (savingRef.current) {
+      timerRef.current = window.setTimeout(() => void save(), TASK_SAVE_DELAY_MS);
+      return;
+    }
+    const cached = queryClient.getQueryData<Note>(["note", noteId]);
+    if (!cached) return;
+
+    savingRef.current = true;
+    try {
+      const saved = await updateNoteRequest(noteId, {
+        body: cached.body,
+        baseUpdatedTime: baseUpdatedTimeRef.current ?? cached.updatedTime,
+      });
+      baseUpdatedTimeRef.current = saved.updatedTime;
+      // Keep any newer optimistic body (more clicks while saving); its save is already scheduled
+      const latest = queryClient.getQueryData<Note>(["note", noteId]);
+      queryClient.setQueryData<Note>(["note", noteId], { ...saved, body: latest?.body ?? saved.body });
+      invalidateLists(queryClient);
+    } catch (err) {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+      baseUpdatedTimeRef.current = null;
+      const current = getConflictNote(err);
+      if (current) {
+        queryClient.setQueryData(["note", noteId], current);
+        toast.error("This note was changed elsewhere", {
+          description: "Your checkbox change was not saved. The latest version is shown now.",
+        });
+      } else {
+        queryClient.invalidateQueries({ queryKey: ["note", noteId] });
+        toast.error("Could not update checkbox", {
+          description: err instanceof Error ? err.message : undefined,
+        });
+      }
+    } finally {
+      savingRef.current = false;
+    }
+  };
+
+  saveRef.current = save;
+
+  return (index: number, checked: boolean) => {
+    if (!noteId) return;
+    const cached = queryClient.getQueryData<Note>(["note", noteId]);
+    if (!cached) return;
+    const body = setTaskChecked(cached.body, index, checked);
+    if (body === null) return;
+    queryClient.setQueryData<Note>(["note", noteId], { ...cached, body });
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => void save(), TASK_SAVE_DELAY_MS);
+  };
 }

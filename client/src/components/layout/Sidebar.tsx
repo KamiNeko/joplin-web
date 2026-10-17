@@ -1,6 +1,12 @@
 import { useNotebooks } from "@/hooks/use-notebooks";
 import { useTags } from "@/hooks/use-tags";
-import { NotebookTree } from "@/components/notebooks/NotebookTree";
+import { useState } from "react";
+import { toast } from "sonner";
+import { NotebookTree, NotebookAction } from "@/components/notebooks/NotebookTree";
+import { ConfirmDialog, PromptDialog } from "@/components/common/Dialogs";
+import { useCreateNotebook, useDeleteNotebook, useUpdateNotebook } from "@/hooks/use-mutations";
+import { findNotebookById } from "@/lib/notebooks";
+import { Notebook } from "@/lib/types";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
@@ -13,6 +19,7 @@ import {
   Trash2,
   X,
   FolderTree,
+  Plus,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -48,6 +55,65 @@ export function Sidebar({
 }: SidebarProps) {
   const { data: notebooks, isLoading: isLoadingNotebooks } = useNotebooks();
   const { data: tags, isLoading: isLoadingTags } = useTags();
+  const createNotebook = useCreateNotebook();
+  const updateNotebook = useUpdateNotebook();
+  const deleteNotebook = useDeleteNotebook();
+
+  // Which notebook dialog is open: create (optionally under a parent), rename, or delete
+  const [dialog, setDialog] = useState<
+    | { kind: "create"; parent: Notebook | null }
+    | { kind: "rename"; notebook: Notebook }
+    | { kind: "delete"; notebook: Notebook }
+    | null
+  >(null);
+
+  const handleNotebookAction = (action: NotebookAction, notebook: Notebook) => {
+    if (action === "create-child") setDialog({ kind: "create", parent: notebook });
+    else if (action === "rename") setDialog({ kind: "rename", notebook });
+    else setDialog({ kind: "delete", notebook });
+  };
+
+  const handleCreate = (title: string) => {
+    if (dialog?.kind !== "create") return;
+    createNotebook.mutate(
+      { title, parentId: dialog.parent?.id },
+      {
+        onSuccess: (nb) => {
+          setDialog(null);
+          onSelectNotebook(nb.id);
+        },
+        onError: (err) => toast.error("Could not create notebook", { description: err.message }),
+      }
+    );
+  };
+
+  const handleRename = (title: string) => {
+    if (dialog?.kind !== "rename") return;
+    updateNotebook.mutate(
+      { id: dialog.notebook.id, changes: { title } },
+      {
+        onSuccess: () => setDialog(null),
+        onError: (err) => toast.error("Could not rename notebook", { description: err.message }),
+      }
+    );
+  };
+
+  const handleDelete = () => {
+    if (dialog?.kind !== "delete") return;
+    const target = dialog.notebook;
+    deleteNotebook.mutate(target.id, {
+      onSuccess: () => {
+        setDialog(null);
+        toast.success(`"${target.title}" moved to trash`);
+        // Leave the notebook view if the selected notebook was (inside) the deleted one
+        if (selectedNotebookId && findNotebookById([target], selectedNotebookId)) onSelectAllNotes();
+      },
+      onError: (err) => toast.error("Could not delete notebook", { description: err.message }),
+    });
+  };
+
+  const countNotes = (nb: Notebook): number =>
+    (nb.noteCount || 0) + (nb.children || []).reduce((sum, child) => sum + countNotes(child), 0);
 
   return (
     <aside
@@ -153,6 +219,15 @@ export function Sidebar({
                 <FolderTree className="h-3 w-3" />
                 Notebooks
               </span>
+              <button
+                type="button"
+                onClick={() => setDialog({ kind: "create", parent: null })}
+                className="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-sidebar-accent"
+                aria-label="New notebook"
+                title="New notebook"
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
             </div>
 
             {isLoadingNotebooks ? (
@@ -166,6 +241,7 @@ export function Sidebar({
                 notebooks={notebooks || []}
                 selectedNotebookId={selectedNotebookId}
                 onSelectNotebook={onSelectNotebook}
+                onNotebookAction={handleNotebookAction}
               />
             )}
           </div>
@@ -239,6 +315,39 @@ export function Sidebar({
           </div>
         </div>
       </ScrollArea>
+
+      <PromptDialog
+        open={dialog?.kind === "create"}
+        onOpenChange={(open) => !open && setDialog(null)}
+        title={dialog?.kind === "create" && dialog.parent ? `New notebook in "${dialog.parent.title}"` : "New notebook"}
+        placeholder="Notebook name"
+        confirmLabel="Create"
+        isPending={createNotebook.isPending}
+        onSubmit={handleCreate}
+      />
+      <PromptDialog
+        open={dialog?.kind === "rename"}
+        onOpenChange={(open) => !open && setDialog(null)}
+        title="Rename notebook"
+        initialValue={dialog?.kind === "rename" ? dialog.notebook.title : ""}
+        confirmLabel="Rename"
+        isPending={updateNotebook.isPending}
+        onSubmit={handleRename}
+      />
+      <ConfirmDialog
+        open={dialog?.kind === "delete"}
+        onOpenChange={(open) => !open && setDialog(null)}
+        title="Move notebook to trash?"
+        description={
+          dialog?.kind === "delete"
+            ? `"${dialog.notebook.title}" and everything in it (${countNotes(dialog.notebook)} notes, including sub-notebooks) will be moved to the trash. You can restore notes from the trash.`
+            : undefined
+        }
+        confirmLabel="Move to trash"
+        destructive
+        isPending={deleteNotebook.isPending}
+        onConfirm={handleDelete}
+      />
     </aside>
   );
 }

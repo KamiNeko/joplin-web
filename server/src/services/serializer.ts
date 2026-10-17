@@ -213,9 +213,11 @@ export function serialize(item: {
     propLines.push(`${key}: ${strVal}`);
   }
 
+  // Mirrors Joplin's BaseItem.serialize: the title line is always written for items that have
+  // one (even when empty), otherwise a note body would be read back as its title.
   const sections: string[] = [];
-  if (item.title) {
-    sections.push(item.title);
+  if (typeof item.title === 'string') {
+    sections.push(item.title.replace(/[\r\n]+/g, ' '));
   }
   if (item.body && item.type_ === JoplinItemType.Note) {
     sections.push(item.body);

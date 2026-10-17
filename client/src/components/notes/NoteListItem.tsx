@@ -11,6 +11,8 @@ interface NoteListItemProps {
   };
   isActive?: boolean;
   onClick?: () => void;
+  /** Toggles a to-do's completion; the checkbox is read-only when omitted */
+  onToggleTodo?: () => void;
 }
 
 /**
@@ -51,7 +53,7 @@ export function formatRelativeTime(timestamp: number | string | undefined): stri
   });
 }
 
-export function NoteListItem({ note, isActive, onClick }: NoteListItemProps) {
+export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteListItemProps) {
   const relativeTime = formatRelativeTime(note.updatedTime || note.createdTime);
 
   return (
@@ -81,11 +83,23 @@ export function NoteListItem({ note, isActive, onClick }: NoteListItemProps) {
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-center gap-1.5 min-w-0">
           {note.isTodo ? (
-            note.todoCompleted ? (
-              <CheckSquare className="h-4 w-4 shrink-0 text-emerald-500 mt-0.5" />
-            ) : (
-              <Square className="h-4 w-4 shrink-0 text-amber-500 mt-0.5" />
-            )
+            <button
+              type="button"
+              disabled={!onToggleTodo}
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleTodo?.();
+              }}
+              onKeyDown={(e) => e.stopPropagation()}
+              aria-label={note.todoCompleted ? "Mark as not done" : "Mark as done"}
+              className="shrink-0 mt-0.5 rounded-sm enabled:hover:scale-110 transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+            >
+              {note.todoCompleted ? (
+                <CheckSquare className="h-4 w-4 text-emerald-500" />
+              ) : (
+                <Square className="h-4 w-4 text-amber-500" />
+              )}
+            </button>
           ) : (
             <FileText
               className={cn(
