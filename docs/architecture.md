@@ -89,7 +89,7 @@ All routes except `/api/health` and `/api/auth/login` require a session.
 
 | Method | Path | Description |
 | :--- | :--- | :--- |
-| `GET` | `/api/health` | Health check |
+| `GET` | `/api/health` | Health check: `{ status, version, commit }` (build metadata only, no configuration) |
 | `POST` | `/api/auth/login` | `{ email, password }` → `{ sessionId, userId }` |
 | `POST` | `/api/auth/logout` | Drops cached session state |
 | `GET` | `/api/auth/check` | Validates the session |

@@ -4,6 +4,9 @@
   "description": "Express.js REST API backend for Joplin Web",
   "type": "module",
   "main": "dist/index.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
@@ -20,7 +23,7 @@
     "notes"
   ],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
     "axios": "^1.7.9",
     "compression": "^1.7.5",
