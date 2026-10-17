@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -61,6 +62,10 @@ function parseJoplinServerUrl(raw: string | undefined): string {
   return value.replace(/\/+$/, '');
 }
 
+// Resolved from this module, not process.cwd(): src/config.ts (tsx) and dist/config.js (compiled)
+// both sit two levels below the repo root, so this finds client/dist wherever the server is started.
+const defaultClientDistPath = fileURLToPath(new URL('../../client/dist', import.meta.url));
+
 /**
  * Builds the application config from environment variables. Throws ConfigError when
  * JOPLIN_SERVER_URL is missing or invalid.
@@ -73,7 +78,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     nodeEnv: env.NODE_ENV || 'development',
     cacheTtlMs: parseInt(env.CACHE_TTL_MS || '30000', 10),
     authCacheTtlMs: parseInt(env.AUTH_CACHE_TTL_MS || '300000', 10),
-    clientDistPath: path.resolve(process.cwd(), '../client/dist'),
+    clientDistPath: defaultClientDistPath,
   };
 }
 
