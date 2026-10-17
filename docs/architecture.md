@@ -25,7 +25,10 @@ In production the backend also serves the compiled client (`client/dist`) on the
 | `services/serializer.ts` | `deserialize` / `serialize` Joplin's text format, `stripMarkdown` for list previews. |
 | `services/note-cache.ts` | Per-session in-memory cache of all items, refreshed after `CACHE_TTL_MS`; only items whose `updated_time` changed are re-fetched. Builds the notebook tree, note lists, tag counts and search. |
 | `services/note-writer.ts` | All writes: create/update/trash/restore/purge for notes, notebooks, tags, note-tag links and resources; conflict detection. |
-| `middleware/auth.ts` | Accepts the session as `Authorization: Bearer`, `X-API-AUTH` or `?auth=`; validates it against Joplin Server and caches the result for `AUTH_CACHE_TTL_MS`. |
+| `middleware/auth.ts` | Accepts the session as `Authorization: Bearer` or `X-API-AUTH` (never in the query string, which would leak into logs and referrers); validates it against Joplin Server and caches the result for `AUTH_CACHE_TTL_MS`. |
+| `middleware/request-logger.ts` | morgan access log with sensitive query parameters (`auth`, `token`, `password`, …) redacted. |
+| `middleware/error-handler.ts` | Maps errors to JSON responses; 5xx responses carry a generic message only (details are logged). |
+| `config.ts` | Reads the environment; exits at startup when `JOPLIN_SERVER_URL` is missing or not an http(s) URL. There is no default server. |
 | `routes/*.ts` | Thin Express routers per resource. |
 
 ## Joplin sync protocol
@@ -104,8 +107,14 @@ All routes except `/api/health` and `/api/auth/login` require a session.
 | `DELETE` | `/api/tags/:id` | Delete tag and its links |
 | `GET` | `/api/search?q=` | Full-text search over titles and bodies |
 | `POST` | `/api/resources` | Upload attachment (raw body, `X-File-Name`, `X-File-Type`) |
-| `GET` | `/api/resources/:id` | Attachment binary |
+| `GET` | `/api/resources/:id` | Attachment binary (see *Serving attachments*) |
 | `DELETE` | `/api/resources/:id` | Delete attachment |
+
+### Security headers
+
+- helmet's defaults apply to every response, with `img-src 'self' data: blob:` (attachments are shown through `blob:` URLs) and `Referrer-Policy: no-referrer`.
+- **Serving attachments:** attachments are user content served from our origin, so `GET /api/resources/:id` always sends `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'; …; sandbox`. Only raster images, PDF, plain text, audio and video are sent `inline`. SVG keeps `image/svg+xml` (so `<img>` can show it) but is sent as `attachment`; every other type (HTML, XML, JavaScript, unknown or malformed types) becomes `application/octet-stream` + `attachment`. File names go into `Content-Disposition` as an ASCII fallback plus RFC 5987 `filename*`.
+- The client loads attachments with `fetch` + session header and renders them from `blob:` URLs; it never puts the session into a URL.
 
 ## Frontend (`client/src`)
 

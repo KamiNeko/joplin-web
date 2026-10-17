@@ -70,5 +70,4 @@ Agents that edit code must still meet the definition of done. Agents report prob
 ## Known gaps
 
 - No client-side tests yet (candidate: Vitest + Testing Library; Playwright is already a dev dependency for screenshots).
-- `server/src/config.ts` falls back to the maintainer's own Joplin Server URL when `JOPLIN_SERVER_URL` is unset.
 - E2EE items are not supported; changes made by Joplin Web are not yet verified end-to-end with desktop/mobile sync.

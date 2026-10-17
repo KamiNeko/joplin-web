@@ -57,14 +57,18 @@ function rehypeTaskIndex() {
   };
 }
 
+// Classes note content may set. Anything else (e.g. Tailwind's "fixed inset-0") could let a note
+// restyle or overlay the app UI. rehype-highlight runs after sanitizing and adds its own classes.
+const ALLOWED_CONTENT_CLASS = /^(?:language-|hljs)[\w-]*$/;
+
 // Custom sanitize schema allowing highlight classes and common markdown elements
 const sanitizeSchema = {
   ...defaultSchema,
   attributes: {
     ...defaultSchema.attributes,
-    code: [...(defaultSchema.attributes?.code || []), ["className"]],
-    span: [...(defaultSchema.attributes?.span || []), ["className"]],
-    div: [...(defaultSchema.attributes?.div || []), ["className"]],
+    code: [...(defaultSchema.attributes?.code || []), ["className", ALLOWED_CONTENT_CLASS]],
+    span: [...(defaultSchema.attributes?.span || []), ["className", ALLOWED_CONTENT_CLASS]],
+    div: [...(defaultSchema.attributes?.div || []), ["className", ALLOWED_CONTENT_CLASS]],
     img: [
       ...(defaultSchema.attributes?.img || []),
       "src",
