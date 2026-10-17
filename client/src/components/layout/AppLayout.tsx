@@ -7,7 +7,8 @@ interface AppLayoutProps {
   children: React.ReactNode;
   notebookTitle?: string;
   noteTitle?: string;
-  onOpenSearch?: () => void;
+  searchQuery: string;
+  onSearchChange: (query: string) => void;
 }
 
 export function AppLayout({
@@ -15,7 +16,8 @@ export function AppLayout({
   children,
   notebookTitle,
   noteTitle,
-  onOpenSearch,
+  searchQuery,
+  onSearchChange,
 }: AppLayoutProps) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
@@ -40,7 +42,9 @@ export function AppLayout({
           notebookTitle={notebookTitle}
           noteTitle={noteTitle}
           onToggleSidebar={() => setMobileSidebarOpen(true)}
-          onOpenSearch={onOpenSearch}
+          searchQuery={searchQuery}
+          onSearchChange={onSearchChange}
+          onOpenMobileSearch={() => setMobileSidebarOpen(true)}
         />
         <main className="flex-1 h-[calc(100vh-3.5rem)] overflow-hidden">
           {children}

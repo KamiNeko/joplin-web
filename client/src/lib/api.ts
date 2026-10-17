@@ -243,18 +243,10 @@ export async function searchNotes(query: string): Promise<SearchResult[]> {
   if (!trimmed) {
     return [];
   }
-  const urlQuery = new URLSearchParams({ query: trimmed });
+  const urlQuery = new URLSearchParams({ q: trimmed });
   const data = await request<SearchResult[] | { items: SearchResult[]; results: SearchResult[] }>(
-    `/api/notes/search?${urlQuery.toString()}`
-  ).catch(async (err) => {
-    // Fallback to /api/search
-    if (err instanceof ApiError && err.status === 404) {
-      return request<SearchResult[] | { items: SearchResult[]; results: SearchResult[] }>(
-        `/api/search?${urlQuery.toString()}`
-      );
-    }
-    throw err;
-  });
+    `/api/search?${urlQuery.toString()}`
+  );
 
   if (Array.isArray(data)) {
     return data;

@@ -56,7 +56,7 @@ export interface Tag {
  * Search result with matched highlighted snippet fields.
  */
 export interface SearchResult extends NoteListItem {
-  matches?: { field: string; snippet: string }[];
+  matches?: { inTitle: boolean; inBody: boolean; snippet?: string };
 }
 
 /**
