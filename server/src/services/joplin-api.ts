@@ -270,6 +270,51 @@ export class JoplinApiService {
   }
 
   /**
+   * Uploads content to a Joplin Server item path via multipart form upload
+   */
+  private async putItemContent(
+    sessionId: string,
+    itemPath: string,
+    fileName: string,
+    content: Buffer,
+    context: string
+  ): Promise<unknown> {
+    try {
+      const boundary = `----JoplinFormBoundary${Math.random().toString(36).substring(2)}`;
+      const CRLF = '\r\n';
+
+      const bodyParts: (string | Buffer)[] = [
+        `--${boundary}${CRLF}`,
+        `Content-Disposition: form-data; name="name"${CRLF}${CRLF}`,
+        `${fileName}${CRLF}`,
+        `--${boundary}${CRLF}`,
+        `Content-Disposition: form-data; name="file"; filename="${fileName}"${CRLF}`,
+        `Content-Type: application/octet-stream${CRLF}${CRLF}`,
+        content,
+        `${CRLF}--${boundary}--${CRLF}`,
+      ];
+
+      const bodyBuffer = Buffer.concat(
+        bodyParts.map((p) => (typeof p === 'string' ? Buffer.from(p, 'utf8') : p))
+      );
+
+      const res = await this.client.put(`/api/items/root:/${itemPath}:/content`, bodyBuffer, {
+        headers: {
+          'X-API-AUTH': sessionId,
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': bodyBuffer.length,
+        },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+      });
+
+      return res.data;
+    } catch (error) {
+      this.handleError(error, context);
+    }
+  }
+
+  /**
    * Creates or updates a raw item on Joplin Server via multipart form upload
    *
    * @param sessionId Active session ID
@@ -281,41 +326,46 @@ export class JoplinApiService {
     itemName: string,
     content: string
   ): Promise<unknown> {
+    const cleanName = itemName.endsWith('.md') ? itemName : `${itemName}.md`;
+    return this.putItemContent(
+      sessionId,
+      encodeURIComponent(cleanName),
+      cleanName,
+      Buffer.from(content, 'utf8'),
+      `createOrUpdateItem(${itemName})`
+    );
+  }
+
+  /**
+   * Uploads the binary content of a resource (attachment) to ".resource/<id>"
+   *
+   * @param sessionId Active session ID
+   * @param resourceId 32-hex character resource ID
+   * @param data File content
+   */
+  public async uploadResourceBinary(sessionId: string, resourceId: string, data: Buffer): Promise<void> {
+    await this.putItemContent(
+      sessionId,
+      `.resource/${encodeURIComponent(resourceId)}`,
+      resourceId,
+      data,
+      `uploadResourceBinary(${resourceId})`
+    );
+  }
+
+  /**
+   * Permanently deletes a resource's binary (".resource/<id>"). Missing files are ignored.
+   */
+  public async deleteResourceBinary(sessionId: string, resourceId: string): Promise<void> {
     try {
-      const cleanName = itemName.endsWith('.md') ? itemName : `${itemName}.md`;
-      const boundary = `----JoplinFormBoundary${Math.random().toString(36).substring(2)}`;
-      const CRLF = '\r\n';
-
-      const bodyParts: (string | Buffer)[] = [
-        `--${boundary}${CRLF}`,
-        `Content-Disposition: form-data; name="name"${CRLF}${CRLF}`,
-        `${cleanName}${CRLF}`,
-        `--${boundary}${CRLF}`,
-        `Content-Disposition: form-data; name="file"; filename="${cleanName}"${CRLF}`,
-        `Content-Type: application/octet-stream${CRLF}${CRLF}`,
-        Buffer.from(content, 'utf8'),
-        `${CRLF}--${boundary}--${CRLF}`,
-      ];
-
-      const bodyBuffer = Buffer.concat(
-        bodyParts.map((p) => (typeof p === 'string' ? Buffer.from(p, 'utf8') : p))
-      );
-
-      const res = await this.client.put(
-        `/api/items/root:/${encodeURIComponent(cleanName)}:/content`,
-        bodyBuffer,
-        {
-          headers: {
-            'X-API-AUTH': sessionId,
-            'Content-Type': `multipart/form-data; boundary=${boundary}`,
-            'Content-Length': bodyBuffer.length,
-          },
-        }
-      );
-
-      return res.data;
+      await this.client.delete(`/api/items/root:/.resource/${encodeURIComponent(resourceId)}:`, {
+        headers: { 'X-API-AUTH': sessionId },
+      });
     } catch (error) {
-      this.handleError(error, `createOrUpdateItem(${itemName})`);
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        return;
+      }
+      this.handleError(error, `deleteResourceBinary(${resourceId})`);
     }
   }
 

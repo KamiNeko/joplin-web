@@ -31,7 +31,7 @@ app.use(
     origin: config.corsOrigin,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-API-AUTH'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-API-AUTH', 'X-File-Name', 'X-File-Type'],
   })
 );
 

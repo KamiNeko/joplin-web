@@ -1,5 +1,7 @@
-import { useMemo } from "react";
+import { forwardRef, useCallback, useImperativeHandle, useMemo, useRef } from "react";
 import CodeMirror, { EditorView } from "@uiw/react-codemirror";
+import { toast } from "sonner";
+import { uploadResource } from "@/lib/api";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
@@ -10,6 +12,20 @@ interface MarkdownEditorProps {
   onChange: (value: string) => void;
   autoFocus?: boolean;
   className?: string;
+  /** Called with the number of uploads in progress whenever it changes */
+  onUploadsChange?: (pending: number) => void;
+}
+
+export interface MarkdownEditorHandle {
+  /** Uploads files and inserts links to them at the cursor */
+  insertFiles: (files: File[]) => void;
+}
+
+/** Placeholder links inserted while a file uploads (never meant to be saved) */
+export const UPLOAD_PLACEHOLDER = /!?\[Uploading [^\]\n]*\]\(uploading-[a-z0-9]+\)/g;
+
+function escapeLinkText(text: string) {
+  return text.replace(/[[\]]/g, (c) => (c === "[" ? "(" : ")"));
 }
 
 /**
@@ -74,22 +90,96 @@ const markdownHighlight = HighlightStyle.define([
 
 /**
  * CodeMirror 6 Markdown editor with syntax highlighting for fenced code blocks.
+ * Files dropped or pasted into it are uploaded as Joplin resources and linked at that position.
  */
-export function MarkdownEditor({ value, onChange, autoFocus, className }: MarkdownEditorProps) {
+export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorProps>(function MarkdownEditor(
+  { value, onChange, autoFocus, className, onUploadsChange },
+  ref
+) {
+  const viewRef = useRef<EditorView | null>(null);
+  const pendingRef = useRef(0);
+  const onUploadsChangeRef = useRef(onUploadsChange);
+  onUploadsChangeRef.current = onUploadsChange;
+
+  const uploadFiles = useCallback((files: File[], at?: number) => {
+    const view = viewRef.current;
+    if (!view || files.length === 0) return;
+
+    let pos = at ?? view.state.selection.main.head;
+    for (const file of files) {
+      const isImage = file.type.startsWith("image/");
+      const name = escapeLinkText(file.name || (isImage ? "image" : "file"));
+      const token = `${isImage ? "!" : ""}[Uploading ${name}…](uploading-${Math.random().toString(36).slice(2, 10)})`;
+      const insert = files.length > 1 ? `${token}\n` : token;
+      view.dispatch({ changes: { from: pos, insert }, selection: { anchor: pos + insert.length } });
+      pos += insert.length;
+
+      pendingRef.current++;
+      onUploadsChangeRef.current?.(pendingRef.current);
+
+      uploadResource(file)
+        .then((resource) => {
+          const link = `${isImage ? "!" : ""}[${escapeLinkText(resource.title)}](:/${resource.id})`;
+          replaceToken(token, link);
+        })
+        .catch((err) => {
+          replaceToken(token, "");
+          toast.error(`Could not upload "${file.name}"`, {
+            description: err instanceof Error ? err.message : undefined,
+          });
+        })
+        .finally(() => {
+          pendingRef.current--;
+          onUploadsChangeRef.current?.(pendingRef.current);
+        });
+    }
+  }, []);
+
+  /** Swaps a placeholder for its final text, wherever edits have moved it */
+  const replaceToken = (token: string, text: string) => {
+    const view = viewRef.current;
+    if (!view) return;
+    const from = view.state.doc.toString().indexOf(token);
+    if (from < 0) return;
+    view.dispatch({ changes: { from, to: from + token.length, insert: text } });
+  };
+
+  useImperativeHandle(ref, () => ({ insertFiles: (files) => uploadFiles(files) }), [uploadFiles]);
+
   const extensions = useMemo(
     () => [
       markdown({ base: markdownLanguage, codeLanguages: languages }),
       syntaxHighlighting(markdownHighlight),
       EditorView.lineWrapping,
       appTheme,
+      EditorView.domEventHandlers({
+        paste(event) {
+          const files = Array.from(event.clipboardData?.files ?? []);
+          if (files.length === 0) return false;
+          event.preventDefault();
+          uploadFiles(files);
+          return true;
+        },
+        drop(event, view) {
+          const files = Array.from(event.dataTransfer?.files ?? []);
+          if (files.length === 0) return false;
+          event.preventDefault();
+          const pos = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? undefined;
+          uploadFiles(files, pos);
+          return true;
+        },
+      }),
     ],
-    []
+    [uploadFiles]
   );
 
   return (
     <CodeMirror
       value={value}
       onChange={onChange}
+      onCreateEditor={(view) => {
+        viewRef.current = view;
+      }}
       autoFocus={autoFocus}
       theme="none"
       height="100%"
@@ -105,4 +195,4 @@ export function MarkdownEditor({ value, onChange, autoFocus, className }: Markdo
       }}
     />
   );
-}
+});

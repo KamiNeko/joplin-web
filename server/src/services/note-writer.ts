@@ -111,6 +111,38 @@ function defaultFolderProperties(id: string, parentId: string): Record<string, s
   };
 }
 
+/** Default property set Joplin desktop writes for a new resource (attachment) */
+function defaultResourceProperties(
+  id: string,
+  file: { mime: string; extension: string; size: number }
+): Record<string, string> {
+  const now = new Date();
+  const iso = now.toISOString();
+  return {
+    id,
+    mime: file.mime,
+    filename: '',
+    created_time: iso,
+    updated_time: iso,
+    user_created_time: iso,
+    user_updated_time: iso,
+    file_extension: file.extension,
+    encryption_cipher_text: '',
+    encryption_applied: '0',
+    encryption_blob_encrypted: '0',
+    size: String(file.size),
+    is_shared: '0',
+    share_id: '',
+    master_key_id: '',
+    user_data: '',
+    blob_updated_time: String(now.getTime()),
+    ocr_text: '',
+    ocr_details: '',
+    ocr_status: '0',
+    ocr_error: '',
+  };
+}
+
 /** Default property set Joplin desktop writes for a new tag */
 function defaultTagProperties(id: string): Record<string, string> {
   const now = new Date().toISOString();
@@ -167,6 +199,7 @@ export class NoteWriterService {
         [JoplinItemType.Note]: 'note',
         [JoplinItemType.Folder]: 'notebook',
         [JoplinItemType.Tag]: 'tag',
+        [JoplinItemType.Resource]: 'resource',
       };
       throw new WriteValidationError(`Item ${id} is not a ${names[type] ?? 'supported item'}`, 404);
     }
@@ -444,6 +477,43 @@ export class NoteWriterService {
       noteCache.removeItem(sessionId, folderId);
     }
     return { notebooks: folderIds.length, notes: noteIds.length };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Resources (attachments)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Stores an attachment: uploads the file first, then the resource metadata item (type 4),
+   * so clients never see metadata without its file.
+   */
+  public async createResource(
+    sessionId: string,
+    file: { name: string; mime: string; data: Buffer }
+  ): Promise<{ id: string; title: string; mime: string; size: number }> {
+    if (file.data.length === 0) throw new WriteValidationError('The file is empty');
+    const title = sanitizeTitle(file.name) || 'file';
+    const dot = title.lastIndexOf('.');
+    const extension = dot > 0 ? title.slice(dot + 1).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10) : '';
+
+    const id = newId();
+    await joplinApi.uploadResourceBinary(sessionId, id, file.data);
+    await this.write(sessionId, {
+      type_: JoplinItemType.Resource,
+      title,
+      body: '',
+      properties: defaultResourceProperties(id, { mime: file.mime, extension, size: file.data.length }),
+    });
+    return { id, title, mime: file.mime, size: file.data.length };
+  }
+
+  /** Permanently deletes an attachment: its metadata item first, then the file */
+  public async deleteResource(sessionId: string, resourceId: string): Promise<void> {
+    assertValidId(resourceId, 'resource id');
+    await this.fetchFreshOfType(sessionId, resourceId, JoplinItemType.Resource);
+    await joplinApi.deleteItem(sessionId, `${resourceId}.md`);
+    noteCache.removeItem(sessionId, resourceId);
+    await joplinApi.deleteResourceBinary(sessionId, resourceId);
   }
 
   // ---------------------------------------------------------------------------

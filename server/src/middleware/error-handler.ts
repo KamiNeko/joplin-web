@@ -12,6 +12,11 @@ export function errorHandler(
 ): void {
   console.error('[ErrorHandler] Unhandled error:', err);
 
+  if ((err as { type?: string })?.type === 'entity.too.large') {
+    res.status(413).json({ error: 'The file is too large to upload' });
+    return;
+  }
+
   if (err instanceof JoplinApiError) {
     res.status(err.status).json({
       error: err.message,
