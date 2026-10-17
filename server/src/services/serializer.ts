@@ -90,9 +90,9 @@ export function deserialize(rawContent: string, defaultId?: string): RawJoplinIt
 
   // Parse timestamps (ISO strings or numeric timestamps)
   const parseTimestamp = (val?: string): number => {
-    if (!val) return 0;
+    if (!val || val === '0') return 0;
     const num = Number(val);
-    if (!isNaN(num) && num > 0) return num;
+    if (!isNaN(num)) return num;
     const parsed = Date.parse(val);
     return isNaN(parsed) ? 0 : parsed;
   };
@@ -103,6 +103,7 @@ export function deserialize(rawContent: string, defaultId?: string): RawJoplinIt
   const userUpdatedTime = parseTimestamp(properties.user_updated_time || properties.updated_time);
 
   const parentId = properties.parent_id || '';
+  const deletedTime = parseTimestamp(properties.deleted_time);
   const isTodo = properties.is_todo === '1';
   const todoCompleted = properties.todo_completed ? Number(properties.todo_completed) : 0;
   const todoDue = properties.todo_due ? Number(properties.todo_due) : 0;
@@ -117,6 +118,7 @@ export function deserialize(rawContent: string, defaultId?: string): RawJoplinIt
     updatedTime,
     userCreatedTime,
     userUpdatedTime,
+    deletedTime,
     isTodo,
     todoCompleted,
     todoDue,

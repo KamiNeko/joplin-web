@@ -92,6 +92,22 @@ export function App() {
                   </ProtectedRoute>
                 }
               />
+              <Route
+                path="/trash"
+                element={
+                  <ProtectedRoute>
+                    <NotesPage />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/trash/:id"
+                element={
+                  <ProtectedRoute>
+                    <NotesPage />
+                  </ProtectedRoute>
+                }
+              />
 
               {/* Redirect root and unknown routes to /notes */}
               <Route path="/" element={<Navigate to="/notes" replace />} />

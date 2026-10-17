@@ -126,6 +126,17 @@ export function NoteViewer({
               {note.todoCompleted ? "Completed Task" : "Pending Task"}
             </Badge>
           )}
+
+          {/* In Trash badge if soft-deleted */}
+          {Boolean(note.deletedTime && note.deletedTime > 0) && (
+            <Badge
+              variant="destructive"
+              className="text-xs gap-1 bg-destructive/15 text-destructive border-destructive/30"
+            >
+              <AlertCircle className="h-3 w-3" />
+              In Trash
+            </Badge>
+          )}
         </div>
 
         {/* Close button for responsive mobile view */}
@@ -145,6 +156,16 @@ export function NoteViewer({
       {/* Main Note Scroll Area */}
       <ScrollArea className="flex-1 px-6 sm:px-10 lg:px-12 py-8">
         <div className="max-w-4xl mx-auto space-y-6 pb-20">
+          {/* Trashed Banner */}
+          {Boolean(note.deletedTime && note.deletedTime > 0) && (
+            <div className="flex items-center gap-2.5 p-3.5 rounded-xl bg-destructive/10 border border-destructive/25 text-destructive text-xs">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              <span>
+                <strong>This note is in the trash.</strong> It was moved to trash in Joplin and is excluded from active notebooks.
+              </span>
+            </div>
+          )}
+
           {/* Note Title */}
           <div className="space-y-3">
             <h1 className="text-2xl sm:text-3xl lg:text-4xl font-extrabold tracking-tight text-foreground leading-tight">

@@ -34,13 +34,19 @@ export function NotesPage() {
   const routeNoteId = params.id && !window.location.pathname.startsWith("/notebooks/") ? params.id : undefined;
   const routeNotebookId = params.notebookId || (window.location.pathname.startsWith("/notebooks/") ? params.id : undefined);
   const tagParam = searchParams.get("tag") || undefined;
+  const isTrashRoute = window.location.pathname.startsWith("/trash");
 
+  const [isTrashSelected, setIsTrashSelected] = useState<boolean>(isTrashRoute);
   const [selectedNotebookId, setSelectedNotebookId] = useState<string | null>(routeNotebookId || null);
   const [selectedTagId, setSelectedTagId] = useState<string | null>(tagParam || null);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(routeNoteId || null);
   const [searchQuery, setSearchQuery] = useState<string>("");
 
   // Sync internal state when URL parameters change
+  useEffect(() => {
+    setIsTrashSelected(window.location.pathname.startsWith("/trash"));
+  }, [params]);
+
   useEffect(() => {
     if (routeNoteId) {
       setSelectedNoteId(routeNoteId);
@@ -51,6 +57,7 @@ export function NotesPage() {
     if (routeNotebookId) {
       setSelectedNotebookId(routeNotebookId);
       setSelectedTagId(null);
+      setIsTrashSelected(false);
     }
   }, [routeNotebookId]);
 
@@ -58,6 +65,7 @@ export function NotesPage() {
     if (tagParam) {
       setSelectedTagId(tagParam);
       setSelectedNotebookId(null);
+      setIsTrashSelected(false);
     }
   }, [tagParam]);
 
@@ -65,7 +73,8 @@ export function NotesPage() {
   const { data: notebooks } = useNotebooks();
   const { data: notes, isLoading: isLoadingNotes } = useNotes(
     selectedNotebookId || undefined,
-    selectedTagId || undefined
+    selectedTagId || undefined,
+    isTrashSelected
   );
   const {
     data: fullNote,
@@ -92,10 +101,11 @@ export function NotesPage() {
   );
 
   const notebookTitle = useMemo(() => {
+    if (isTrashSelected) return "Trash";
     if (selectedTagId) return `Tag #${selectedTagId}`;
     if (currentNotebook) return currentNotebook.title;
     return undefined;
-  }, [currentNotebook, selectedTagId]);
+  }, [currentNotebook, selectedTagId, isTrashSelected]);
 
   const noteTitle = fullNote?.title || undefined;
 
@@ -103,6 +113,7 @@ export function NotesPage() {
   const handleSelectNotebook = (id: string) => {
     setSelectedNotebookId(id);
     setSelectedTagId(null);
+    setIsTrashSelected(false);
     setSearchQuery("");
     navigate(`/notebooks/${id}`);
   };
@@ -110,6 +121,7 @@ export function NotesPage() {
   const handleSelectTag = (tagId: string) => {
     setSelectedTagId(tagId);
     setSelectedNotebookId(null);
+    setIsTrashSelected(false);
     setSearchQuery("");
     setSearchParams({ tag: tagId });
   };
@@ -117,13 +129,26 @@ export function NotesPage() {
   const handleSelectAllNotes = () => {
     setSelectedNotebookId(null);
     setSelectedTagId(null);
+    setIsTrashSelected(false);
     setSearchQuery("");
     navigate("/notes");
   };
 
+  const handleSelectTrash = () => {
+    setSelectedNotebookId(null);
+    setSelectedTagId(null);
+    setIsTrashSelected(true);
+    setSearchQuery("");
+    navigate("/trash");
+  };
+
   const handleSelectNote = (id: string) => {
     setSelectedNoteId(id);
-    navigate(`/notes/${id}`);
+    if (isTrashSelected) {
+      navigate(`/trash/${id}`);
+    } else {
+      navigate(`/notes/${id}`);
+    }
   };
 
   const handleCloseNoteViewer = () => {
@@ -145,9 +170,14 @@ export function NotesPage() {
         <Sidebar
           selectedNotebookId={selectedNotebookId}
           selectedTagId={selectedTagId}
-          isAllNotesSelected={!selectedNotebookId && !selectedTagId && !searchQuery}
+          isAllNotesSelected={!selectedNotebookId && !selectedTagId && !isTrashSelected && !searchQuery}
+          isTrashSelected={isTrashSelected}
           onSelectAllNotes={() => {
             handleSelectAllNotes();
+            onCloseMobile?.();
+          }}
+          onSelectTrash={() => {
+            handleSelectTrash();
             onCloseMobile?.();
           }}
           onSelectNotebook={(id) => {
@@ -188,7 +218,9 @@ export function NotesPage() {
               onSelectNote={handleSelectNote}
               title={notebookTitle || "All Notes"}
               subtitle={
-                selectedTagId
+                isTrashSelected
+                  ? "Deleted notes and notebooks"
+                  : selectedTagId
                   ? "Notes with tag"
                   : selectedNotebookId
                   ? "Notebook notes"

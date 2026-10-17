@@ -5,12 +5,12 @@ import { NoteListItem, Note } from "@/lib/types";
 export const NOTES_QUERY_KEY = ["notes"] as const;
 
 /**
- * Hook to retrieve notes list, optionally filtered by notebook or tag.
+ * Hook to retrieve notes list, optionally filtered by notebook, tag, or trash status.
  */
-export function useNotes(notebookId?: string, tagId?: string) {
+export function useNotes(notebookId?: string, tagId?: string, isTrash?: boolean) {
   return useQuery<NoteListItem[], Error>({
-    queryKey: [...NOTES_QUERY_KEY, { notebookId, tagId }],
-    queryFn: () => getNotes({ notebookId, tagId }),
+    queryKey: [...NOTES_QUERY_KEY, { notebookId, tagId, isTrash }],
+    queryFn: () => getNotes({ notebookId, tagId, isTrash }),
     staleTime: 15 * 1000, // 15 seconds
   });
 }

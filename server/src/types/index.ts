@@ -33,6 +33,7 @@ export interface RawJoplinItem {
   updatedTime: number;
   userCreatedTime: number;
   userUpdatedTime: number;
+  deletedTime: number;
   isTodo: boolean;
   todoDue: number;
   todoCompleted: number;
@@ -50,6 +51,7 @@ export interface Notebook {
   noteCount: number;
   createdTime?: number;
   updatedTime?: number;
+  deletedTime?: number;
 }
 
 /**
@@ -61,6 +63,7 @@ export interface NoteListItem {
   parentId: string;
   createdTime: number;
   updatedTime: number;
+  deletedTime: number;
   preview: string;
   isTodo: boolean;
   todoCompleted: boolean;
@@ -79,6 +82,7 @@ export interface NoteDetail {
   tags: Array<{ id: string; title: string }>;
   createdTime: number;
   updatedTime: number;
+  deletedTime: number;
   isTodo: boolean;
   todoCompleted: boolean;
   todoDue: number;

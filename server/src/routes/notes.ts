@@ -13,16 +13,19 @@ router.use(requireAuth);
  * Query parameters:
  * - notebook_id | notebookId: filter notes in a specific notebook
  * - tag_id | tagId: filter notes linked to a specific tag
+ * - is_trash | isTrash: set to 'true' or '1' to retrieve only trashed notes
  */
 router.get('/', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const sessionId = req.sessionId!;
     const notebookId = (req.query.notebook_id || req.query.notebookId) as string | undefined;
     const tagId = (req.query.tag_id || req.query.tagId) as string | undefined;
+    const isTrash = req.query.is_trash === 'true' || req.query.is_trash === '1' || req.query.isTrash === 'true';
 
     const notes = await noteCache.getNotes(sessionId, {
       notebookId: notebookId ? String(notebookId) : undefined,
       tagId: tagId ? String(tagId) : undefined,
+      isTrash,
     });
 
     res.status(200).json(notes);

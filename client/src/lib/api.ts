@@ -178,11 +178,12 @@ export async function getNotebooks(): Promise<Notebook[]> {
 }
 
 /**
- * Fetches list of notes, optionally filtered by notebookId or tagId.
+ * Fetches list of notes, optionally filtered by notebookId, tagId, or trash status.
  */
 export async function getNotes(params?: {
   notebookId?: string;
   tagId?: string;
+  isTrash?: boolean;
 }): Promise<NoteListItem[]> {
   const query = new URLSearchParams();
   if (params?.notebookId) {
@@ -190,6 +191,9 @@ export async function getNotes(params?: {
   }
   if (params?.tagId) {
     query.set("tagId", params.tagId);
+  }
+  if (params?.isTrash) {
+    query.set("is_trash", "true");
   }
 
   const endpoint = `/api/notes${query.toString() ? `?${query.toString()}` : ""}`;

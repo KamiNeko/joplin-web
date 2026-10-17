@@ -17,8 +17,12 @@ export interface NoteListItem {
   title: string;
   updatedTime: number;
   createdTime: number;
+  deletedTime?: number;
   preview: string;
-  notebookId: string;
+  notebookId?: string;
+  parentId?: string;
+  isTodo?: boolean;
+  todoCompleted?: boolean;
 }
 
 /**
@@ -30,6 +34,7 @@ export interface Note {
   body: string;
   updatedTime: number;
   createdTime: number;
+  deletedTime?: number;
   notebookId: string;
   notebookTitle: string;
   tags: Tag[];

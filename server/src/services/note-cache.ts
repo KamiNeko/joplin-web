@@ -204,18 +204,23 @@ export class NoteCacheService {
   }
 
   /**
-   * Builds and returns the nested notebook tree
+   * Builds and returns the nested notebook tree (excluding deleted notebooks)
    */
   public async getNotebooks(sessionId: string): Promise<Notebook[]> {
     const entry = await this.ensureFresh(sessionId);
 
+    // Filter out deleted notebooks
+    const activeNotebooks = Array.from(entry.notebooks.values()).filter(
+      (nb) => !nb.deletedTime || nb.deletedTime === 0
+    );
+
     // Map each raw folder into a Notebook object
     const nodeMap = new Map<string, Notebook>();
 
-    for (const nb of entry.notebooks.values()) {
-      // Calculate note count for direct notes belonging to this notebook
+    for (const nb of activeNotebooks) {
+      // Calculate note count for direct active notes belonging to this notebook
       const directNoteCount = Array.from(entry.notes.values()).filter(
-        (note) => note.parentId === nb.id
+        (note) => note.parentId === nb.id && (!note.deletedTime || note.deletedTime === 0)
       ).length;
 
       nodeMap.set(nb.id, {
@@ -226,6 +231,7 @@ export class NoteCacheService {
         noteCount: directNoteCount,
         createdTime: nb.createdTime,
         updatedTime: nb.updatedTime,
+        deletedTime: nb.deletedTime,
       });
     }
 
@@ -262,13 +268,40 @@ export class NoteCacheService {
    * @param filters Optional filter criteria (notebookId, tagId)
    * @returns List of matching NoteListItems, sorted by updatedTime descending
    */
+  /**
+   * Retrieves notes with optional filtering by notebook or tag
+   * By default, returns only active (non-deleted) notes whose parent notebook is also not deleted.
+   *
+   * @param sessionId Active session ID
+   * @param filters Optional filter criteria (notebookId, tagId, isTrash)
+   * @returns List of matching NoteListItems, sorted by updatedTime descending
+   */
   public async getNotes(
     sessionId: string,
-    filters?: { notebookId?: string; tagId?: string }
+    filters?: { notebookId?: string; tagId?: string; isTrash?: boolean }
   ): Promise<NoteListItem[]> {
     const entry = await this.ensureFresh(sessionId);
 
+    // Identify deleted notebooks
+    const deletedNotebookIds = new Set(
+      Array.from(entry.notebooks.values())
+        .filter((nb) => nb.deletedTime && nb.deletedTime > 0)
+        .map((nb) => nb.id)
+    );
+
     let matchingNotes = Array.from(entry.notes.values());
+
+    if (filters?.isTrash) {
+      // In Trash: note itself has deletedTime > 0, OR its parent notebook is deleted
+      matchingNotes = matchingNotes.filter(
+        (n) => (n.deletedTime && n.deletedTime > 0) || (n.parentId && deletedNotebookIds.has(n.parentId))
+      );
+    } else {
+      // Active notes: note itself has no deletedTime AND parent notebook is not deleted
+      matchingNotes = matchingNotes.filter(
+        (n) => (!n.deletedTime || n.deletedTime === 0) && (!n.parentId || !deletedNotebookIds.has(n.parentId))
+      );
+    }
 
     // Filter by notebook if specified
     if (filters?.notebookId) {
@@ -293,6 +326,7 @@ export class NoteCacheService {
       parentId: n.parentId || '',
       createdTime: n.createdTime,
       updatedTime: n.updatedTime,
+      deletedTime: n.deletedTime || 0,
       preview: stripMarkdown(n.body, 150),
       isTodo: n.isTodo,
       todoCompleted: Boolean(n.todoCompleted),
@@ -320,6 +354,12 @@ export class NoteCacheService {
       ? { id: notebookItem.id, title: notebookItem.title || 'Untitled Notebook' }
       : null;
 
+    // Check if parent notebook is deleted
+    const isParentDeleted = notebookItem ? Boolean(notebookItem.deletedTime && notebookItem.deletedTime > 0) : false;
+    const effectiveDeletedTime = (note.deletedTime && note.deletedTime > 0)
+      ? note.deletedTime
+      : (isParentDeleted ? (notebookItem?.deletedTime || 1) : 0);
+
     // Resolve linked tags
     const linkedTagIds = entry.noteTags
       .filter((link) => link.noteId === noteId)
@@ -339,6 +379,7 @@ export class NoteCacheService {
       tags,
       createdTime: note.createdTime,
       updatedTime: note.updatedTime,
+      deletedTime: effectiveDeletedTime,
       isTodo: note.isTodo,
       todoCompleted: Boolean(note.todoCompleted),
       todoDue: note.todoDue,
@@ -347,19 +388,32 @@ export class NoteCacheService {
   }
 
   /**
-   * Retrieves all tags along with their note counts
+   * Retrieves all tags along with their note counts (only counting active notes)
    */
   public async getTags(sessionId: string): Promise<TagItem[]> {
     const entry = await this.ensureFresh(sessionId);
 
+    const deletedNotebookIds = new Set(
+      Array.from(entry.notebooks.values())
+        .filter((nb) => nb.deletedTime && nb.deletedTime > 0)
+        .map((nb) => nb.id)
+    );
+
     const tagsList: TagItem[] = [];
 
     for (const tag of entry.tags.values()) {
-      // Count distinct notes that exist and are linked to this tag
+      // Count distinct active notes linked to this tag
       const noteIds = new Set<string>();
       for (const link of entry.noteTags) {
-        if (link.tagId === tag.id && entry.notes.has(link.noteId)) {
-          noteIds.add(link.noteId);
+        if (link.tagId === tag.id) {
+          const note = entry.notes.get(link.noteId);
+          if (
+            note &&
+            (!note.deletedTime || note.deletedTime === 0) &&
+            (!note.parentId || !deletedNotebookIds.has(note.parentId))
+          ) {
+            noteIds.add(link.noteId);
+          }
         }
       }
 
@@ -376,7 +430,7 @@ export class NoteCacheService {
   }
 
   /**
-   * Searches notes across titles and body contents (case-insensitive)
+   * Searches notes across titles and body contents (excludes trashed notes by default)
    *
    * @param sessionId Active session ID
    * @param query Search query string
@@ -389,9 +443,22 @@ export class NoteCacheService {
       return [];
     }
 
+    const deletedNotebookIds = new Set(
+      Array.from(entry.notebooks.values())
+        .filter((nb) => nb.deletedTime && nb.deletedTime > 0)
+        .map((nb) => nb.id)
+    );
+
     const results: Array<SearchResult & { relevanceScore: number }> = [];
 
     for (const note of entry.notes.values()) {
+      // Exclude trashed notes from search
+      if (
+        (note.deletedTime && note.deletedTime > 0) ||
+        (note.parentId && deletedNotebookIds.has(note.parentId))
+      ) {
+        continue;
+      }
       const title = note.title || '';
       const body = note.body || '';
       const titleLower = title.toLowerCase();
@@ -421,6 +488,7 @@ export class NoteCacheService {
           parentId: note.parentId || '',
           createdTime: note.createdTime,
           updatedTime: note.updatedTime,
+          deletedTime: note.deletedTime || 0,
           preview: stripMarkdown(note.body, 150),
           isTodo: note.isTodo,
           todoCompleted: Boolean(note.todoCompleted),

@@ -10,6 +10,7 @@ import {
   Files,
   Hash,
   Search,
+  Trash2,
   X,
   FolderTree,
 } from "lucide-react";
@@ -20,7 +21,9 @@ interface SidebarProps {
   selectedNotebookId?: string | null;
   selectedTagId?: string | null;
   isAllNotesSelected?: boolean;
+  isTrashSelected?: boolean;
   onSelectAllNotes: () => void;
+  onSelectTrash: () => void;
   onSelectNotebook: (id: string) => void;
   onSelectTag: (id: string) => void;
   searchQuery: string;
@@ -33,7 +36,9 @@ export function Sidebar({
   selectedNotebookId,
   selectedTagId,
   isAllNotesSelected,
+  isTrashSelected,
   onSelectAllNotes,
+  onSelectTrash,
   onSelectNotebook,
   onSelectTag,
   searchQuery,
@@ -121,6 +126,22 @@ export function Sidebar({
               <div className="flex items-center gap-2">
                 <Files className="h-4 w-4" />
                 <span>All Notes</span>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={onSelectTrash}
+              className={cn(
+                "w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm transition-all duration-150 font-medium",
+                isTrashSelected
+                  ? "bg-destructive/20 text-destructive border border-destructive/30 shadow-sm"
+                  : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <Trash2 className="h-4 w-4" />
+                <span>Trash</span>
               </div>
             </button>
           </div>
