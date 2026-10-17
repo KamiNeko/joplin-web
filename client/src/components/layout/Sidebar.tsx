@@ -4,12 +4,18 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { NotebookTree, NotebookAction } from "@/components/notebooks/NotebookTree";
 import { ConfirmDialog, PromptDialog } from "@/components/common/Dialogs";
-import { useCreateNotebook, useDeleteNotebook, useUpdateNotebook } from "@/hooks/use-mutations";
+import {
+  useCreateNotebook,
+  useDeleteNotebook,
+  useDeleteTag,
+  useRenameTag,
+  useUpdateNotebook,
+} from "@/hooks/use-mutations";
+import { TagListItem } from "@/components/tags/TagListItem";
 import { findNotebookById } from "@/lib/notebooks";
-import { Notebook } from "@/lib/types";
+import { Notebook, Tag } from "@/lib/types";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
   BookOpen,
@@ -58,12 +64,16 @@ export function Sidebar({
   const createNotebook = useCreateNotebook();
   const updateNotebook = useUpdateNotebook();
   const deleteNotebook = useDeleteNotebook();
+  const renameTag = useRenameTag();
+  const deleteTag = useDeleteTag();
 
   // Which notebook dialog is open: create (optionally under a parent), rename, or delete
   const [dialog, setDialog] = useState<
     | { kind: "create"; parent: Notebook | null }
     | { kind: "rename"; notebook: Notebook }
     | { kind: "delete"; notebook: Notebook }
+    | { kind: "rename-tag"; tag: Tag }
+    | { kind: "delete-tag"; tag: Tag }
     | null
   >(null);
 
@@ -109,6 +119,30 @@ export function Sidebar({
         if (selectedNotebookId && findNotebookById([target], selectedNotebookId)) onSelectAllNotes();
       },
       onError: (err) => toast.error("Could not delete notebook", { description: err.message }),
+    });
+  };
+
+  const handleRenameTag = (title: string) => {
+    if (dialog?.kind !== "rename-tag") return;
+    renameTag.mutate(
+      { id: dialog.tag.id, title },
+      {
+        onSuccess: () => setDialog(null),
+        onError: (err) => toast.error("Could not rename tag", { description: err.message }),
+      }
+    );
+  };
+
+  const handleDeleteTag = () => {
+    if (dialog?.kind !== "delete-tag") return;
+    const target = dialog.tag;
+    deleteTag.mutate(target.id, {
+      onSuccess: () => {
+        setDialog(null);
+        toast.success(`Tag "${target.title}" deleted`);
+        if (selectedTagId === target.id) onSelectAllNotes();
+      },
+      onError: (err) => toast.error("Could not delete tag", { description: err.message }),
     });
   };
 
@@ -278,45 +312,16 @@ export function Sidebar({
               </div>
             ) : (
               <div className="space-y-0.5">
-                {tags.map((tag) => {
-                  const isSelected = selectedTagId === tag.id;
-                  return (
-                    <button
-                      key={tag.id}
-                      type="button"
-                      onClick={() => onSelectTag(tag.id)}
-                      className={cn(
-                        "w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm transition-all duration-150",
-                        isSelected
-                          ? "bg-primary/15 text-primary font-medium"
-                          : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
-                      )}
-                    >
-                      <div className="flex items-center gap-2 min-w-0">
-                        <Hash
-                          className={cn(
-                            "h-3.5 w-3.5 shrink-0",
-                            isSelected ? "text-primary" : "text-muted-foreground"
-                          )}
-                        />
-                        <span className="truncate">{tag.title}</span>
-                      </div>
-                      {typeof tag.noteCount === "number" && (
-                        <Badge
-                          variant="secondary"
-                          className={cn(
-                            "px-1.5 py-0 text-[10px] font-mono h-4 min-w-[18px] flex items-center justify-center",
-                            isSelected
-                              ? "bg-primary/20 text-primary border-primary/30"
-                              : "bg-muted text-muted-foreground"
-                          )}
-                        >
-                          {tag.noteCount}
-                        </Badge>
-                      )}
-                    </button>
-                  );
-                })}
+                {tags.map((tag) => (
+                  <TagListItem
+                    key={tag.id}
+                    tag={tag}
+                    isSelected={selectedTagId === tag.id}
+                    onSelect={() => onSelectTag(tag.id)}
+                    onRename={() => setDialog({ kind: "rename-tag", tag })}
+                    onDelete={() => setDialog({ kind: "delete-tag", tag })}
+                  />
+                ))}
               </div>
             )}
           </div>
@@ -354,6 +359,29 @@ export function Sidebar({
         destructive
         isPending={deleteNotebook.isPending}
         onConfirm={handleDelete}
+      />
+      <PromptDialog
+        open={dialog?.kind === "rename-tag"}
+        onOpenChange={(open) => !open && setDialog(null)}
+        title="Rename tag"
+        initialValue={dialog?.kind === "rename-tag" ? dialog.tag.title : ""}
+        confirmLabel="Rename"
+        isPending={renameTag.isPending}
+        onSubmit={handleRenameTag}
+      />
+      <ConfirmDialog
+        open={dialog?.kind === "delete-tag"}
+        onOpenChange={(open) => !open && setDialog(null)}
+        title="Delete tag?"
+        description={
+          dialog?.kind === "delete-tag"
+            ? `"${dialog.tag.title}" will be removed from ${dialog.tag.noteCount} note${dialog.tag.noteCount === 1 ? "" : "s"}. The notes themselves are not changed.`
+            : undefined
+        }
+        confirmLabel="Delete tag"
+        destructive
+        isPending={deleteTag.isPending}
+        onConfirm={handleDeleteTag}
       />
     </aside>
   );

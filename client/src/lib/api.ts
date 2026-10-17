@@ -378,3 +378,31 @@ export function getResourceObjectUrl(resourceId: string): Promise<string> {
   }
   return pending;
 }
+
+/**
+ * Adds a tag to a note by title; an existing tag with the same title is reused.
+ */
+export async function addTagToNote(noteId: string, title: string): Promise<Note> {
+  return request<Note>(`/api/notes/${noteId}/tags`, { method: "POST", body: JSON.stringify({ title }) });
+}
+
+/**
+ * Removes a tag from a note (the tag itself is kept).
+ */
+export async function removeTagFromNote(noteId: string, tagId: string): Promise<Note> {
+  return request<Note>(`/api/notes/${noteId}/tags/${tagId}`, { method: "DELETE" });
+}
+
+/**
+ * Renames a tag.
+ */
+export async function renameTag(id: string, title: string): Promise<Tag> {
+  return request<Tag>(`/api/tags/${id}`, { method: "PUT", body: JSON.stringify({ title }) });
+}
+
+/**
+ * Deletes a tag and removes it from all notes.
+ */
+export async function deleteTag(id: string): Promise<void> {
+  await request(`/api/tags/${id}`, { method: "DELETE" });
+}

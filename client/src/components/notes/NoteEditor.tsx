@@ -7,6 +7,7 @@ import { ApiError, getConflictNote, updateNote } from "@/lib/api";
 import { invalidateLists } from "@/hooks/use-mutations";
 import { setTaskChecked } from "@/lib/tasks";
 import { MarkdownEditor } from "./MarkdownEditor";
+import { TagEditor } from "@/components/tags/TagEditor";
 import { MarkdownRenderer } from "@/components/common/MarkdownRenderer";
 import { Button } from "@/components/ui/button";
 import {
@@ -321,6 +322,9 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
             mode !== "split" && "max-w-4xl mx-auto"
           )}
         />
+        <div className={cn("pt-2 text-xs text-muted-foreground", mode !== "split" && "max-w-4xl mx-auto")}>
+          <TagEditor noteId={note.id} tags={note.tags ?? []} />
+        </div>
       </div>
 
       {/* Body */}

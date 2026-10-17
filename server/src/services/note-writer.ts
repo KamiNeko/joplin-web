@@ -111,6 +111,40 @@ function defaultFolderProperties(id: string, parentId: string): Record<string, s
   };
 }
 
+/** Default property set Joplin desktop writes for a new tag */
+function defaultTagProperties(id: string): Record<string, string> {
+  const now = new Date().toISOString();
+  return {
+    id,
+    created_time: now,
+    updated_time: now,
+    user_created_time: now,
+    user_updated_time: now,
+    encryption_cipher_text: '',
+    encryption_applied: '0',
+    is_shared: '0',
+    parent_id: '',
+    user_data: '',
+  };
+}
+
+/** Default property set Joplin desktop writes for a note-tag link */
+function defaultNoteTagProperties(id: string, noteId: string, tagId: string): Record<string, string> {
+  const now = new Date().toISOString();
+  return {
+    id,
+    note_id: noteId,
+    tag_id: tagId,
+    created_time: now,
+    updated_time: now,
+    user_created_time: now,
+    user_updated_time: now,
+    encryption_cipher_text: '',
+    encryption_applied: '0',
+    is_shared: '0',
+  };
+}
+
 /**
  * Write operations against Joplin Server. Every write re-reads the item from the server first,
  * keeps its original properties, and updates the in-memory cache afterwards.
@@ -129,7 +163,12 @@ export class NoteWriterService {
   private async fetchFreshOfType(sessionId: string, id: string, type: JoplinItemType): Promise<RawJoplinItem> {
     const item = await this.fetchFresh(sessionId, id);
     if (item.type_ !== type) {
-      throw new WriteValidationError(`Item ${id} is not a ${type === JoplinItemType.Note ? 'note' : 'notebook'}`, 404);
+      const names: Partial<Record<JoplinItemType, string>> = {
+        [JoplinItemType.Note]: 'note',
+        [JoplinItemType.Folder]: 'notebook',
+        [JoplinItemType.Tag]: 'tag',
+      };
+      throw new WriteValidationError(`Item ${id} is not a ${names[type] ?? 'supported item'}`, 404);
     }
     return item;
   }
@@ -137,7 +176,7 @@ export class NoteWriterService {
   /** Serializes and uploads an item, then mirrors it into the cache */
   private async write(
     sessionId: string,
-    item: { type_: number; title: string; body: string; properties: Record<string, string> }
+    item: { type_: number; title?: string; body: string; properties: Record<string, string> }
   ): Promise<RawJoplinItem> {
     const content = serialize(item);
     const id = item.properties.id;
@@ -406,6 +445,95 @@ export class NoteWriterService {
     }
     return { notebooks: folderIds.length, notes: noteIds.length };
   }
+
+  // ---------------------------------------------------------------------------
+  // Tags
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Tags a note. Reuses an existing tag with the same title (case-insensitive, like Joplin),
+   * otherwise creates it. Tagging doesn't modify the note item itself.
+   */
+  public async addTagToNote(sessionId: string, noteId: string, title: string): Promise<NoteDetail> {
+    assertValidId(noteId, 'note id');
+    const tagTitle = sanitizeTitle(title);
+    if (!tagTitle) throw new WriteValidationError('Tag title is required');
+    await this.fetchFreshOfType(sessionId, noteId, JoplinItemType.Note);
+
+    const entry = await noteCache.getEntry(sessionId);
+    let tag = Array.from(entry.tags.values()).find(
+      (t) => t.title.trim().toLowerCase() === tagTitle.toLowerCase()
+    );
+    if (!tag) {
+      tag = await this.write(sessionId, {
+        type_: JoplinItemType.Tag,
+        title: tagTitle,
+        body: '',
+        properties: defaultTagProperties(newId()),
+      });
+    }
+
+    const alreadyTagged = entry.noteTags.some((link) => link.noteId === noteId && link.tagId === tag!.id);
+    if (!alreadyTagged) {
+      const linkId = newId();
+      await this.write(sessionId, {
+        type_: JoplinItemType.NoteTag,
+        body: '',
+        properties: defaultNoteTagProperties(linkId, noteId, tag.id),
+      });
+    }
+    return this.noteDetail(sessionId, noteId);
+  }
+
+  /** Removes a tag from a note (deletes the note-tag link items; the tag itself stays) */
+  public async removeTagFromNote(sessionId: string, noteId: string, tagId: string): Promise<NoteDetail> {
+    assertValidId(noteId, 'note id');
+    assertValidId(tagId, 'tag id');
+    const entry = await noteCache.getEntry(sessionId);
+    const links = entry.noteTags.filter((link) => link.noteId === noteId && link.tagId === tagId);
+    for (const link of links) {
+      if (!ID_PATTERN.test(link.id)) continue;
+      await joplinApi.deleteItem(sessionId, `${link.id}.md`);
+      noteCache.removeItem(sessionId, link.id);
+    }
+    return this.noteDetail(sessionId, noteId);
+  }
+
+  public async renameTag(sessionId: string, tagId: string, title: string): Promise<{ id: string; title: string }> {
+    assertValidId(tagId, 'tag id');
+    const tagTitle = sanitizeTitle(title);
+    if (!tagTitle) throw new WriteValidationError('Tag title is required');
+
+    const entry = await noteCache.getEntry(sessionId);
+    const clash = Array.from(entry.tags.values()).find(
+      (t) => t.id !== tagId && t.title.trim().toLowerCase() === tagTitle.toLowerCase()
+    );
+    if (clash) throw new WriteValidationError(`A tag named "${clash.title}" already exists`, 409);
+
+    const current = await this.fetchFreshOfType(sessionId, tagId, JoplinItemType.Tag);
+    const props = { ...current.properties };
+    touch(props);
+    await this.write(sessionId, { type_: JoplinItemType.Tag, title: tagTitle, body: '', properties: props });
+    return { id: tagId, title: tagTitle };
+  }
+
+  /** Deletes a tag and all its note-tag links; the notes themselves are untouched */
+  public async deleteTag(sessionId: string, tagId: string): Promise<{ notes: number }> {
+    assertValidId(tagId, 'tag id');
+    await this.fetchFreshOfType(sessionId, tagId, JoplinItemType.Tag);
+    const entry = await noteCache.getEntry(sessionId);
+    const links = entry.noteTags.filter((link) => link.tagId === tagId);
+
+    for (const link of links) {
+      if (!ID_PATTERN.test(link.id)) continue;
+      await joplinApi.deleteItem(sessionId, `${link.id}.md`);
+      noteCache.removeItem(sessionId, link.id);
+    }
+    await joplinApi.deleteItem(sessionId, `${tagId}.md`);
+    noteCache.removeItem(sessionId, tagId);
+    return { notes: links.length };
+  }
 }
 
 export const noteWriter = new NoteWriterService();
+
