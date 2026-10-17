@@ -11,7 +11,7 @@ flowchart LR
         B["Express backend<br/>auth · note cache · serializer · writer"]
     end
     C["Joplin Server"]
-    A -->|"JSON REST /api/*<br/>Authorization: Bearer &lt;session&gt;"| B
+    A -->|"JSON REST /api/*<br/>httpOnly session cookie"| B
     B -->|"Sync protocol<br/>/api/sessions, /api/items/*<br/>X-API-AUTH: &lt;session&gt;"| C
 ```
 
@@ -25,10 +25,12 @@ In production the backend also serves the compiled client (`client/dist`) on the
 | `services/serializer.ts` | `deserialize` / `serialize` Joplin's text format, `stripMarkdown` for list previews. |
 | `services/note-cache.ts` | Per-session in-memory cache of all items, refreshed after `CACHE_TTL_MS`; only items whose `updated_time` changed are re-fetched. Builds the notebook tree, note lists, tag counts and search. |
 | `services/note-writer.ts` | All writes: create/update/trash/restore/purge for notes, notebooks, tags, note-tag links and resources; conflict detection. |
-| `middleware/auth.ts` | Accepts the session as `Authorization: Bearer` or `X-API-AUTH` (never in the query string, which would leak into logs and referrers); validates it against Joplin Server and caches the result for `AUTH_CACHE_TTL_MS`. |
+| `app.ts` | `createApp(config)`: helmet/CSP, CORS, rate limits, origin check, routers, static client. `index.ts` only starts it. |
+| `middleware/auth.ts` | Accepts the session as `Authorization: Bearer` / `X-API-AUTH` (API clients) or the httpOnly `joplin_web_session` cookie (browser); never in the query string, which would leak into logs and referrers. Validates it against Joplin Server and caches the result for `AUTH_CACHE_TTL_MS`; logged-out sessions are cached as invalid. |
+| `middleware/origin-check.ts` | CSRF protection for POST/PUT/DELETE: the `Origin` header must match the request's `Host`/`X-Forwarded-Host`, `PUBLIC_URL` or `CORS_ORIGIN`. Requests without `Origin` (non-browser clients) pass only when they don't use the cookie. |
 | `middleware/request-logger.ts` | morgan access log with sensitive query parameters (`auth`, `token`, `password`, …) redacted. |
 | `middleware/error-handler.ts` | Maps errors to JSON responses; 5xx responses carry a generic message only (details are logged). |
-| `config.ts` | Reads the environment; exits at startup when `JOPLIN_SERVER_URL` is missing or not an http(s) URL. There is no default server. |
+| `config.ts` | Reads the environment (`JOPLIN_SERVER_URL`, `PUBLIC_URL`, `TRUST_PROXY`, `ALLOW_REMOTE_IMAGES`, `COOKIE_SECURE`, …); exits at startup on invalid values or when `JOPLIN_SERVER_URL` is missing. There is no default server. |
 | `routes/*.ts` | Thin Express routers per resource. |
 
 ## Joplin sync protocol
@@ -39,6 +41,7 @@ In production the backend also serves the compiled client (`client/dist`) on the
 | :--- | :--- |
 | `GET /api/ping` | Health check |
 | `POST /api/sessions` `{ email, password }` | Login, returns `{ id, user_id }` |
+| `POST /logout` (`X-API-AUTH` + `sessionId` cookie) | Ends the session (Joplin Server's web logout; there is no API route for it). Answers with a redirect. |
 | `GET /api/items/root:/:/children?cursor=` | Paginated listing of all items (`{ items, has_more, cursor }`) |
 | `GET /api/items/root:/<id>.md:/content` | Raw item text |
 | `GET /api/items/root:/.resource/<id>:/content` | Attachment binary |
@@ -86,9 +89,9 @@ All routes except `/api/health` and `/api/auth/login` require a session.
 | Method | Path | Description |
 | :--- | :--- | :--- |
 | `GET` | `/api/health` | Health check |
-| `POST` | `/api/auth/login` | `{ email, password }` → `{ sessionId, userId }` |
-| `POST` | `/api/auth/logout` | Drops cached session state |
-| `GET` | `/api/auth/check` | Validates the session |
+| `POST` | `/api/auth/login` | `{ email, password }` → `{ userId }` and the session cookie (`HttpOnly; SameSite=Strict; Path=/api`, `Secure` over HTTPS). Only requests without an `Origin` header (non-browser API clients) also get `sessionId` in the body. |
+| `POST` | `/api/auth/logout` | Ends the session on Joplin Server, drops cached session state and the note cache, clears the cookie |
+| `GET` | `/api/auth/check` | Validates the session → `{ valid: true }` |
 | `GET` | `/api/notebooks` | Nested notebook tree with note counts |
 | `POST` | `/api/notebooks/refresh` | Forces a cache re-sync |
 | `POST` | `/api/notebooks` | Create notebook `{ title, parentId }` |
@@ -112,13 +115,20 @@ All routes except `/api/health` and `/api/auth/login` require a session.
 
 ### Security headers
 
-- helmet's defaults apply to every response, with `img-src 'self' data: blob:` (attachments are shown through `blob:` URLs) and `Referrer-Policy: no-referrer`.
+- helmet's defaults apply to every response, with `img-src 'self' data: blob:` (attachments are shown through `blob:`/`data:` URLs; `https:` is added with `ALLOW_REMOTE_IMAGES`) and `Referrer-Policy: no-referrer`. `upgrade-insecure-requests` is only sent when `PUBLIC_URL` is `https://`, so plain-HTTP LAN setups keep working. The Vite dev server sends the same `img-src`.
+- `script-src` must stay `'self'` and must **never** allow `'unsafe-inline'`: attachment `blob:` URLs opened directly run in the app's origin, and the CSP is what keeps script in them from running.
 - **Serving attachments:** attachments are user content served from our origin, so `GET /api/resources/:id` always sends `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'; …; sandbox`. Only raster images, PDF, plain text, audio and video are sent `inline`. SVG keeps `image/svg+xml` (so `<img>` can show it) but is sent as `attachment`; every other type (HTML, XML, JavaScript, unknown or malformed types) becomes `application/octet-stream` + `attachment`. File names go into `Content-Disposition` as an ASCII fallback plus RFC 5987 `filename*`.
-- The client loads attachments with `fetch` + session header and renders them from `blob:` URLs; it never puts the session into a URL.
+- The client loads attachments with `fetch` (session cookie) and renders them from `blob:` URLs. SVG is rendered from a `data:` URL instead (browsers don't open `data:` URLs as documents), and downloads use `application/octet-stream` blobs, so an SVG never becomes a document in the app's origin.
+
+### Sessions
+
+- The browser never sees the token: it lives in the httpOnly cookie. On startup the client calls `/api/auth/check`; only the email address (for display) is kept in `localStorage`.
+- `TRUST_PROXY` sets Express' `trust proxy`, so `req.ip` (rate limits, logs) and `req.secure` (cookie `Secure` flag) reflect the client behind a reverse proxy. Off by default, so a directly exposed instance can't be fooled by a forged `X-Forwarded-For`.
+- Logout (client): unmounts the notes UI so open editors flush their changes, waits for pending writes, calls `/api/auth/logout`, then clears the TanStack Query cache and revokes cached attachment URLs. Login also clears the query cache.
 
 ## Frontend (`client/src`)
 
-- `lib/api.ts`: fetch wrapper; stores the session in `localStorage`.
+- `lib/api.ts`: fetch wrapper (`credentials: "include"`, `referrerPolicy: "same-origin"` so the CSRF check gets a real `Origin`); a 401 on an authenticated request redirects to `/login`, while login and session checks show the server's error message.
 - `hooks/use-*.ts`: TanStack Query hooks; `use-mutations.ts` invalidates note/notebook/tag queries after writes.
 - `pages/NotesPage.tsx`: three-pane layout (sidebar, note list, note view/editor), driven by the routes `/notes/:id`, `/notebooks/:notebookId/notes/:id`, `/trash/:id` and `?tag=`.
 - `components/notes/NoteEditor.tsx`: CodeMirror editor, Edit/Split/Preview, debounced autosave, `Ctrl+S`, conflict dialog, attachment upload.

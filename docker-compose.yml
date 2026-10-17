@@ -11,6 +11,10 @@ services:
       - PORT=${PORT:-3001}
       - NODE_ENV=production
       - CORS_ORIGIN=${CORS_ORIGIN:-}
+      - PUBLIC_URL=${PUBLIC_URL:-}
+      - TRUST_PROXY=${TRUST_PROXY:-}
+      - ALLOW_REMOTE_IMAGES=${ALLOW_REMOTE_IMAGES:-}
+      - COOKIE_SECURE=${COOKIE_SECURE:-}
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:3001/api/health || curl -f http://localhost:3001/health || exit 1"]

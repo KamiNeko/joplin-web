@@ -141,6 +141,25 @@ export class JoplinApiService {
   }
 
   /**
+   * Ends a session on Joplin Server. Joplin Server has no API route for this; its web UI logs out
+   * with POST /logout, which deletes the session named by X-API-AUTH or the sessionId cookie and
+   * redirects to the login page.
+   *
+   * @param sessionId Session to end
+   */
+  public async deleteSession(sessionId: string): Promise<void> {
+    try {
+      await this.client.post('/logout', null, {
+        headers: { 'X-API-AUTH': sessionId, Cookie: `sessionId=${encodeURIComponent(sessionId)}` },
+        maxRedirects: 0,
+        validateStatus: (status) => status >= 200 && status < 400,
+      });
+    } catch (error) {
+      this.handleError(error, 'deleteSession');
+    }
+  }
+
+  /**
    * Validates if a session ID is currently active and authorized by making a test API call
    *
    * @param sessionId Joplin Server session ID

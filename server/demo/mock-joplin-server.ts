@@ -9,6 +9,7 @@ import { randomBytes } from 'crypto';
  * Implements exactly the endpoints Joplin Web uses (see src/services/joplin-api.ts):
  *   GET    /api/ping
  *   POST   /api/sessions                              { email, password } -> { id, user_id }
+ *   POST   /logout                                    ends the session (X-API-AUTH or sessionId cookie)
  *   GET    /api/items/root:/:/children                paginated { items, has_more, cursor }
  *   GET    /api/items/root:/<name>:/content           raw item text or resource binary
  *   PUT    /api/items/root:/<name>:/content           multipart upload (field "file")
@@ -87,6 +88,15 @@ export async function startMockJoplinServer(
     const id = randomBytes(11).toString('base64url');
     sessions.add(id);
     res.json({ id, user_id: 'mockuser0000000000000000000000' });
+  });
+
+  // Joplin Server's web logout: ends the session from X-API-AUTH or the sessionId cookie
+  app.post('/logout', (req, res) => {
+    const header = req.headers['x-api-auth'];
+    const cookie = /(?:^|;\s*)sessionId=([^;]*)/.exec(req.headers.cookie ?? '')?.[1];
+    const id = typeof header === 'string' && header ? header : cookie ? decodeURIComponent(cookie) : '';
+    sessions.delete(id);
+    res.redirect(302, '/login');
   });
 
   app.use('/api/items', express.raw({ type: () => true, limit: '50mb' }), (req: Request, res: Response) => {
