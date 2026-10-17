@@ -73,7 +73,7 @@ cp .env.example .env    # then set JOPLIN_SERVER_URL in .env
 docker compose up -d --build
 ```
 
-Open `http://localhost:3001` and sign in with your Joplin Server account.
+Open `http://localhost:3001` (or the `HOST_PORT` you set) and sign in with your Joplin Server account.
 
 > [!IMPORTANT]
 > Your Joplin password passes through Joplin Web on its way to your Joplin Server. Put Joplin Web behind a reverse proxy with **HTTPS** (Caddy, Traefik, nginx, …) before you use it outside your home network.
@@ -88,21 +88,40 @@ docker run -d --name joplin-web -p 3001:3001 \
   --restart unless-stopped joplin-web
 ```
 
+To publish on another host port, change only the left side of the mapping, e.g. `-p 8080:3001`.
+
 </details>
 
 ### Configuration
 
+Docker Compose passes every variable in `.env` to the container. [`.env.example`](.env.example) lists them all.
+
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `JOPLIN_SERVER_URL` | *(required)* | Base URL of your Joplin Server, e.g. `https://notes.example.com`. Joplin Web refuses to start without it. |
-| `PORT` | `3001` | Port Joplin Web listens on. |
-| `CORS_ORIGIN` | `http://localhost:5173` | Allowed origins for API calls (comma-separated). Only needed when the UI is served from another origin. |
-| `CACHE_TTL_MS` | `30000` | How long the note cache is used before it is re-synced with Joplin Server. |
-| `AUTH_CACHE_TTL_MS` | `300000` | How long a validated session is trusted before it is checked again. |
+| `HOST_PORT` | `3001` | Docker Compose only: the port published on the host. The container itself always listens on 3001. |
+| `CORS_ORIGIN` | *(none)* | Allowed origins for API calls (comma-separated). Only needed when the UI is served from another origin than the API; the single-container setup doesn't need it. Without Docker in development mode the default is `http://localhost:5173`. |
+| `CACHE_TTL_MS` | `30000` | How long the note cache is used before it is re-synced with Joplin Server, in milliseconds. |
+| `AUTH_CACHE_TTL_MS` | `300000` | How long a validated session is trusted before it is checked again, in milliseconds. |
+| `PORT` | `3001` | Port the server listens on when run without Docker. Leave it unset for the container; use `HOST_PORT` or the `-p` mapping instead. |
+
+### Updating and versions
+
+Each release is tagged `vX.Y.Z` and described in [CHANGELOG.md](CHANGELOG.md) and on the [releases page](https://github.com/KamiNeko/joplin-web/releases). To update a source build, or to go back to an earlier release (replace `v1.2.3` with a real release):
+
+```bash
+git fetch --tags
+git checkout v1.2.3          # the release you want; `git checkout main` follows the latest code
+docker compose up -d --build
+```
+
+Tagged releases are also published as multi-arch images (amd64, arm64) at `ghcr.io/kamineko/joplin-web`. To use one, replace `build:` in `docker-compose.yml` with `image: ghcr.io/kamineko/joplin-web:1.2.3`, then run `docker compose pull && docker compose up -d`. Pin an exact version so that you choose when to update, and roll back by setting the previous version again.
+
+To see which version is running, open `http://localhost:3001/api/health`. It returns the version and commit (and nothing about your configuration). Please include them in bug reports.
 
 ### Try it without a Joplin Server
 
-Want to look around first? The demo mode starts a built-in mock Joplin Server with sample notes. It needs Node.js 20+:
+Want to look around first? The demo mode starts a built-in mock Joplin Server with sample notes. It needs Node.js 22+ (see [`.nvmrc`](.nvmrc)):
 
 ```bash
 npm --prefix server install && npm --prefix client install
@@ -117,6 +136,7 @@ Open `http://localhost:5173` and sign in with `demo@joplin-web.test` / `demo`. E
 - **End-to-end encrypted (E2EE) notes are not supported.** Encrypted items can't be read or edited.
 - Joplin Web is built and tested against self-hosted Joplin Server. Joplin Cloud is untested.
 - Note history (revisions) and plugins are not available.
+- Prebuilt images are published from the first `vX.Y.Z` release on. Until then, build from source as shown above.
 
 ## How it works
 
@@ -138,7 +158,7 @@ The production build is a single container: the backend serves the compiled Reac
 
 Contributions are welcome: bug reports, ideas and pull requests.
 
-**Tech stack:** React 18, TypeScript, Vite, Tailwind CSS, shadcn/ui, TanStack Query and CodeMirror 6 on the frontend; Node.js 20, Express and TypeScript on the backend.
+**Tech stack:** React 18, TypeScript, Vite, Tailwind CSS, shadcn/ui, TanStack Query and CodeMirror 6 on the frontend; Node.js 24, Express and TypeScript on the backend.
 
 ```text
 client/   React single-page app (Vite)
@@ -152,7 +172,7 @@ docs/     Architecture notes and screenshots
 ### Development setup
 
 ```bash
-cp .env.example server/.env              # point JOPLIN_SERVER_URL at a test server
+cp server/.env.example server/.env       # point JOPLIN_SERVER_URL at a test server
 npm --prefix server install && npm --prefix server run dev   # API on :3001
 npm --prefix client install && npm --prefix client run dev   # UI on :5173
 ```

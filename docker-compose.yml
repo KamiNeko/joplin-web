@@ -1,20 +1,19 @@
 services:
   joplin-web:
     container_name: joplin-web
+    # Builds from this checkout. Once a release is published you can use the prebuilt image
+    # instead: comment out `build:` and uncomment `image:` (pin a version, not `latest`).
+    # image: ghcr.io/kamineko/joplin-web:1.0.0
     build:
       context: .
       dockerfile: docker/Dockerfile
-    ports:
-      - "${PORT:-3001}:3001"
+    # Every variable from .env (JOPLIN_SERVER_URL, CORS_ORIGIN, CACHE_TTL_MS, ...) is passed in
+    env_file: .env
     environment:
-      - JOPLIN_SERVER_URL=${JOPLIN_SERVER_URL}
-      - PORT=${PORT:-3001}
-      - NODE_ENV=production
-      - CORS_ORIGIN=${CORS_ORIGIN:-}
+      NODE_ENV: production
+      # The container always listens on 3001; HOST_PORT only changes the published port
+      PORT: "3001"
+    ports:
+      - "${HOST_PORT:-3001}:3001"
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:3001/api/health || curl -f http://localhost:3001/health || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+    # Healthcheck is defined in docker/Dockerfile (GET /api/health)
