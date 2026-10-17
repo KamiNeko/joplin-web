@@ -6,11 +6,52 @@ import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import rehypeHighlight from "rehype-highlight";
 import { Check, Copy, ExternalLink } from "lucide-react";
 import { getResourceUrl } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { useNavigate } from "react-router-dom";
 
 interface MarkdownRendererProps {
   content: string;
   className?: string;
+  /** Makes task-list checkboxes clickable; index is the task's position in document order */
+  onToggleTask?: (index: number, checked: boolean) => void;
+}
+
+interface HastNode {
+  type: string;
+  tagName?: string;
+  properties?: Record<string, unknown>;
+  children?: HastNode[];
+}
+
+/**
+ * Rehype plugin that numbers GFM task-list checkboxes in document order (data-task-index),
+ * so a click can be mapped back to the matching "[ ]" in the Markdown source.
+ */
+function rehypeTaskIndex() {
+  return (tree: HastNode) => {
+    let index = 0;
+    const findCheckbox = (node: HastNode): HastNode | null => {
+      for (const child of node.children ?? []) {
+        if (child.type !== "element") continue;
+        if (child.tagName === "input" && child.properties?.type === "checkbox") return child;
+        // The checkbox sits directly in the <li>, or in its first <p> for loose lists
+        if (child.tagName === "p") return findCheckbox(child);
+        return null;
+      }
+      return null;
+    };
+    const walk = (node: HastNode) => {
+      if (node.type === "element" && node.tagName === "li") {
+        const classes = node.properties?.className;
+        if (Array.isArray(classes) && classes.includes("task-list-item")) {
+          const checkbox = findCheckbox(node);
+          if (checkbox?.properties) checkbox.properties.dataTaskIndex = index++;
+        }
+      }
+      node.children?.forEach(walk);
+    };
+    walk(tree);
+  };
 }
 
 // Custom sanitize schema allowing highlight classes and common markdown elements
@@ -139,7 +180,7 @@ function CodeBlock({ inline, className, children, ...props }: CodeBlockProps) {
  * Reusable Markdown renderer for Joplin notes with code highlighting,
  * resource resolving, and beautiful typography.
  */
-export function MarkdownRenderer({ content, className }: MarkdownRendererProps) {
+export function MarkdownRenderer({ content, className, onToggleTask }: MarkdownRendererProps) {
   const navigate = useNavigate();
   const processedContent = preprocessJoplinMarkdown(content);
 
@@ -150,6 +191,7 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
         rehypePlugins={[
           rehypeRaw,
           [rehypeSanitize, sanitizeSchema],
+          rehypeTaskIndex,
           rehypeHighlight,
         ]}
         components={{
@@ -242,18 +284,29 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
               {children}
             </blockquote>
           ),
-          ul: ({ children, ...props }) => (
-            <ul className="my-3 ml-6 list-disc space-y-1 text-foreground/90" {...props}>
-              {children}
-            </ul>
-          ),
-          ol: ({ children, ...props }) => (
-            <ol className="my-3 ml-6 list-decimal space-y-1 text-foreground/90" {...props}>
+          ul: ({ children, className, ...props }) => {
+            // Task lists drop the bullet (the checkbox is the marker); nested ones stay indented
+            const isTaskList = className?.includes("contains-task-list");
+            return (
+              <ul
+                {...props}
+                className={cn(
+                  "my-3 ml-6 list-disc space-y-1 text-foreground/90",
+                  isTaskList && "ml-0 list-none [li_&]:ml-6 [li_&]:my-1",
+                  className
+                )}
+              >
+                {children}
+              </ul>
+            );
+          },
+          ol: ({ children, className, ...props }) => (
+            <ol {...props} className={cn("my-3 ml-6 list-decimal space-y-1 text-foreground/90", className)}>
               {children}
             </ol>
           ),
-          li: ({ children, ...props }) => (
-            <li className="leading-relaxed" {...props}>
+          li: ({ children, className, ...props }) => (
+            <li {...props} className={cn("leading-relaxed", className)}>
               {children}
             </li>
           ),
@@ -286,14 +339,18 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
           hr: (props) => <hr className="my-6 border-border/60" {...props} />,
           input: ({ type, checked, ...props }) => {
             if (type === "checkbox") {
+              const taskIndex = Number((props as Record<string, unknown>)["data-task-index"]);
+              const interactive = Boolean(onToggleTask) && Number.isInteger(taskIndex);
               return (
                 <input
                   type="checkbox"
-                  checked={checked}
-                  readOnly
-                  disabled
-                  className="mr-2 h-4 w-4 rounded border-border text-primary accent-primary cursor-default align-middle"
-                  {...props}
+                  checked={Boolean(checked)}
+                  readOnly={!interactive}
+                  disabled={!interactive}
+                  onChange={interactive ? (e) => onToggleTask?.(taskIndex, e.target.checked) : undefined}
+                  className={`mr-2 h-4 w-4 rounded border-border text-primary accent-primary align-middle ${
+                    interactive ? "cursor-pointer" : "cursor-default"
+                  }`}
                 />
               );
             }

@@ -1,7 +1,10 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Note, Notebook } from "@/lib/types";
 import { flattenNotebooks } from "@/lib/notebooks";
+import { setTaskChecked } from "@/lib/tasks";
+import { getConflictNote, updateNote as updateNoteRequest } from "@/lib/api";
 import { MarkdownRenderer } from "@/components/common/MarkdownRenderer";
 import { ConfirmDialog } from "@/components/common/Dialogs";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -36,7 +39,7 @@ import {
 import { formatRelativeTime } from "./NoteListItem";
 import { NoteEditor } from "./NoteEditor";
 import { Button } from "@/components/ui/button";
-import { useDeleteNote, useRestoreNote, useUpdateNote } from "@/hooks/use-mutations";
+import { invalidateLists, useDeleteNote, useRestoreNote, useUpdateNote } from "@/hooks/use-mutations";
 import { cn } from "@/lib/utils";
 
 interface NoteViewerProps {
@@ -69,6 +72,7 @@ export function NoteViewer({
   const updateNote = useUpdateNote();
   const deleteNote = useDeleteNote();
   const restoreNote = useRestoreNote();
+  const toggleTask = useTaskToggle(note?.id);
 
   if (isLoading) {
     return (
@@ -380,7 +384,7 @@ export function NoteViewer({
 
             <div className="pt-2">
               {note.body.trim() ? (
-                <MarkdownRenderer content={note.body} />
+                <MarkdownRenderer content={note.body} onToggleTask={isTrashed ? undefined : toggleTask} />
               ) : (
                 <button
                   type="button"
@@ -412,4 +416,84 @@ export function NoteViewer({
       />
     </div>
   );
+}
+
+const TASK_SAVE_DELAY_MS = 600;
+
+/**
+ * Checkbox toggling in read mode: updates the cached note immediately and saves the body
+ * shortly after (one save at a time, so quick successive clicks don't conflict with each other).
+ */
+function useTaskToggle(noteId: string | undefined) {
+  const queryClient = useQueryClient();
+  const baseUpdatedTimeRef = useRef<number | null>(null);
+  const savingRef = useRef(false);
+  const timerRef = useRef<number | null>(null);
+
+  // Flush a pending save when the note is closed instead of dropping it
+  const saveRef = useRef<() => Promise<void>>();
+  useEffect(
+    () => () => {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current);
+        void saveRef.current?.();
+      }
+    },
+    []
+  );
+
+  const save = async () => {
+    timerRef.current = null;
+    if (!noteId) return;
+    if (savingRef.current) {
+      timerRef.current = window.setTimeout(() => void save(), TASK_SAVE_DELAY_MS);
+      return;
+    }
+    const cached = queryClient.getQueryData<Note>(["note", noteId]);
+    if (!cached) return;
+
+    savingRef.current = true;
+    try {
+      const saved = await updateNoteRequest(noteId, {
+        body: cached.body,
+        baseUpdatedTime: baseUpdatedTimeRef.current ?? cached.updatedTime,
+      });
+      baseUpdatedTimeRef.current = saved.updatedTime;
+      // Keep any newer optimistic body (more clicks while saving); its save is already scheduled
+      const latest = queryClient.getQueryData<Note>(["note", noteId]);
+      queryClient.setQueryData<Note>(["note", noteId], { ...saved, body: latest?.body ?? saved.body });
+      invalidateLists(queryClient);
+    } catch (err) {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+      baseUpdatedTimeRef.current = null;
+      const current = getConflictNote(err);
+      if (current) {
+        queryClient.setQueryData(["note", noteId], current);
+        toast.error("This note was changed elsewhere", {
+          description: "Your checkbox change was not saved. The latest version is shown now.",
+        });
+      } else {
+        queryClient.invalidateQueries({ queryKey: ["note", noteId] });
+        toast.error("Could not update checkbox", {
+          description: err instanceof Error ? err.message : undefined,
+        });
+      }
+    } finally {
+      savingRef.current = false;
+    }
+  };
+
+  saveRef.current = save;
+
+  return (index: number, checked: boolean) => {
+    if (!noteId) return;
+    const cached = queryClient.getQueryData<Note>(["note", noteId]);
+    if (!cached) return;
+    const body = setTaskChecked(cached.body, index, checked);
+    if (body === null) return;
+    queryClient.setQueryData<Note>(["note", noteId], { ...cached, body });
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => void save(), TASK_SAVE_DELAY_MS);
+  };
 }

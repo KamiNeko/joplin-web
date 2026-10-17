@@ -5,6 +5,7 @@ import { AlertTriangle, Check, Columns2, Eye, Loader2, PencilLine } from "lucide
 import { Note } from "@/lib/types";
 import { ApiError, getConflictNote, updateNote } from "@/lib/api";
 import { invalidateLists } from "@/hooks/use-mutations";
+import { setTaskChecked } from "@/lib/tasks";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { MarkdownRenderer } from "@/components/common/MarkdownRenderer";
 import { Button } from "@/components/ui/button";
@@ -57,7 +58,11 @@ interface NoteEditorProps {
 export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState<Draft>({ title: note.title, body: note.body });
-  const [mode, setMode] = useState<EditorMode>(loadMode);
+  // Preview-only would leave nothing to type into for an empty note, so start in split view then
+  const [mode, setMode] = useState<EditorMode>(() => {
+    const stored = loadMode();
+    return stored === "preview" && !note.body.trim() ? "split" : stored;
+  });
   const [status, setStatus] = useState<SaveStatus>("saved");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [conflict, setConflict] = useState<Note | null>(null);
@@ -303,7 +308,9 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
-              (document.querySelector(".cm-content") as HTMLElement | null)?.focus();
+              // In preview-only mode there is no editor to jump to, so open the split view first
+              if (mode === "preview") setMode("split");
+              window.setTimeout(() => (document.querySelector(".cm-content") as HTMLElement | null)?.focus(), 0);
             }
           }}
           autoFocus={focusTitle}
@@ -350,7 +357,13 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
           >
             <div className="max-w-4xl mx-auto">
               {deferredBody.trim() ? (
-                <MarkdownRenderer content={deferredBody} />
+                <MarkdownRenderer
+                  content={deferredBody}
+                  onToggleTask={(index, checked) => {
+                    const body = setTaskChecked(draftRef.current.body, index, checked);
+                    if (body !== null) updateDraft({ body });
+                  }}
+                />
               ) : (
                 <p className="text-sm text-muted-foreground italic">Nothing to preview yet.</p>
               )}
