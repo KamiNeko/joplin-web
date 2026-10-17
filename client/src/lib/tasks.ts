@@ -1,37 +1,48 @@
 /**
  * Helpers for GFM task lists ("- [ ] item") in note Markdown.
+ *
+ * Which list items are tasks is decided by the Markdown parser that renders the note (remark-gfm),
+ * not by a separate line scanner: the renderer reports the source position of each rendered
+ * task item, and toggling edits the "[ ]" of exactly that item. Code blocks, HTML comments,
+ * HTML blocks and empty "- [ ]" items are therefore never touched.
  */
 
-// List item with a task marker, optionally inside blockquotes: "- [ ] ", "  1. [x] ", "> * [ ] "
-const TASK_LINE = /^(\s*(?:>\s*)*(?:[-*+]|\d+[.)])\s+\[)([ xX])(\])(?=\s|$)/;
-const FENCE = /^\s*(?:>\s*)*(`{3,}|~{3,})/;
+/** Source position (1-based line and column) where a task list item starts, i.e. its list marker */
+export interface TaskLocation {
+  line: number;
+  column: number;
+}
+
+// The list marker, then whitespace (the item may continue on the next line, possibly inside
+// blockquotes), then the task marker. Matched sticky at the item's start position.
+const TASK_AT_ITEM = /(?:[-*+]|\d{1,9}[.)])[ \t]*(?:(?:\r\n|\r|\n)[ \t>]*)?\[([ xX])\]/y;
+
+/** Offset of a 1-based line/column, counting line endings the way the Markdown parser does */
+function toOffset(markdown: string, { line, column }: TaskLocation): number | null {
+  if (!Number.isInteger(line) || !Number.isInteger(column) || line < 1 || column < 1) return null;
+  const lineEnding = /\r\n|\r|\n/g;
+  let start = 0;
+  for (let current = 1; current < line; current++) {
+    const match = lineEnding.exec(markdown);
+    if (!match) return null;
+    start = match.index + match[0].length;
+  }
+  const offset = start + column - 1;
+  return offset <= markdown.length ? offset : null;
+}
 
 /**
- * Sets the checked state of the n-th task-list item (0-based, document order, ignoring fenced
- * code blocks). Returns the updated Markdown, or null if there is no such task item.
+ * Sets the checked state of the task list item that starts at `location` (as reported by the
+ * Markdown renderer). Returns the updated Markdown, or null if there is no task item at that
+ * position (e.g. the text changed in the meantime), so a stale click never edits the wrong line.
  */
-export function setTaskChecked(markdown: string, index: number, checked: boolean): string | null {
-  const lines = markdown.split("\n");
-  let fence: string | null = null;
-  let count = 0;
-
-  for (let i = 0; i < lines.length; i++) {
-    const fenceMatch = FENCE.exec(lines[i]);
-    if (fenceMatch) {
-      const marker = fenceMatch[1];
-      if (fence === null) fence = marker;
-      else if (marker[0] === fence[0] && marker.length >= fence.length) fence = null;
-      continue;
-    }
-    if (fence !== null) continue;
-
-    const match = TASK_LINE.exec(lines[i]);
-    if (!match) continue;
-    if (count === index) {
-      lines[i] = lines[i].replace(TASK_LINE, `$1${checked ? "x" : " "}$3`);
-      return lines.join("\n");
-    }
-    count++;
-  }
-  return null;
+export function setTaskChecked(markdown: string, location: TaskLocation, checked: boolean): string | null {
+  const offset = toOffset(markdown, location);
+  if (offset === null) return null;
+  TASK_AT_ITEM.lastIndex = offset;
+  const match = TASK_AT_ITEM.exec(markdown);
+  if (!match) return null;
+  // Position of the character between the brackets
+  const markIndex = match.index + match[0].length - 2;
+  return markdown.slice(0, markIndex) + (checked ? "x" : " ") + markdown.slice(markIndex + 1);
 }

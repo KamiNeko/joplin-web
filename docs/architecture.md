@@ -120,8 +120,9 @@ All routes except `/api/health` and `/api/auth/login` require a session.
 
 - `lib/api.ts`: fetch wrapper; stores the session in `localStorage`.
 - `hooks/use-*.ts`: TanStack Query hooks; `use-mutations.ts` invalidates note/notebook/tag queries after writes.
-- `pages/NotesPage.tsx`: three-pane layout (sidebar, note list, note view/editor), driven by the routes `/notes/:id`, `/notebooks/:notebookId/notes/:id`, `/trash/:id` and `?tag=`.
-- `components/notes/NoteEditor.tsx`: CodeMirror editor, Edit/Split/Preview, debounced autosave, `Ctrl+S`, conflict dialog, attachment upload.
+- `pages/NotesPage.tsx`: three-pane layout (sidebar, note list, note view/editor). The URL is the only source of truth for the selected list and note, so browser Back/Forward work; handlers just navigate. Routes: `/notes` and `/notes/:id` (optionally `?tag=:tagId`), `/notebooks/:id` and `/notebooks/:notebookId/notes/:id`, `/trash` and `/trash/:id`. A plain `/notes/:id` opened directly is replaced by its notebook URL once the note has loaded.
+- `components/notes/NoteEditor.tsx`: CodeMirror editor, Edit/Split/Preview, debounced autosave, `Ctrl+S`, conflict dialog, attachment upload. Saves run one at a time: a save requested while another is in flight (autosave, Done, the flush when the editor closes) waits for it and then sends the remaining changes with the `baseUpdatedTime` it returned.
+- `components/common/MarkdownRenderer.tsx` + `lib/tasks.ts`: task checkboxes carry the source line/column of their list item as parsed by remark-gfm, and `setTaskChecked` flips the `[ ]` at exactly that position (so code blocks, HTML comments and empty `- [ ]` items are never touched). The `:/id` link rewrite keeps line breaks so positions still match the note body.
 - `components/ui/`: generated shadcn/ui primitives. Avoid hand-editing them.
 
 ## Mock Joplin Server (`server/demo`)
