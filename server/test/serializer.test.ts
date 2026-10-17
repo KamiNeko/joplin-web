@@ -1,4 +1,4 @@
-import { deserialize, serialize } from '../src/services/serializer.js';
+import { deserialize, serialize, stripMarkdown } from '../src/services/serializer.js';
 import { JoplinItemType } from '../src/types/index.js';
 
 /**
@@ -90,6 +90,12 @@ const baseProps = {
     serialize({ type_: JoplinItemType.Note, title: 'T', body: '', properties: { ...baseProps, deleted_time: '1792256400000' } })
   );
   check('deleted_time is parsed', out.deletedTime === 1792256400000, out.deletedTime);
+}
+
+// Previews drop Markdown table syntax
+{
+  const preview = stripMarkdown('Intro\n\n| Day | Plan |\n| :--- | :---: |\n| Fri | Arrive |');
+  check('stripMarkdown removes table pipes and separators', preview === 'Intro Day Plan Fri Arrive', preview);
 }
 
 if (failures > 0) {

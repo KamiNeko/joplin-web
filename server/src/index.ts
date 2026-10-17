@@ -31,7 +31,7 @@ app.use(
     origin: config.corsOrigin,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-API-AUTH'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-API-AUTH', 'X-File-Name', 'X-File-Type'],
   })
 );
 
@@ -107,7 +107,7 @@ if (fs.existsSync(config.clientDistPath)) {
 app.use(errorHandler);
 
 // Start server
-const server = app.listen(config.port, () => {
+export const server = app.listen(config.port, () => {
   console.log('====================================================');
   console.log(` Joplin Web Backend Server running on port ${config.port}`);
   console.log(` Mode: ${config.nodeEnv}`);

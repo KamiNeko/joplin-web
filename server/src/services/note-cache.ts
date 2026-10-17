@@ -224,6 +224,16 @@ export class NoteCacheService {
       entry.notebooks.set(item.id, item);
     } else if (item.type_ === JoplinItemType.Tag) {
       entry.tags.set(item.id, item);
+    } else if (item.type_ === JoplinItemType.Resource) {
+      entry.resources.set(item.id, {
+        id: item.id,
+        title: item.title,
+        mime: item.properties.mime || 'application/octet-stream',
+        filename: item.properties.filename || '',
+        fileExtension: item.properties.file_extension || '',
+        size: Number(item.properties.size || 0),
+        updatedTime: item.updatedTime,
+      });
     } else if (item.type_ === JoplinItemType.NoteTag) {
       const noteId = item.properties.note_id || '';
       const tagId = item.properties.tag_id || '';

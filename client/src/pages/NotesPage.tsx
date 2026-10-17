@@ -19,7 +19,9 @@ export function NotesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Route parameters can come from /notes/:id, /notebooks/:notebookId, etc.
-  const routeNoteId = params.id && !window.location.pathname.startsWith("/notebooks/") ? params.id : undefined;
+  // On /notebooks/:id the id is a notebook; on /notebooks/:notebookId/notes/:id it is a note
+  const routeNoteId =
+    params.id && (params.notebookId || !window.location.pathname.startsWith("/notebooks/")) ? params.id : undefined;
   const routeNotebookId = params.notebookId || (window.location.pathname.startsWith("/notebooks/") ? params.id : undefined);
   const tagParam = searchParams.get("tag") || undefined;
   const isTrashRoute = window.location.pathname.startsWith("/trash");

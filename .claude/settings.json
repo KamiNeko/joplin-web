@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm --prefix server run typecheck)",
+      "Bash(npm --prefix server test)",
+      "Bash(npm --prefix server run build)",
+      "Bash(npm --prefix client run lint)",
+      "Bash(npm --prefix client run build)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)"
+    ]
+  }
+}

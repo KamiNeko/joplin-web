@@ -406,3 +406,39 @@ export async function renameTag(id: string, title: string): Promise<Tag> {
 export async function deleteTag(id: string): Promise<void> {
   await request(`/api/tags/${id}`, { method: "DELETE" });
 }
+
+export interface UploadedResource {
+  id: string;
+  title: string;
+  mime: string;
+  size: number;
+}
+
+/**
+ * Uploads a file as a Joplin resource; link it from a note as ":/<id>".
+ */
+export async function uploadResource(file: File): Promise<UploadedResource> {
+  return request<UploadedResource>("/api/resources", {
+    method: "POST",
+    body: file,
+    headers: {
+      // Always octet-stream so no JSON/form body parser touches the file on the server
+      "Content-Type": "application/octet-stream",
+      "X-File-Name": encodeURIComponent(file.name || "file"),
+      "X-File-Type": file.type || "",
+    },
+  });
+}
+
+/**
+ * Downloads a resource (attachment) with the session and saves it under the given name.
+ */
+export async function downloadResource(resourceId: string, fileName: string): Promise<void> {
+  const url = await getResourceObjectUrl(resourceId);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}

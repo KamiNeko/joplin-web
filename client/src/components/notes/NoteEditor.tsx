@@ -1,12 +1,12 @@
 import { useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, Check, Columns2, Eye, Loader2, PencilLine } from "lucide-react";
+import { AlertTriangle, Check, Columns2, Eye, Loader2, Paperclip, PencilLine } from "lucide-react";
 import { Note } from "@/lib/types";
 import { ApiError, getConflictNote, updateNote } from "@/lib/api";
 import { invalidateLists } from "@/hooks/use-mutations";
 import { setTaskChecked } from "@/lib/tasks";
-import { MarkdownEditor } from "./MarkdownEditor";
+import { MarkdownEditor, MarkdownEditorHandle, UPLOAD_PLACEHOLDER } from "./MarkdownEditor";
 import { TagEditor } from "@/components/tags/TagEditor";
 import { MarkdownRenderer } from "@/components/common/MarkdownRenderer";
 import { Button } from "@/components/ui/button";
@@ -68,6 +68,10 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [conflict, setConflict] = useState<Note | null>(null);
   const [editorKey, setEditorKey] = useState(0);
+  const [uploadCount, setUploadCount] = useState(0);
+  const editorRef = useRef<MarkdownEditorHandle>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploadsRef = useRef(0);
 
   const draftRef = useRef(draft);
   const savedRef = useRef<Draft>({ title: note.title, body: note.body });
@@ -90,6 +94,10 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
     async (force = false): Promise<boolean> => {
       clearTimer();
       if (conflictRef.current && !force) return false;
+      if (uploadsRef.current > 0) {
+        timerRef.current = window.setTimeout(() => void save(force), AUTOSAVE_DELAY_MS);
+        return false;
+      }
       if (savingRef.current) {
         queuedRef.current = true;
         return false;
@@ -177,7 +185,7 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
   // Warn before closing the tab with unsaved changes
   useEffect(() => {
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (savingRef.current || !sameDraft(draftRef.current, savedRef.current)) {
+      if (savingRef.current || uploadsRef.current > 0 || !sameDraft(draftRef.current, savedRef.current)) {
         e.preventDefault();
         e.returnValue = "";
       }
@@ -190,7 +198,7 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
   useEffect(() => {
     return () => {
       clearTimer();
-      const pending = draftRef.current;
+      const pending = { ...draftRef.current, body: draftRef.current.body.replace(UPLOAD_PLACEHOLDER, "") };
       if (conflictRef.current || sameDraft(pending, savedRef.current)) return;
       updateNote(note.id, {
         title: pending.title,
@@ -223,8 +231,13 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
     }
   };
 
+  const handleUploadsChange = (pending: number) => {
+    uploadsRef.current = pending;
+    setUploadCount(pending);
+  };
+
   const handleDone = async () => {
-    if (status === "conflict") return;
+    if (status === "conflict" || uploadsRef.current > 0) return;
     if (await save()) onDone();
   };
 
@@ -294,8 +307,45 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
         </div>
 
         <div className="flex items-center gap-3">
-          <SaveIndicator status={status} errorMessage={errorMessage} onRetry={() => void save()} />
-          <Button size="sm" className="h-8" onClick={() => void handleDone()} disabled={status === "conflict"}>
+          {showEditor && (
+            <>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 text-muted-foreground hover:text-foreground"
+                onClick={() => fileInputRef.current?.click()}
+                title="Attach images or files (or drop / paste them into the text)"
+              >
+                <Paperclip className="h-3.5 w-3.5" />
+                <span className="hidden lg:inline">Attach</span>
+              </Button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                hidden
+                onChange={(e) => {
+                  const files = Array.from(e.target.files ?? []);
+                  e.target.value = "";
+                  editorRef.current?.insertFiles(files);
+                }}
+              />
+            </>
+          )}
+          {uploadCount > 0 ? (
+            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Uploading {uploadCount} {uploadCount === 1 ? "file" : "files"}…
+            </span>
+          ) : (
+            <SaveIndicator status={status} errorMessage={errorMessage} onRetry={() => void save()} />
+          )}
+          <Button
+            size="sm"
+            className="h-8"
+            onClick={() => void handleDone()}
+            disabled={status === "conflict" || uploadCount > 0}
+          >
             Done
           </Button>
         </div>
@@ -343,7 +393,9 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
           >
             <div className={cn("h-full", mode === "edit" && "max-w-4xl mx-auto")}>
               <MarkdownEditor
+                ref={editorRef}
                 key={editorKey}
+                onUploadsChange={handleUploadsChange}
                 value={draft.body}
                 onChange={(body) => updateDraft({ body })}
                 autoFocus={!focusTitle}

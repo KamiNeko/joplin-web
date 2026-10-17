@@ -5,7 +5,9 @@ import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import rehypeHighlight from "rehype-highlight";
 import { Check, Copy, ExternalLink } from "lucide-react";
-import { getResourceIdFromUrl, getResourceUrl } from "@/lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { ApiError, downloadResource, getNote, getResourceIdFromUrl, getResourceUrl } from "@/lib/api";
 import { ResourceImage } from "./ResourceImage";
 import { cn } from "@/lib/utils";
 import { useNavigate } from "react-router-dom";
@@ -105,7 +107,29 @@ function preprocessJoplinMarkdown(raw: string): string {
     (_, before, id, after) => `<img${before}src="${getResourceUrl(id)}"${after}>`
   );
 
+  // Replace links to notes/attachments: [text](:/id) and <a href=":/id"> -> /joplin-item/id.
+  // A ":/" href would be dropped by the sanitizer as an unknown protocol.
+  transformed = transformed.replace(
+    /(^|[^!])\[([^\]]*)\]\(\s*:\/?([0-9a-fA-F]{32})(\s+"[^"]*")?\s*\)/g,
+    (_, before, text, id, title = "") => `${before}[${text}](${JOPLIN_ITEM_PATH}${id.toLowerCase()}${title})`
+  );
+  transformed = transformed.replace(
+    /<a([^>]+)href=["']:\/?([0-9a-fA-F]{32})["']/gi,
+    (_, before, id) => `<a${before}href="${JOPLIN_ITEM_PATH}${id.toLowerCase()}"`
+  );
+
   return transformed;
+}
+
+const JOPLIN_ITEM_PATH = "/joplin-item/";
+
+/** Flattens rendered link children to plain text (used as the download file name) */
+function textContent(node: React.ReactNode): string {
+  if (node === null || node === undefined || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textContent).join("");
+  if (React.isValidElement<{ children?: React.ReactNode }>(node)) return textContent(node.props.children);
+  return "";
 }
 
 /**
@@ -184,6 +208,25 @@ function CodeBlock({ inline, className, children, ...props }: CodeBlockProps) {
  */
 export function MarkdownRenderer({ content, className, onToggleTask }: MarkdownRendererProps) {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+
+  // ":/id" can point to a note or an attachment; only the server knows which
+  const openJoplinItem = async (id: string, label: string) => {
+    try {
+      await queryClient.fetchQuery({ queryKey: ["note", id], queryFn: () => getNote(id), staleTime: 15 * 1000 });
+      navigate(`/notes/${id}`);
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.status !== 404) {
+        toast.error("Could not open link", { description: err instanceof Error ? err.message : undefined });
+        return;
+      }
+      try {
+        await downloadResource(id, label.trim() || "attachment");
+      } catch {
+        toast.error("This link points to a note or attachment that no longer exists");
+      }
+    }
+  };
   const processedContent = preprocessJoplinMarkdown(content);
 
   return (
@@ -201,13 +244,13 @@ export function MarkdownRenderer({ content, className, onToggleTask }: MarkdownR
           a: ({ href, children, ...props }) => {
             if (!href) return <a {...props}>{children}</a>;
 
-            // Joplin internal note link handling (e.g., :/12345abcde)
-            if (href.startsWith(":/")) {
-              const noteId = href.replace(/^:\/?/, "");
+            // Links to Joplin notes or attachments (":/id", rewritten in preprocessing)
+            if (href.startsWith(JOPLIN_ITEM_PATH)) {
+              const itemId = href.slice(JOPLIN_ITEM_PATH.length);
               return (
                 <button
                   type="button"
-                  onClick={() => navigate(`/notes/${noteId}`)}
+                  onClick={() => void openJoplinItem(itemId, textContent(children))}
                   className="inline-flex items-center text-primary underline underline-offset-4 hover:text-primary/80 transition-colors font-medium"
                 >
                   {children}
