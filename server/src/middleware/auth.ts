@@ -10,6 +10,19 @@ interface SessionValidationEntry {
 // In-memory cache for session validation results
 const sessionValidationCache = new Map<string, SessionValidationEntry>();
 
+/** Above this size, expired entries are dropped before a new one is added */
+const MAX_CACHED_VALIDATIONS = 1000;
+
+/**
+ * Drops expired validation results, so random tokens sent by a client can't grow the cache forever
+ */
+function pruneSessionValidationCache(now: number): void {
+  if (sessionValidationCache.size < MAX_CACHED_VALIDATIONS) return;
+  for (const [id, entry] of sessionValidationCache) {
+    if (now - entry.validatedAt >= config.authCacheTtlMs) sessionValidationCache.delete(id);
+  }
+}
+
 /**
  * Caches session validity status
  */
@@ -32,7 +45,9 @@ export function invalidateSessionValidation(sessionId: string): void {
  * Checks for:
  * 1. Authorization: Bearer <sessionId>
  * 2. X-API-AUTH: <sessionId>
- * 3. ?auth=<sessionId> query param (supports browser image requests)
+ *
+ * Tokens in the query string (e.g. ?auth=) are deliberately not accepted: URLs end up in access
+ * logs, browser history and Referer headers.
  */
 export async function requireAuth(
   req: Request,
@@ -51,11 +66,6 @@ export async function requireAuth(
     // Check X-API-AUTH header
     if (!sessionId && typeof req.headers['x-api-auth'] === 'string') {
       sessionId = req.headers['x-api-auth'].trim();
-    }
-
-    // Check ?auth= query param
-    if (!sessionId && typeof req.query.auth === 'string') {
-      sessionId = req.query.auth.trim();
     }
 
     if (!sessionId) {
@@ -80,6 +90,7 @@ export async function requireAuth(
 
     // Validate session with Joplin Server
     const isValid = await joplinApi.checkSession(sessionId);
+    pruneSessionValidationCache(now);
     sessionValidationCache.set(sessionId, {
       isValid,
       validatedAt: now,
@@ -99,7 +110,8 @@ export async function requireAuth(
     }
 
     if (error instanceof JoplinConnectionError) {
-      res.status(503).json({ error: error.message });
+      console.error('[AuthMiddleware] Joplin Server unreachable:', error.message);
+      res.status(503).json({ error: 'Cannot connect to Joplin Server' });
       return;
     }
 

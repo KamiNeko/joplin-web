@@ -2,7 +2,7 @@ import express, { Router, Request, Response, NextFunction } from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import { joplinApi, JoplinNotFoundError } from '../services/joplin-api.js';
 import { noteCache } from '../services/note-cache.js';
-import { noteWriter } from '../services/note-writer.js';
+import { assertValidId, noteWriter } from '../services/note-writer.js';
 
 const router = Router();
 
@@ -120,18 +120,77 @@ function detectMimeType(buffer: Buffer): string | null {
 }
 
 /**
+ * Types that are shown inline: they can't run script in our origin. Everything else is sent as a
+ * download, and types a browser could execute (HTML, XML, JavaScript, ...) lose their real type.
+ */
+const INLINE_SAFE_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+  'image/bmp',
+  'image/avif',
+  'image/x-icon',
+  'image/vnd.microsoft.icon',
+  'application/pdf',
+  'text/plain',
+]);
+const INLINE_SAFE_PREFIXES = ['audio/', 'video/'];
+
+/**
+ * SVG can carry script, but <img> (how notes show it) never runs it. It keeps its type so images in
+ * notes still render, and is sent as a download with a sandboxing CSP in case it is opened directly.
+ */
+const DOWNLOAD_ONLY_TYPES = new Set(['image/svg+xml']);
+
+const MIME_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
+
+/**
+ * Decides how an attachment is served: its Content-Type and whether it may be shown inline.
+ * Unknown or malformed types (resource metadata can come from any Joplin client) become
+ * application/octet-stream.
+ */
+export function resourceResponseType(mime: string | undefined | null): { contentType: string; inline: boolean } {
+  const type = (mime ?? '').split(';')[0].trim().toLowerCase();
+  if (INLINE_SAFE_TYPES.has(type)) return { contentType: type, inline: true };
+  if (MIME_PATTERN.test(type) && INLINE_SAFE_PREFIXES.some((prefix) => type.startsWith(prefix))) {
+    return { contentType: type, inline: true };
+  }
+  if (DOWNLOAD_ONLY_TYPES.has(type)) return { contentType: type, inline: false };
+  return { contentType: 'application/octet-stream', inline: false };
+}
+
+/**
+ * Builds a Content-Disposition header value with an ASCII fallback and an RFC 5987 encoded UTF-8
+ * file name. Control characters, quotes and backslashes can't break out of the header.
+ */
+export function contentDisposition(type: 'inline' | 'attachment', fileName: string | undefined | null): string {
+  const name = Array.from(fileName ?? '')
+    // Drop control characters and lone surrogates (encodeURIComponent throws on the latter)
+    .filter((char) => {
+      const code = char.codePointAt(0)!;
+      return code >= 0x20 && code !== 0x7f && !(code >= 0xd800 && code <= 0xdfff);
+    })
+    .join('')
+    .trim()
+    .slice(0, 255);
+  if (!name) return type;
+  const ascii = name.replace(/[^\x20-\x7e]|["\\]/g, '_');
+  const encoded = encodeURIComponent(name).replace(
+    /['()*]/g,
+    (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`
+  );
+  return `${type}; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+
+/**
  * GET /api/resources/:id
  * Proxies binary resource files (images, attachments) from Joplin Server
  */
 router.get('/:id', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const sessionId = req.sessionId!;
-    const resourceId = req.params.id;
-
-    if (!resourceId) {
-      res.status(400).json({ error: 'Resource ID is required' });
-      return;
-    }
+    const resourceId = assertValidId(req.params.id, 'resource id');
 
     // Attempt to lookup cached metadata for filename and MIME type
     const metadata = await noteCache.getResourceMetadata(sessionId, resourceId);
@@ -142,28 +201,27 @@ router.get('/:id', async (req: Request, res: Response, next: NextFunction): Prom
       resourceId
     );
 
-    let contentType = metadata?.mime || rawContentType;
+    let mime = metadata?.mime || rawContentType;
 
     // If generic or octet-stream, try sniffing the binary buffer
-    if (!contentType || contentType === 'application/octet-stream' || contentType === 'text/plain') {
+    if (!mime || mime === 'application/octet-stream' || mime === 'text/plain') {
       const detected = detectMimeType(buffer);
       if (detected) {
-        contentType = detected;
+        mime = detected;
       }
     }
 
-    // Set caching and content headers
+    const { contentType, inline } = resourceResponseType(mime);
+    const downloadName = metadata?.filename || metadata?.title;
+
     // Joplin resources are immutable and content-addressed by 32-character hex ID
-    res.setHeader('Content-Type', contentType || 'application/octet-stream');
+    res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Length', buffer.length);
     res.setHeader('Cache-Control', 'private, max-age=86400, immutable');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     // Attachments are user content served from our origin: never let them run scripts
     res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox");
-
-    const downloadName = metadata?.filename || metadata?.title;
-    if (downloadName) {
-      res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(downloadName)}`);
-    }
+    res.setHeader('Content-Disposition', contentDisposition(inline ? 'inline' : 'attachment', downloadName));
 
     res.status(200).send(buffer);
   } catch (error) {

@@ -94,7 +94,7 @@ docker run -d --name joplin-web -p 3001:3001 \
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `JOPLIN_SERVER_URL` | *(required)* | Base URL of your Joplin Server, e.g. `https://notes.example.com`. |
+| `JOPLIN_SERVER_URL` | *(required)* | Base URL of your Joplin Server, e.g. `https://notes.example.com`. Joplin Web refuses to start without it. |
 | `PORT` | `3001` | Port Joplin Web listens on. |
 | `CORS_ORIGIN` | `http://localhost:5173` | Allowed origins for API calls (comma-separated). Only needed when the UI is served from another origin. |
 | `CACHE_TTL_MS` | `30000` | How long the note cache is used before it is re-synced with Joplin Server. |

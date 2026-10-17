@@ -178,6 +178,125 @@ describe('writing', () => {
   });
 });
 
+describe('security', () => {
+  async function upload(name: string, type: string, data: string | Buffer) {
+    const res = await api('/api/resources', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-File-Name': encodeURIComponent(name), 'X-File-Type': type },
+      // Buffer, so the api() helper doesn't mark it as JSON
+      body: typeof data === 'string' ? Buffer.from(data) : data,
+    });
+    assert.equal(res.status, 201);
+    return res.data.id as string;
+  }
+
+  test('serves SVG attachments as downloads with a sandboxing CSP', async () => {
+    const res = await api(`/api/resources/${demoId('res-tram')}`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type') ?? '', /^image\/svg\+xml/);
+    assert.match(res.headers.get('content-disposition') ?? '', /^attachment/);
+    assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+    assert.match(res.headers.get('content-security-policy') ?? '', /default-src 'none'.*sandbox/);
+  });
+
+  test('never serves uploaded HTML or script with an executable type', async () => {
+    for (const [name, type] of [
+      ['evil.html', 'text/html'],
+      ['evil.xhtml', 'application/xhtml+xml'],
+      ['evil.js', 'text/javascript'],
+      ['evil.xml', 'text/xml'],
+      ['evil.html', 'application/octet-stream'],
+    ]) {
+      const id = await upload(name, type, '<html><script>alert(document.domain)</script></html>');
+      const res = await api(`/api/resources/${id}`);
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('content-type'), 'application/octet-stream', `${name} as ${type}`);
+      assert.match(res.headers.get('content-disposition') ?? '', /^attachment/);
+      assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+    }
+  });
+
+  test('sniffed SVG uploads are not shown inline', async () => {
+    const id = await upload('drawing', 'application/octet-stream', '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
+    const res = await api(`/api/resources/${id}`);
+    assert.match(res.headers.get('content-type') ?? '', /^image\/svg\+xml/);
+    assert.match(res.headers.get('content-disposition') ?? '', /^attachment/);
+  });
+
+  test('shows raster images inline', async () => {
+    const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+    const id = await upload('pixel.png', 'image/png', png);
+    const res = await api(`/api/resources/${id}`);
+    assert.equal(res.headers.get('content-type'), 'image/png');
+    assert.match(res.headers.get('content-disposition') ?? '', /^inline; filename="pixel\.png"/);
+  });
+
+  test('encodes attachment file names safely in Content-Disposition', async () => {
+    const id = await upload('a"b\\c\';x=(1)*.txt', 'text/plain', 'hello');
+    const header = (await api(`/api/resources/${id}`)).headers.get('content-disposition') ?? '';
+    // (the upload already replaced the backslash)
+    assert.equal(header, `inline; filename="a_b_c';x=(1)*.txt"; filename*=UTF-8''a%22b_c%27%3Bx%3D%281%29%2A.txt`);
+
+    const { contentDisposition } = await import('../src/routes/resources.js');
+    assert.equal(contentDisposition('attachment', 'Übersicht.pdf'), `attachment; filename="_bersicht.pdf"; filename*=UTF-8''%C3%9Cbersicht.pdf`);
+    assert.equal(contentDisposition('attachment', 'x\r\nSet-Cookie: a=b'), `attachment; filename="xSet-Cookie: a=b"; filename*=UTF-8''xSet-Cookie%3A%20a%3Db`);
+    assert.equal(contentDisposition('attachment', '\ud800'), 'attachment');
+    assert.equal(contentDisposition('inline', undefined), 'inline');
+  });
+
+  test('normalizes malformed or unknown resource types', async () => {
+    const { resourceResponseType } = await import('../src/routes/resources.js');
+    assert.deepEqual(resourceResponseType('video/mp4'), { contentType: 'video/mp4', inline: true });
+    assert.deepEqual(resourceResponseType('IMAGE/PNG; charset=x'), { contentType: 'image/png', inline: true });
+    assert.deepEqual(resourceResponseType('audio/x\r\nX-Evil: 1'), { contentType: 'application/octet-stream', inline: false });
+    assert.deepEqual(resourceResponseType(undefined), { contentType: 'application/octet-stream', inline: false });
+  });
+
+  test('validates resource ids', async () => {
+    assert.equal((await api('/api/resources/..%2F..%2Fapi%2Fusers')).status, 400);
+    assert.equal((await api('/api/resources/not-an-id')).status, 400);
+  });
+
+  test('does not accept session tokens in the query string', async () => {
+    const res = await api(`/api/resources/${demoId('res-tram')}?auth=${session}`, {}, false);
+    assert.equal(res.status, 401);
+  });
+
+  test('sends Referrer-Policy and a CSP that allows blob: images', async () => {
+    const res = await api('/api/health', {}, false);
+    assert.equal(res.headers.get('referrer-policy'), 'no-referrer');
+    const csp = res.headers.get('content-security-policy') ?? '';
+    assert.match(csp, /img-src 'self' data: blob:/);
+    assert.match(csp, /script-src 'self'/);
+    assert.equal(res.data.joplinServer, undefined, 'health check does not disclose the Joplin Server URL');
+  });
+
+  test('error responses do not leak internals', async () => {
+    const res = await api('/api/notes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"broken' } as RequestInit);
+    assert.equal(res.status, 400);
+    assert.deepEqual(res.data, { error: 'Invalid request' });
+  });
+
+  test('redacts session tokens from logged URLs', async () => {
+    const { redactUrl } = await import('../src/middleware/request-logger.js');
+    assert.equal(redactUrl('/api/resources/abc?auth=SECRET&x=1'), '/api/resources/abc?auth=[REDACTED]&x=1');
+    assert.equal(redactUrl('/a?x=1&Auth=SECRET#frag'), '/a?x=1&Auth=[REDACTED]#frag');
+    assert.equal(redactUrl('/a?%61uth=SECRET'), '/a?%61uth=[REDACTED]');
+    assert.equal(redactUrl('/a?password=hunter2&token=t'), '/a?password=[REDACTED]&token=[REDACTED]');
+    assert.equal(redactUrl('/api/notes'), '/api/notes');
+  });
+
+  test('requires a valid JOPLIN_SERVER_URL instead of falling back to a default', async () => {
+    const { loadConfig, ConfigError } = await import('../src/config.js');
+    assert.throws(() => loadConfig({}), ConfigError);
+    assert.throws(() => loadConfig({ JOPLIN_SERVER_URL: '  ' }), /JOPLIN_SERVER_URL is not set/);
+    assert.throws(() => loadConfig({ JOPLIN_SERVER_URL: 'notes.example.com' }), ConfigError);
+    assert.throws(() => loadConfig({ JOPLIN_SERVER_URL: 'file:///etc/passwd' }), ConfigError);
+    assert.throws(() => loadConfig({ JOPLIN_SERVER_URL: 'https://user:pw@notes.example.com' }), ConfigError);
+    assert.equal(loadConfig({ JOPLIN_SERVER_URL: 'https://notes.example.com//' }).joplinServerUrl, 'https://notes.example.com');
+  });
+});
+
 describe('logout', () => {
   test('logs out', async () => {
     assert.equal((await api('/api/auth/logout', { method: 'POST' })).status, 200);

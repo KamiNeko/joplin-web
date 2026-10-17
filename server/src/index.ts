@@ -4,11 +4,11 @@ import express, { Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import fs from 'fs';
 import helmet from 'helmet';
-import morgan from 'morgan';
 import path from 'path';
 
 import { config } from './config.js';
 import { errorHandler } from './middleware/error-handler.js';
+import { requestLogger } from './middleware/request-logger.js';
 import { authRouter } from './routes/auth.js';
 import { notebooksRouter } from './routes/notebooks.js';
 import { notesRouter } from './routes/notes.js';
@@ -22,6 +22,14 @@ const app = express();
 app.use(
   helmet({
     crossOriginResourcePolicy: { policy: 'cross-origin' },
+    contentSecurityPolicy: {
+      directives: {
+        // Attachments are fetched with the session header and shown through blob: URLs
+        'img-src': ["'self'", 'data:', 'blob:'],
+      },
+    },
+    // Never send page URLs to other sites (helmet's default, stated explicitly)
+    referrerPolicy: { policy: 'no-referrer' },
   })
 );
 
@@ -39,7 +47,7 @@ app.use(
 app.use(compression());
 
 // HTTP request logging
-app.use(morgan(config.nodeEnv === 'production' ? 'combined' : 'dev'));
+app.use(requestLogger(config.nodeEnv === 'production'));
 
 // Body parsing
 app.use(express.json({ limit: '10mb' }));
@@ -70,8 +78,6 @@ app.get('/api/health', (_req: Request, res: Response) => {
   res.status(200).json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    joplinServer: config.joplinServerUrl,
-    environment: config.nodeEnv,
   });
 });
 
