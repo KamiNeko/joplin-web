@@ -40,7 +40,7 @@ export function ThemeToggle({ className }: ThemeToggleProps) {
             <Moon
               className={`absolute h-[1.2rem] w-[1.2rem] transition-all duration-300 ${
                 isDark
-                  ? "rotate-0 scale-100 opacity-100 text-indigo-400"
+                  ? "rotate-0 scale-100 opacity-100 text-primary"
                   : "-rotate-90 scale-0 opacity-0"
               }`}
             />

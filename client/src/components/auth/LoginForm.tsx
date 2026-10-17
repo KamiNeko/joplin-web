@@ -56,7 +56,7 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
   return (
     <Card className="w-full max-w-md border-border/60 bg-card/95 backdrop-blur-md shadow-2xl relative overflow-hidden">
       {/* Decorative top accent line */}
-      <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-indigo-500 via-primary to-purple-500" />
+      <div className="absolute top-0 left-0 right-0 h-1 bg-primary/80" />
 
       <CardHeader className="space-y-3 text-center pb-6 pt-8">
         <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 text-primary border border-primary/20 shadow-inner">
@@ -128,7 +128,7 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
         <CardFooter className="pt-2 pb-8">
           <Button
             type="submit"
-            className="w-full font-medium h-10 shadow-lg shadow-primary/25 hover:shadow-primary/40 transition-all duration-200"
+            className="w-full font-medium h-10 transition-all duration-200"
             disabled={isSubmitting}
           >
             {isSubmitting ? (

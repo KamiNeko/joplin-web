@@ -45,8 +45,8 @@ function NotebookItem({
         className={cn(
           "group flex items-center justify-between py-1.5 pr-2.5 rounded-lg text-sm transition-all duration-150 cursor-pointer",
           isSelected
-            ? "bg-primary/15 text-primary font-medium shadow-sm"
-            : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+            ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
+            : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
         )}
       >
         <div className="flex items-center gap-1.5 min-w-0 flex-1 mr-2">

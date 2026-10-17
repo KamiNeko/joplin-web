@@ -9,6 +9,7 @@ import {
 
 const SESSION_KEY = "joplin_session_id";
 const USER_KEY = "joplin_user_id";
+const EMAIL_KEY = "joplin_user_email";
 
 // Base URL defaults to empty string in browser so Vite proxy handles /api,
 // or uses VITE_API_BASE_URL if configured.
@@ -24,11 +25,21 @@ export function getStoredSessionId(): string | null {
 /**
  * Persists session token to local storage.
  */
-export function setStoredSession(sessionId: string, userId?: string): void {
+export function setStoredSession(sessionId: string, userId?: string, email?: string): void {
   localStorage.setItem(SESSION_KEY, sessionId);
   if (userId) {
     localStorage.setItem(USER_KEY, userId);
   }
+  if (email) {
+    localStorage.setItem(EMAIL_KEY, email);
+  }
+}
+
+/**
+ * Retrieves the email address the current session was opened with.
+ */
+export function getStoredEmail(): string | null {
+  return localStorage.getItem(EMAIL_KEY);
 }
 
 /**
@@ -37,6 +48,7 @@ export function setStoredSession(sessionId: string, userId?: string): void {
 export function clearStoredSession(): void {
   localStorage.removeItem(SESSION_KEY);
   localStorage.removeItem(USER_KEY);
+  localStorage.removeItem(EMAIL_KEY);
 }
 
 /**

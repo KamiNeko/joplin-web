@@ -68,8 +68,8 @@ export function NoteListItem({ note, isActive, onClick }: NoteListItemProps) {
       className={cn(
         "group relative flex flex-col gap-1.5 p-3.5 rounded-xl border text-left transition-all duration-150 cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-primary",
         isActive
-          ? "bg-accent/80 border-primary/50 shadow-sm"
-          : "bg-card/40 border-border/50 hover:bg-muted/40 hover:border-border/80"
+          ? "bg-card border-primary/40 shadow-sm"
+          : "bg-transparent border-transparent hover:bg-muted/60"
       )}
     >
       {/* Active accent pill indicator */}

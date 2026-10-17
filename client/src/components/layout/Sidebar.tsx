@@ -52,7 +52,7 @@ export function Sidebar({
   return (
     <aside
       className={cn(
-        "flex flex-col h-full w-full bg-[#0a0e1a]/95 dark:bg-[#070b14]/95 text-sidebar-foreground border-r border-border/40 select-none",
+        "flex flex-col h-full w-full bg-sidebar text-sidebar-foreground border-r border-sidebar-border select-none",
         className
       )}
     >
@@ -93,7 +93,7 @@ export function Sidebar({
             placeholder="Search notes... (Ctrl+K)"
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
-            className="h-8 pl-8 pr-7 text-xs bg-muted/30 border-border/40 focus-visible:ring-primary/80"
+            className="h-8 pl-8 pr-7 text-xs bg-background/60 border-sidebar-border focus-visible:ring-primary/60"
           />
           {searchQuery && (
             <button
@@ -119,8 +119,8 @@ export function Sidebar({
               className={cn(
                 "w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm transition-all duration-150 font-medium",
                 isAllNotesSelected
-                  ? "bg-primary text-primary-foreground shadow-sm shadow-primary/30"
-                  : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                  : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
               )}
             >
               <div className="flex items-center gap-2">
@@ -135,8 +135,8 @@ export function Sidebar({
               className={cn(
                 "w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm transition-all duration-150 font-medium",
                 isTrashSelected
-                  ? "bg-destructive/20 text-destructive border border-destructive/30 shadow-sm"
-                  : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                  ? "bg-sidebar-accent text-destructive"
+                  : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
               )}
             >
               <div className="flex items-center gap-2">
@@ -206,7 +206,7 @@ export function Sidebar({
                         "w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm transition-all duration-150",
                         isSelected
                           ? "bg-primary/15 text-primary font-medium"
-                          : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                          : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
                       )}
                     >
                       <div className="flex items-center gap-2 min-w-0">

@@ -93,7 +93,7 @@ function CodeBlock({ inline, className, children, ...props }: CodeBlockProps) {
   if (inline || !className?.includes("language-") && !codeString.includes("\n")) {
     return (
       <code
-        className="rounded bg-muted/70 px-1.5 py-0.5 font-mono text-xs text-primary font-medium border border-border/50"
+        className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[0.85em] text-primary border border-border/60"
         {...props}
       >
         {children}
@@ -102,8 +102,8 @@ function CodeBlock({ inline, className, children, ...props }: CodeBlockProps) {
   }
 
   return (
-    <div className="relative group my-4 rounded-xl border border-border/60 bg-slate-950 dark:bg-[#070b14] overflow-hidden shadow-md">
-      <div className="flex items-center justify-between px-4 py-2 border-b border-border/40 bg-muted/20 text-xs text-muted-foreground font-mono">
+    <div className="relative group my-4 rounded-xl border border-border/60 bg-[hsl(var(--code-background))] overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-2 border-b border-border/40 bg-foreground/[0.03] text-xs text-muted-foreground font-mono">
         <span className="uppercase tracking-wider font-semibold text-primary/80">
           {language || "text"}
         </span>
@@ -115,8 +115,8 @@ function CodeBlock({ inline, className, children, ...props }: CodeBlockProps) {
         >
           {copied ? (
             <>
-              <Check className="h-3.5 w-3.5 text-emerald-400" />
-              <span className="text-emerald-400">Copied!</span>
+              <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+              <span className="text-emerald-600 dark:text-emerald-400">Copied!</span>
             </>
           ) : (
             <>
@@ -126,7 +126,7 @@ function CodeBlock({ inline, className, children, ...props }: CodeBlockProps) {
           )}
         </button>
       </div>
-      <div className="p-4 overflow-x-auto text-sm font-mono leading-relaxed text-slate-100">
+      <div className="p-4 overflow-x-auto text-sm font-mono leading-relaxed text-[hsl(var(--code-foreground))]">
         <code className={className} {...props}>
           {children}
         </code>
@@ -236,7 +236,7 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
           ),
           blockquote: ({ children, ...props }) => (
             <blockquote
-              className="my-4 border-l-4 border-primary/70 bg-muted/30 py-2.5 px-4 rounded-r-lg italic text-foreground/90"
+              className="my-4 border-l-[3px] border-primary/60 bg-muted/40 py-2.5 px-4 rounded-r-lg italic text-foreground/90"
               {...props}
             >
               {children}
@@ -259,7 +259,7 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
           ),
           h1: ({ children, ...props }) => (
             <h1
-              className="text-2xl sm:text-3xl font-extrabold tracking-tight mt-8 mb-4 pb-2 border-b border-border/60 text-foreground"
+              className="text-2xl sm:text-3xl font-bold tracking-tight mt-8 mb-4 pb-2 border-b border-border/60 text-foreground"
               {...props}
             >
               {children}

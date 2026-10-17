@@ -9,6 +9,7 @@ import {
   login as apiLogin,
   logout as apiLogout,
   getStoredSessionId,
+  getStoredEmail,
   setStoredSession,
   clearStoredSession,
 } from "@/lib/api";
@@ -16,6 +17,7 @@ import {
 export interface AuthContextType {
   isAuthenticated: boolean;
   sessionId: string | null;
+  email: string | null;
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
@@ -29,6 +31,7 @@ export interface AuthProviderProps {
 
 export function AuthProvider({ children }: AuthProviderProps) {
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [email, setEmail] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
   useEffect(() => {
@@ -36,6 +39,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       const stored = getStoredSessionId();
       if (stored) {
         setSessionId(stored);
+        setEmail(getStoredEmail());
       }
     } finally {
       setIsLoading(false);
@@ -47,7 +51,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
     try {
       const response = await apiLogin(email, password);
       setSessionId(response.sessionId);
-      setStoredSession(response.sessionId, response.userId);
+      setEmail(email);
+      setStoredSession(response.sessionId, response.userId, email);
     } finally {
       setIsLoading(false);
     }
@@ -60,6 +65,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     } finally {
       clearStoredSession();
       setSessionId(null);
+      setEmail(null);
       setIsLoading(false);
     }
   }, []);
@@ -67,6 +73,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const value: AuthContextType = {
     isAuthenticated: Boolean(sessionId),
     sessionId,
+    email,
     isLoading,
     login,
     logout,

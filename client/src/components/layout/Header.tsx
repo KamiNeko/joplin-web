@@ -33,7 +33,7 @@ export function Header({
   onToggleSidebar,
   onOpenSearch,
 }: HeaderProps) {
-  const { logout } = useAuth();
+  const { logout, email } = useAuth();
 
   // Listen for global Command+K / Ctrl+K shortcut
   useEffect(() => {
@@ -121,19 +121,22 @@ export function Header({
             >
               <Avatar className="h-8 w-8">
                 <AvatarFallback className="bg-primary/15 text-primary text-xs font-semibold">
-                  <User className="h-4 w-4" />
+                  {email ? email.charAt(0).toUpperCase() : <User className="h-4 w-4" />}
                 </AvatarFallback>
               </Avatar>
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-48 text-xs">
+          <DropdownMenuContent align="end" className="w-60 text-xs">
             <DropdownMenuLabel className="font-normal">
               <div className="flex flex-col space-y-1">
-                <p className="text-xs font-semibold leading-none text-foreground">
-                  Joplin Account
-                </p>
                 <p className="text-[11px] leading-none text-muted-foreground">
-                  Connected & Synced
+                  Signed in as
+                </p>
+                <p
+                  className="text-xs font-semibold leading-tight text-foreground truncate"
+                  title={email ?? undefined}
+                >
+                  {email ?? "Joplin Account"}
                 </p>
               </div>
             </DropdownMenuLabel>
