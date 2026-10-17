@@ -76,8 +76,9 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
   const draftRef = useRef(draft);
   const savedRef = useRef<Draft>({ title: note.title, body: note.body });
   const baseUpdatedTimeRef = useRef(note.updatedTime);
-  const savingRef = useRef(false);
-  const queuedRef = useRef(false);
+  // The save currently talking to the server. Saves run one at a time; later ones chain onto it
+  // so each starts from the baseUpdatedTime the previous one returned.
+  const inflightRef = useRef<Promise<boolean> | null>(null);
   const timerRef = useRef<number | null>(null);
   const conflictRef = useRef(false);
 
@@ -90,60 +91,60 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
     }
   };
 
+  /**
+   * Saves the current draft. While another save is in flight, waits for it and then saves
+   * whatever is still unsaved, so the returned promise tells whether the draft is now stored.
+   */
   const save = useCallback(
-    async (force = false): Promise<boolean> => {
+    (force = false): Promise<boolean> => {
       clearTimer();
-      if (conflictRef.current && !force) return false;
+      if (conflictRef.current && !force) return Promise.resolve(false);
       if (uploadsRef.current > 0) {
         timerRef.current = window.setTimeout(() => void save(force), AUTOSAVE_DELAY_MS);
-        return false;
+        return Promise.resolve(false);
       }
-      if (savingRef.current) {
-        queuedRef.current = true;
-        return false;
-      }
+      const inflight = inflightRef.current;
+      if (inflight) return inflight.then(() => save(force));
+
       const toSave = draftRef.current;
       if (!force && sameDraft(toSave, savedRef.current)) {
         setStatus("saved");
-        return true;
+        return Promise.resolve(true);
       }
 
-      savingRef.current = true;
       setStatus("saving");
       setErrorMessage(null);
-      try {
-        const saved = await updateNote(note.id, {
-          title: toSave.title,
-          body: toSave.body,
-          baseUpdatedTime: baseUpdatedTimeRef.current,
-          force,
-        });
-        baseUpdatedTimeRef.current = saved.updatedTime;
-        savedRef.current = toSave;
-        conflictRef.current = false;
-        queryClient.setQueryData(["note", note.id], saved);
-        invalidateLists(queryClient);
-        setStatus(sameDraft(draftRef.current, toSave) ? "saved" : "dirty");
-        return true;
-      } catch (err) {
-        if (err instanceof ApiError && err.status === 409) {
-          conflictRef.current = true;
-          setConflict(getConflictNote(err));
-          setStatus("conflict");
-        } else {
-          setStatus("error");
-          setErrorMessage(err instanceof Error ? err.message : "Save failed");
-        }
-        return false;
-      } finally {
-        savingRef.current = false;
-        if (queuedRef.current) {
-          queuedRef.current = false;
-          if (!conflictRef.current && !sameDraft(draftRef.current, savedRef.current)) {
-            void save();
+      const run = (async () => {
+        try {
+          const saved = await updateNote(note.id, {
+            title: toSave.title,
+            body: toSave.body,
+            baseUpdatedTime: baseUpdatedTimeRef.current,
+            force,
+          });
+          baseUpdatedTimeRef.current = saved.updatedTime;
+          savedRef.current = toSave;
+          conflictRef.current = false;
+          queryClient.setQueryData(["note", note.id], saved);
+          invalidateLists(queryClient);
+          setStatus(sameDraft(draftRef.current, toSave) ? "saved" : "dirty");
+          return true;
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 409) {
+            conflictRef.current = true;
+            setConflict(getConflictNote(err));
+            setStatus("conflict");
+          } else {
+            setStatus("error");
+            setErrorMessage(err instanceof Error ? err.message : "Save failed");
           }
+          return false;
+        } finally {
+          inflightRef.current = null;
         }
-      }
+      })();
+      inflightRef.current = run;
+      return run;
     },
     [note.id, queryClient]
   );
@@ -163,7 +164,7 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
   useEffect(() => {
     if (
       note.updatedTime > baseUpdatedTimeRef.current &&
-      !savingRef.current &&
+      !inflightRef.current &&
       sameDraft({ title: note.title, body: note.body }, savedRef.current)
     ) {
       baseUpdatedTimeRef.current = note.updatedTime;
@@ -185,7 +186,7 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
   // Warn before closing the tab with unsaved changes
   useEffect(() => {
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (savingRef.current || uploadsRef.current > 0 || !sameDraft(draftRef.current, savedRef.current)) {
+      if (inflightRef.current || uploadsRef.current > 0 || !sameDraft(draftRef.current, savedRef.current)) {
         e.preventDefault();
         e.returnValue = "";
       }
@@ -194,31 +195,55 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, []);
 
-  // Flush pending changes when the editor closes (switching notes, Done, ...)
+  // Flush pending changes when the editor closes (switching notes, Done, ...). The flush waits for
+  // any save still in flight, so it compares against (and builds on) that save's result.
   useEffect(() => {
     return () => {
       clearTimer();
       const pending = { ...draftRef.current, body: draftRef.current.body.replace(UPLOAD_PLACEHOLDER, "") };
-      if (conflictRef.current || sameDraft(pending, savedRef.current)) return;
-      updateNote(note.id, {
-        title: pending.title,
-        body: pending.body,
-        baseUpdatedTime: baseUpdatedTimeRef.current,
-      })
-        .then((saved) => {
-          queryClient.setQueryData(["note", note.id], saved);
-          invalidateLists(queryClient);
-        })
-        .catch(() => {
-          toast.error(`Could not save "${pending.title || "Untitled"}"`, {
-            description: "Your last changes were not saved.",
-            action: {
-              label: "Copy text",
-              onClick: () => void navigator.clipboard?.writeText(pending.body),
-            },
-            duration: 15000,
-          });
+      const reportLost = () => {
+        toast.error(`Could not save "${pending.title || "Untitled"}"`, {
+          description: "Your last changes were not saved.",
+          action: {
+            label: "Copy text",
+            onClick: () => void navigator.clipboard?.writeText(pending.body),
+          },
+          duration: 15000,
         });
+      };
+      const flush = (): void => {
+        const inflight = inflightRef.current;
+        if (inflight) {
+          void inflight.then(flush);
+          return;
+        }
+        if (sameDraft(pending, savedRef.current)) return;
+        if (conflictRef.current) {
+          reportLost();
+          return;
+        }
+        const run = updateNote(note.id, {
+          title: pending.title,
+          body: pending.body,
+          baseUpdatedTime: baseUpdatedTimeRef.current,
+        })
+          .then((saved) => {
+            baseUpdatedTimeRef.current = saved.updatedTime;
+            savedRef.current = pending;
+            queryClient.setQueryData(["note", note.id], saved);
+            invalidateLists(queryClient);
+            return true;
+          })
+          .catch(() => {
+            reportLost();
+            return false;
+          })
+          .finally(() => {
+            inflightRef.current = null;
+          });
+        inflightRef.current = run;
+      };
+      flush();
     };
   }, [note.id, queryClient]);
 
