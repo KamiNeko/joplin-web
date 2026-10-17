@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useRef } from "react";
-import { useParams, useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { NoteList } from "@/components/notes/NoteList";
@@ -13,55 +13,60 @@ import { useCreateNote, useUpdateNote } from "@/hooks/use-mutations";
 import { findNotebookById, flattenNotebooks } from "@/lib/notebooks";
 import { toast } from "sonner";
 
+/** The list shown in the middle column: everything, one notebook, one tag or the trash */
+type ListScope =
+  | { kind: "all" }
+  | { kind: "notebook"; notebookId: string }
+  | { kind: "tag"; tagId: string }
+  | { kind: "trash" };
+
+/** URL of a list, optionally with a note open in it */
+function scopeUrl(scope: ListScope, noteId?: string | null): string {
+  const note = noteId ? `/${noteId}` : "";
+  switch (scope.kind) {
+    case "trash":
+      return `/trash${note}`;
+    case "notebook":
+      return `/notebooks/${scope.notebookId}${noteId ? `/notes/${noteId}` : ""}`;
+    case "tag":
+      return `/notes${note}?tag=${encodeURIComponent(scope.tagId)}`;
+    default:
+      return `/notes${note}`;
+  }
+}
+
+/**
+ * Notes page. The URL is the source of truth for the selected list and note, so browser
+ * Back/Forward (and the swipe-back gesture on phones) move between them:
+ * `/notes[/:noteId][?tag=:tagId]`, `/notebooks/:notebookId[/notes/:noteId]`, `/trash[/:noteId]`.
+ */
 export function NotesPage() {
   const params = useParams();
+  const { pathname } = useLocation();
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams] = useSearchParams();
 
-  // Route parameters can come from /notes/:id, /notebooks/:notebookId, etc.
+  const isTrashSelected = pathname.startsWith("/trash");
+  const isNotebookRoute = pathname.startsWith("/notebooks/");
   // On /notebooks/:id the id is a notebook; on /notebooks/:notebookId/notes/:id it is a note
-  const routeNoteId =
-    params.id && (params.notebookId || !window.location.pathname.startsWith("/notebooks/")) ? params.id : undefined;
-  const routeNotebookId = params.notebookId || (window.location.pathname.startsWith("/notebooks/") ? params.id : undefined);
-  const tagParam = searchParams.get("tag") || undefined;
-  const isTrashRoute = window.location.pathname.startsWith("/trash");
+  const selectedNotebookId = isNotebookRoute ? params.notebookId ?? params.id ?? null : null;
+  const selectedNoteId = (isNotebookRoute ? (params.notebookId ? params.id : undefined) : params.id) ?? null;
+  // A tag filter only applies to the /notes routes, so it never combines with a notebook or the trash
+  const selectedTagId = !isTrashSelected && !isNotebookRoute ? searchParams.get("tag") || null : null;
 
-  const [isTrashSelected, setIsTrashSelected] = useState<boolean>(isTrashRoute);
-  const [selectedNotebookId, setSelectedNotebookId] = useState<string | null>(routeNotebookId || null);
-  const [selectedTagId, setSelectedTagId] = useState<string | null>(tagParam || null);
-  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(routeNoteId || null);
+  const scope: ListScope = isTrashSelected
+    ? { kind: "trash" }
+    : selectedNotebookId
+    ? { kind: "notebook", notebookId: selectedNotebookId }
+    : selectedTagId
+    ? { kind: "tag", tagId: selectedTagId }
+    : { kind: "all" };
+
   const [searchQuery, setSearchQuery] = useState<string>("");
   // Note that should open in the editor (set right after creating it)
   const [editIntentNoteId, setEditIntentNoteId] = useState<string | null>(null);
   const createNote = useCreateNote();
   const updateNote = useUpdateNote();
-
-  // Sync internal state when URL parameters change
-  useEffect(() => {
-    setIsTrashSelected(window.location.pathname.startsWith("/trash"));
-  }, [params]);
-
-  useEffect(() => {
-    if (routeNoteId) {
-      setSelectedNoteId(routeNoteId);
-    }
-  }, [routeNoteId]);
-
-  useEffect(() => {
-    if (routeNotebookId) {
-      setSelectedNotebookId(routeNotebookId);
-      setSelectedTagId(null);
-      setIsTrashSelected(false);
-    }
-  }, [routeNotebookId]);
-
-  useEffect(() => {
-    if (tagParam) {
-      setSelectedTagId(tagParam);
-      setSelectedNotebookId(null);
-      setIsTrashSelected(false);
-    }
-  }, [tagParam]);
 
   // TanStack queries
   const { data: notebooks } = useNotebooks();
@@ -82,16 +87,16 @@ export function NotesPage() {
     debouncedQuery,
   } = useSearch(searchQuery);
 
-  // When the page is opened on a note URL, show that note's notebook in the list (first load only,
-  // so picking a note from "All Notes" or the trash doesn't switch the list)
-  const openedViaNoteUrl = useRef(Boolean(routeNoteId) && !isTrashRoute);
+  // When the page is opened on a plain /notes/:id URL, show that note's notebook in the list
+  // (first load only, so picking a note from "All Notes" doesn't switch the list)
+  const openedViaNoteUrl = useRef(scope.kind === "all" && Boolean(selectedNoteId));
   useEffect(() => {
     if (!openedViaNoteUrl.current || !fullNote) return;
     openedViaNoteUrl.current = false;
-    if (!selectedNotebookId && !selectedTagId && !fullNote.deletedTime) {
-      setSelectedNotebookId(fullNote.notebookId);
+    if (scope.kind === "all" && fullNote.id === selectedNoteId && !fullNote.deletedTime) {
+      navigate(scopeUrl({ kind: "notebook", notebookId: fullNote.notebookId }, fullNote.id), { replace: true });
     }
-  }, [fullNote, selectedNotebookId, selectedTagId]);
+  }, [fullNote, scope.kind, selectedNoteId, navigate]);
 
   // Notebook title lookup
   const currentNotebook = useMemo(
@@ -108,51 +113,27 @@ export function NotesPage() {
 
   const noteTitle = fullNote ? fullNote.title || "Untitled Note" : undefined;
 
-  // Handlers
-  const handleSelectNotebook = (id: string) => {
-    setSelectedNotebookId(id);
-    setSelectedTagId(null);
-    setIsTrashSelected(false);
+  // Handlers only navigate; the selection follows from the URL
+  const showList = (next: ListScope) => {
     setSearchQuery("");
-    navigate(`/notebooks/${id}`);
+    // Side by side (md and up) the open note stays open; on phones the list replaces it
+    const keepNote = next.kind !== "trash" && window.matchMedia?.("(min-width: 768px)").matches;
+    navigate(scopeUrl(next, keepNote ? selectedNoteId : null));
   };
 
-  const handleSelectTag = (tagId: string) => {
-    setSelectedTagId(tagId);
-    setSelectedNotebookId(null);
-    setIsTrashSelected(false);
-    setSearchQuery("");
-    setSearchParams({ tag: tagId });
-  };
-
-  const handleSelectAllNotes = () => {
-    setSelectedNotebookId(null);
-    setSelectedTagId(null);
-    setIsTrashSelected(false);
-    setSearchQuery("");
-    navigate("/notes");
-  };
-
-  const handleSelectTrash = () => {
-    setSelectedNotebookId(null);
-    setSelectedTagId(null);
-    setIsTrashSelected(true);
-    setSearchQuery("");
-    navigate("/trash");
-  };
+  const handleSelectNotebook = (id: string) => showList({ kind: "notebook", notebookId: id });
+  const handleSelectTag = (tagId: string) => showList({ kind: "tag", tagId });
+  const handleSelectAllNotes = () => showList({ kind: "all" });
+  const handleSelectTrash = () => showList({ kind: "trash" });
 
   const handleSelectNote = (id: string) => {
-    setSelectedNoteId(id);
     setEditIntentNoteId(null);
-    if (isTrashSelected) {
-      navigate(`/trash/${id}`);
-    } else {
-      navigate(`/notes/${id}`);
-    }
+    if (id !== selectedNoteId) navigate(scopeUrl(scope, id));
   };
 
   const handleCloseNoteViewer = () => {
-    setSelectedNoteId(null);
+    setEditIntentNoteId(null);
+    navigate(scopeUrl(scope));
   };
 
   // New notes go into the selected notebook, else the open note's notebook, else the first notebook
@@ -173,8 +154,13 @@ export function NotesPage() {
         onSuccess: (note) => {
           setSearchQuery("");
           setEditIntentNoteId(note.id);
-          setSelectedNoteId(note.id);
-          navigate(`/notes/${note.id}`);
+          // Open it in the list it was created from; from the trash or a tag, show its notebook
+          navigate(
+            scopeUrl(
+              scope.kind === "all" || scope.kind === "notebook" ? scope : { kind: "notebook", notebookId: note.notebookId },
+              note.id
+            )
+          );
         },
         onError: (err) => toast.error("Could not create note", { description: err.message }),
       }
@@ -188,12 +174,10 @@ export function NotesPage() {
     );
   };
 
+  // The note is gone, so its URL should not stay in the history
   const handleNoteRemoved = () => {
-    setSelectedNoteId(null);
     setEditIntentNoteId(null);
-    if (isTrashSelected) navigate("/trash");
-    else if (selectedNotebookId) navigate(`/notebooks/${selectedNotebookId}`);
-    else navigate("/notes");
+    navigate(scopeUrl(scope), { replace: true });
   };
 
   const isSearchActive = debouncedQuery.length >= 2;

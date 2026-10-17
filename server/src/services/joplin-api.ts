@@ -238,6 +238,29 @@ export class JoplinApiService {
   }
 
   /**
+   * Reads the sync target's `info.json` (sync version, E2EE state and master keys), the file
+   * Joplin's SyncTargetInfo is stored in.
+   *
+   * @param sessionId Active session ID
+   * @returns Raw JSON text, or null when the sync target has no info.json yet
+   */
+  public async getSyncTargetInfo(sessionId: string): Promise<string | null> {
+    try {
+      const res = await this.client.get('/api/items/root:/info.json:/content', {
+        headers: { 'X-API-AUTH': sessionId },
+        responseType: 'text',
+        transformResponse: [(data) => data],
+      });
+      return typeof res.data === 'string' ? res.data : String(res.data ?? '');
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        return null;
+      }
+      this.handleError(error, 'getSyncTargetInfo');
+    }
+  }
+
+  /**
    * Retrieves binary resource content (e.g. images, attachments)
    *
    * @param sessionId Active session ID

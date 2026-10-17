@@ -10,13 +10,21 @@ import { toast } from "sonner";
 import { ApiError, downloadResource, getNote, getResourceIdFromUrl, getResourceUrl } from "@/lib/api";
 import { ResourceImage } from "./ResourceImage";
 import { cn } from "@/lib/utils";
+import type { TaskLocation } from "@/lib/tasks";
 import { useNavigate } from "react-router-dom";
 
 interface MarkdownRendererProps {
   content: string;
   className?: string;
-  /** Makes task-list checkboxes clickable; index is the task's position in document order */
-  onToggleTask?: (index: number, checked: boolean) => void;
+  /**
+   * Makes task-list checkboxes clickable. `location` is where the task item starts in `content`
+   * (see `setTaskChecked` in lib/tasks).
+   */
+  onToggleTask?: (location: TaskLocation, checked: boolean) => void;
+}
+
+interface SourcePosition {
+  start: { line: number; column: number; offset?: number };
 }
 
 interface HastNode {
@@ -24,15 +32,48 @@ interface HastNode {
   tagName?: string;
   properties?: Record<string, unknown>;
   children?: HastNode[];
+  position?: SourcePosition;
+}
+
+interface MdastNode {
+  type: string;
+  checked?: boolean | null;
+  children?: MdastNode[];
+  position?: SourcePosition;
+}
+
+interface PluginFile {
+  data: Record<string, unknown>;
 }
 
 /**
- * Rehype plugin that numbers GFM task-list checkboxes in document order (data-task-index),
- * so a click can be mapped back to the matching "[ ]" in the Markdown source.
+ * Remark plugin that records the source offsets of the list items remark-gfm parsed as tasks,
+ * so rehypeTaskLocation only marks checkboxes that come from real Markdown task items.
  */
-function rehypeTaskIndex() {
-  return (tree: HastNode) => {
-    let index = 0;
+function remarkTaskItems() {
+  return (tree: MdastNode, file: PluginFile) => {
+    const offsets = new Set<number>();
+    const walk = (node: MdastNode) => {
+      const offset = node.position?.start.offset;
+      if (node.type === "listItem" && typeof node.checked === "boolean" && offset !== undefined) {
+        offsets.add(offset);
+      }
+      node.children?.forEach(walk);
+    };
+    walk(tree);
+    file.data.taskItemOffsets = offsets;
+  };
+}
+
+/**
+ * Rehype plugin that stores the source line/column of each task item on its checkbox
+ * (data-task-line, data-task-column), so a click toggles exactly the "[ ]" the parser rendered.
+ * Runs after sanitizing; checkboxes in raw HTML get no location and stay read-only.
+ */
+function rehypeTaskLocation() {
+  return (tree: HastNode, file: PluginFile) => {
+    const taskOffsets = file.data.taskItemOffsets;
+    if (!(taskOffsets instanceof Set)) return;
     const findCheckbox = (node: HastNode): HastNode | null => {
       for (const child of node.children ?? []) {
         if (child.type !== "element") continue;
@@ -44,11 +85,12 @@ function rehypeTaskIndex() {
       return null;
     };
     const walk = (node: HastNode) => {
-      if (node.type === "element" && node.tagName === "li") {
-        const classes = node.properties?.className;
-        if (Array.isArray(classes) && classes.includes("task-list-item")) {
-          const checkbox = findCheckbox(node);
-          if (checkbox?.properties) checkbox.properties.dataTaskIndex = index++;
+      const start = node.position?.start;
+      if (node.type === "element" && node.tagName === "li" && start && taskOffsets.has(start.offset)) {
+        const checkbox = findCheckbox(node);
+        if (checkbox?.properties) {
+          checkbox.properties.dataTaskLine = start.line;
+          checkbox.properties.dataTaskColumn = start.column;
         }
       }
       node.children?.forEach(walk);
@@ -100,9 +142,11 @@ function preprocessJoplinMarkdown(raw: string): string {
 
   // Replace Markdown image syntax: ![alt](:/id "title") -> ![alt](/api/resources/id "title").
   // The ":/" form has to go: the sanitizer would drop it as an unknown URL protocol.
+  // All rewrites keep whitespace and line breaks, so line/column positions of the result match
+  // the original (task checkboxes map clicks back to the source by position).
   let transformed = raw.replace(
-    /!\[([^\]]*)\]\(\s*:\/?([0-9a-fA-F]{32})(\s+"[^"]*")?\s*\)/g,
-    (_, alt, id, title = "") => `![${alt}](${getResourceUrl(id)}${title})`
+    /!\[([^\]]*)\]\((\s*):\/?([0-9a-fA-F]{32})(\s+"[^"]*")?(\s*)\)/g,
+    (_, alt, lead, id, title = "", trail) => `![${alt}](${lead}${getResourceUrl(id)}${title}${trail})`
   );
 
   // Replace HTML image src: <img src=":/id" ...> -> <img src="/api/resources/id" ...>
@@ -114,8 +158,9 @@ function preprocessJoplinMarkdown(raw: string): string {
   // Replace links to notes/attachments: [text](:/id) and <a href=":/id"> -> /joplin-item/id.
   // A ":/" href would be dropped by the sanitizer as an unknown protocol.
   transformed = transformed.replace(
-    /(^|[^!])\[([^\]]*)\]\(\s*:\/?([0-9a-fA-F]{32})(\s+"[^"]*")?\s*\)/g,
-    (_, before, text, id, title = "") => `${before}[${text}](${JOPLIN_ITEM_PATH}${id.toLowerCase()}${title})`
+    /(^|[^!])\[([^\]]*)\]\((\s*):\/?([0-9a-fA-F]{32})(\s+"[^"]*")?(\s*)\)/g,
+    (_, before, text, lead, id, title = "", trail) =>
+      `${before}[${text}](${lead}${JOPLIN_ITEM_PATH}${id.toLowerCase()}${title}${trail})`
   );
   transformed = transformed.replace(
     /<a([^>]+)href=["']:\/?([0-9a-fA-F]{32})["']/gi,
@@ -236,11 +281,11 @@ export function MarkdownRenderer({ content, className, onToggleTask }: MarkdownR
   return (
     <div className={`prose-content text-foreground leading-relaxed ${className ?? ""}`}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkTaskItems]}
         rehypePlugins={[
           rehypeRaw,
           [rehypeSanitize, sanitizeSchema],
-          rehypeTaskIndex,
+          rehypeTaskLocation,
           rehypeHighlight,
         ]}
         components={{
@@ -381,15 +426,20 @@ export function MarkdownRenderer({ content, className, onToggleTask }: MarkdownR
           hr: (props) => <hr className="my-6 border-border/60" {...props} />,
           input: ({ type, checked, ...props }) => {
             if (type === "checkbox") {
-              const taskIndex = Number((props as Record<string, unknown>)["data-task-index"]);
-              const interactive = Boolean(onToggleTask) && Number.isInteger(taskIndex);
+              const data = props as Record<string, unknown>;
+              const location: TaskLocation = {
+                line: Number(data["data-task-line"]),
+                column: Number(data["data-task-column"]),
+              };
+              const interactive =
+                Boolean(onToggleTask) && Number.isInteger(location.line) && Number.isInteger(location.column);
               return (
                 <input
                   type="checkbox"
                   checked={Boolean(checked)}
                   readOnly={!interactive}
                   disabled={!interactive}
-                  onChange={interactive ? (e) => onToggleTask?.(taskIndex, e.target.checked) : undefined}
+                  onChange={interactive ? (e) => onToggleTask?.(location, e.target.checked) : undefined}
                   className={`mr-2 h-4 w-4 rounded border-border text-primary accent-primary align-middle ${
                     interactive ? "cursor-pointer" : "cursor-default"
                   }`}
