@@ -35,6 +35,7 @@ export interface Note {
   updatedTime: number;
   createdTime: number;
   deletedTime?: number;
+  parentId: string;
   notebookId: string;
   notebookTitle: string;
   tags: Tag[];

@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import { noteCache } from '../services/note-cache.js';
+import { noteWriter } from '../services/note-writer.js';
 
 const router = Router();
 
@@ -55,6 +56,82 @@ router.get('/:id', async (req: Request, res: Response, next: NextFunction): Prom
       return;
     }
 
+    res.status(200).json(note);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/notes
+ * Creates a note or to-do. Body: { title?, body?, parentId, isTodo? }
+ */
+router.post('/', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { title, body, parentId, isTodo } = req.body ?? {};
+    if (typeof parentId !== 'string' || !parentId) {
+      res.status(400).json({ error: 'parentId (notebook id) is required' });
+      return;
+    }
+    const note = await noteWriter.createNote(req.sessionId!, {
+      title: typeof title === 'string' ? title : '',
+      body: typeof body === 'string' ? body : '',
+      parentId,
+      isTodo: Boolean(isTodo),
+    });
+    res.status(201).json(note);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * PUT /api/notes/:id
+ * Updates a note. Body: { title?, body?, parentId?, todoCompleted?, baseUpdatedTime?, force? }
+ * Responds 409 with details.current when the note changed since baseUpdatedTime.
+ */
+router.put('/:id', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { title, body, parentId, todoCompleted, baseUpdatedTime, force } = req.body ?? {};
+    const note = await noteWriter.updateNote(req.sessionId!, req.params.id, {
+      title: typeof title === 'string' ? title : undefined,
+      body: typeof body === 'string' ? body : undefined,
+      parentId: typeof parentId === 'string' ? parentId : undefined,
+      todoCompleted: typeof todoCompleted === 'boolean' ? todoCompleted : undefined,
+      baseUpdatedTime: typeof baseUpdatedTime === 'number' ? baseUpdatedTime : undefined,
+      force: force === true,
+    });
+    res.status(200).json(note);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * DELETE /api/notes/:id
+ * Moves the note to the trash, or deletes it from the server with ?permanent=true
+ */
+router.delete('/:id', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const permanent = req.query.permanent === 'true' || req.query.permanent === '1';
+    if (permanent) {
+      await noteWriter.purgeNote(req.sessionId!, req.params.id);
+    } else {
+      await noteWriter.trashNote(req.sessionId!, req.params.id);
+    }
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/notes/:id/restore
+ * Restores a note (and its trashed parent notebooks) from the trash
+ */
+router.post('/:id/restore', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const note = await noteWriter.restoreNote(req.sessionId!, req.params.id);
     res.status(200).json(note);
   } catch (error) {
     next(error);

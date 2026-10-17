@@ -1,13 +1,24 @@
 import React, { useState } from "react";
 import { Notebook } from "@/lib/types";
-import { ChevronRight, Folder, FolderOpen } from "lucide-react";
+import { ChevronRight, Folder, FolderOpen, FolderPlus, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+
+export type NotebookAction = "create-child" | "rename" | "delete";
 
 interface NotebookTreeProps {
   notebooks: Notebook[];
   selectedNotebookId?: string | null;
   onSelectNotebook: (id: string) => void;
+  /** Enables the per-notebook actions menu */
+  onNotebookAction?: (action: NotebookAction, notebook: Notebook) => void;
   depth?: number;
 }
 
@@ -15,6 +26,7 @@ interface NotebookItemProps {
   notebook: Notebook;
   selectedNotebookId?: string | null;
   onSelectNotebook: (id: string) => void;
+  onNotebookAction?: (action: NotebookAction, notebook: Notebook) => void;
   depth: number;
 }
 
@@ -22,8 +34,10 @@ function NotebookItem({
   notebook,
   selectedNotebookId,
   onSelectNotebook,
+  onNotebookAction,
   depth,
 }: NotebookItemProps) {
+  const [menuOpen, setMenuOpen] = useState(false);
   const hasChildren = Boolean(notebook.children && notebook.children.length > 0);
   const isSelected = selectedNotebookId === notebook.id;
   const [isOpen, setIsOpen] = useState<boolean>(true);
@@ -87,6 +101,42 @@ function NotebookItem({
           <span className="truncate">{notebook.title || "Untitled Folder"}</span>
         </div>
 
+        {onNotebookAction && (
+          <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                onClick={(e) => e.stopPropagation()}
+                aria-label={`Actions for ${notebook.title}`}
+                className={cn(
+                  "mr-1 p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted shrink-0",
+                  menuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                )}
+              >
+                <MoreHorizontal className="h-3.5 w-3.5" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-48" onClick={(e) => e.stopPropagation()}>
+              <DropdownMenuItem onClick={() => onNotebookAction("create-child", notebook)}>
+                <FolderPlus className="h-4 w-4" />
+                New sub-notebook
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => onNotebookAction("rename", notebook)}>
+                <Pencil className="h-4 w-4" />
+                Rename
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onClick={() => onNotebookAction("delete", notebook)}
+                className="text-destructive focus:text-destructive"
+              >
+                <Trash2 className="h-4 w-4" />
+                Move to trash
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
+
         {typeof notebook.noteCount === "number" && notebook.noteCount > 0 && (
           <Badge
             variant="secondary"
@@ -110,6 +160,7 @@ function NotebookItem({
               notebook={child}
               selectedNotebookId={selectedNotebookId}
               onSelectNotebook={onSelectNotebook}
+              onNotebookAction={onNotebookAction}
               depth={depth + 1}
             />
           ))}
@@ -123,6 +174,7 @@ export function NotebookTree({
   notebooks,
   selectedNotebookId,
   onSelectNotebook,
+  onNotebookAction,
   depth = 0,
 }: NotebookTreeProps) {
   if (!notebooks || notebooks.length === 0) {
@@ -141,6 +193,7 @@ export function NotebookTree({
           notebook={notebook}
           selectedNotebookId={selectedNotebookId}
           onSelectNotebook={onSelectNotebook}
+          onNotebookAction={onNotebookAction}
           depth={depth}
         />
       ))}

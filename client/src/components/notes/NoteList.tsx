@@ -3,7 +3,7 @@ import { NoteListItem as NoteListItemType } from "@/lib/types";
 import { NoteListItem } from "./NoteListItem";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ArrowDownUp, FileQuestion, Search } from "lucide-react";
+import { ArrowDownUp, CheckSquare, FileQuestion, FileText, Loader2, Plus, Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import {
   DropdownMenu,
@@ -20,6 +20,10 @@ interface NoteListProps {
   onSelectNote: (id: string) => void;
   title?: string;
   subtitle?: string;
+  /** Shows the "New" menu when provided */
+  onCreateNote?: (isTodo: boolean) => void;
+  isCreating?: boolean;
+  onToggleTodo?: (id: string, completed: boolean) => void;
 }
 
 type SortField = "updated" | "created" | "title";
@@ -32,6 +36,9 @@ export function NoteList({
   onSelectNote,
   title = "Notes",
   subtitle,
+  onCreateNote,
+  isCreating = false,
+  onToggleTodo,
 }: NoteListProps) {
   const [filterText, setFilterText] = useState("");
   const [sortField, setSortField] = useState<SortField>("updated");
@@ -118,6 +125,27 @@ export function NoteList({
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
+
+            {onCreateNote && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button size="sm" className="h-7 gap-1 px-2.5" disabled={isCreating} aria-label="Create new note">
+                    {isCreating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                    New
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-40">
+                  <DropdownMenuItem onClick={() => onCreateNote(false)}>
+                    <FileText className="h-4 w-4" />
+                    Note
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => onCreateNote(true)}>
+                    <CheckSquare className="h-4 w-4" />
+                    To-do
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
           </div>
         </div>
 
@@ -171,6 +199,7 @@ export function NoteList({
                 note={note}
                 isActive={selectedNoteId === note.id}
                 onClick={() => onSelectNote(note.id)}
+                onToggleTodo={onToggleTodo ? () => onToggleTodo(note.id, !note.todoCompleted) : undefined}
               />
             ))}
           </div>

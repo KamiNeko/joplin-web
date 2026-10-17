@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { Sidebar } from "@/components/layout/Sidebar";
@@ -8,22 +8,9 @@ import { SearchResults } from "@/components/search/SearchResults";
 import { useNotebooks } from "@/hooks/use-notebooks";
 import { useNotes, useNote } from "@/hooks/use-notes";
 import { useSearch } from "@/hooks/use-search";
-import { Notebook } from "@/lib/types";
-
-/**
- * Recursively locates a notebook by ID in the tree.
- */
-function findNotebookById(notebooks: Notebook[] | undefined, id: string | null): Notebook | null {
-  if (!notebooks || !id) return null;
-  for (const nb of notebooks) {
-    if (nb.id === id) return nb;
-    if (nb.children && nb.children.length > 0) {
-      const found = findNotebookById(nb.children, id);
-      if (found) return found;
-    }
-  }
-  return null;
-}
+import { useCreateNote, useUpdateNote } from "@/hooks/use-mutations";
+import { findNotebookById, flattenNotebooks } from "@/lib/notebooks";
+import { toast } from "sonner";
 
 export function NotesPage() {
   const params = useParams();
@@ -41,6 +28,10 @@ export function NotesPage() {
   const [selectedTagId, setSelectedTagId] = useState<string | null>(tagParam || null);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(routeNoteId || null);
   const [searchQuery, setSearchQuery] = useState<string>("");
+  // Note that should open in the editor (set right after creating it)
+  const [editIntentNoteId, setEditIntentNoteId] = useState<string | null>(null);
+  const createNote = useCreateNote();
+  const updateNote = useUpdateNote();
 
   // Sync internal state when URL parameters change
   useEffect(() => {
@@ -87,9 +78,13 @@ export function NotesPage() {
     debouncedQuery,
   } = useSearch(searchQuery);
 
-  // If viewing a note directly, ensure selectedNotebookId matches note's notebook
+  // When the page is opened on a note URL, show that note's notebook in the list (first load only,
+  // so picking a note from "All Notes" or the trash doesn't switch the list)
+  const openedViaNoteUrl = useRef(Boolean(routeNoteId) && !isTrashRoute);
   useEffect(() => {
-    if (fullNote && !selectedNotebookId && !selectedTagId) {
+    if (!openedViaNoteUrl.current || !fullNote) return;
+    openedViaNoteUrl.current = false;
+    if (!selectedNotebookId && !selectedTagId && !fullNote.deletedTime) {
       setSelectedNotebookId(fullNote.notebookId);
     }
   }, [fullNote, selectedNotebookId, selectedTagId]);
@@ -107,7 +102,7 @@ export function NotesPage() {
     return undefined;
   }, [currentNotebook, selectedTagId, isTrashSelected]);
 
-  const noteTitle = fullNote?.title || undefined;
+  const noteTitle = fullNote ? fullNote.title || "Untitled Note" : undefined;
 
   // Handlers
   const handleSelectNotebook = (id: string) => {
@@ -144,6 +139,7 @@ export function NotesPage() {
 
   const handleSelectNote = (id: string) => {
     setSelectedNoteId(id);
+    setEditIntentNoteId(null);
     if (isTrashSelected) {
       navigate(`/trash/${id}`);
     } else {
@@ -153,6 +149,47 @@ export function NotesPage() {
 
   const handleCloseNoteViewer = () => {
     setSelectedNoteId(null);
+  };
+
+  // New notes go into the selected notebook, else the open note's notebook, else the first notebook
+  const targetNotebookId = useMemo(() => {
+    if (selectedNotebookId && findNotebookById(notebooks, selectedNotebookId)) return selectedNotebookId;
+    if (fullNote?.notebookId && findNotebookById(notebooks, fullNote.notebookId)) return fullNote.notebookId;
+    return flattenNotebooks(notebooks)[0]?.id ?? null;
+  }, [selectedNotebookId, fullNote, notebooks]);
+
+  const handleCreateNote = (isTodo: boolean) => {
+    if (!targetNotebookId) {
+      toast.error("Create a notebook first", { description: "Notes in Joplin always belong to a notebook." });
+      return;
+    }
+    createNote.mutate(
+      { parentId: targetNotebookId, title: "", body: "", isTodo },
+      {
+        onSuccess: (note) => {
+          setSearchQuery("");
+          setEditIntentNoteId(note.id);
+          setSelectedNoteId(note.id);
+          navigate(`/notes/${note.id}`);
+        },
+        onError: (err) => toast.error("Could not create note", { description: err.message }),
+      }
+    );
+  };
+
+  const handleToggleTodo = (id: string, completed: boolean) => {
+    updateNote.mutate(
+      { id, changes: { todoCompleted: completed } },
+      { onError: (err) => toast.error("Could not update to-do", { description: err.message }) }
+    );
+  };
+
+  const handleNoteRemoved = () => {
+    setSelectedNoteId(null);
+    setEditIntentNoteId(null);
+    if (isTrashSelected) navigate("/trash");
+    else if (selectedNotebookId) navigate(`/notebooks/${selectedNotebookId}`);
+    else navigate("/notes");
   };
 
   const isSearchActive = debouncedQuery.length >= 2;
@@ -217,6 +254,9 @@ export function NotesPage() {
               selectedNoteId={selectedNoteId}
               onSelectNote={handleSelectNote}
               title={notebookTitle || "All Notes"}
+              onCreateNote={isTrashSelected ? undefined : handleCreateNote}
+              isCreating={createNote.isPending}
+              onToggleTodo={isTrashSelected ? undefined : handleToggleTodo}
               subtitle={
                 isTrashSelected
                   ? "Deleted notes and notebooks"
@@ -237,7 +277,11 @@ export function NotesPage() {
           }`}
         >
           <NoteViewer
-            note={fullNote}
+            key={selectedNoteId ?? "none"}
+            note={selectedNoteId ? fullNote : null}
+            notebooks={notebooks}
+            startInEdit={editIntentNoteId !== null && editIntentNoteId === selectedNoteId}
+            onRemoved={handleNoteRemoved}
             isLoading={isLoadingNote}
             error={noteError}
             onTagClick={handleSelectTag}

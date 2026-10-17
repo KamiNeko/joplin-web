@@ -270,3 +270,81 @@ export function getResourceUrl(resourceId: string): string {
   const cleaned = resourceId.replace(/^:\/?/, "");
   return `${API_BASE_URL}/api/resources/${cleaned}`;
 }
+
+// ---------------------------------------------------------------------------
+// Write operations
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the server's current version of a note when a save hit a conflict (HTTP 409).
+ */
+export function getConflictNote(error: unknown): Note | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  const details = (error.data as { details?: { current?: Note | null } } | undefined)?.details;
+  return details?.current ?? null;
+}
+
+/**
+ * Creates a note or to-do in the given notebook.
+ */
+export async function createNote(input: {
+  parentId: string;
+  title?: string;
+  body?: string;
+  isTodo?: boolean;
+}): Promise<Note> {
+  return request<Note>("/api/notes", { method: "POST", body: JSON.stringify(input) });
+}
+
+export interface NoteUpdate {
+  title?: string;
+  body?: string;
+  parentId?: string;
+  todoCompleted?: boolean;
+  /** updatedTime of the version the change is based on; enables conflict detection */
+  baseUpdatedTime?: number;
+  /** Overwrite even if the note changed on the server */
+  force?: boolean;
+}
+
+/**
+ * Updates a note. Throws ApiError 409 (see getConflictNote) when the note changed elsewhere.
+ */
+export async function updateNote(id: string, changes: NoteUpdate): Promise<Note> {
+  return request<Note>(`/api/notes/${id}`, { method: "PUT", body: JSON.stringify(changes) });
+}
+
+/**
+ * Moves a note to the trash, or deletes it from the server when permanent is true.
+ */
+export async function deleteNote(id: string, permanent = false): Promise<void> {
+  await request(`/api/notes/${id}${permanent ? "?permanent=true" : ""}`, { method: "DELETE" });
+}
+
+/**
+ * Restores a note (and its trashed parent notebooks) from the trash.
+ */
+export async function restoreNote(id: string): Promise<Note> {
+  return request<Note>(`/api/notes/${id}/restore`, { method: "POST" });
+}
+
+/**
+ * Creates a notebook, optionally as a sub-notebook.
+ */
+export async function createNotebook(input: { title: string; parentId?: string }): Promise<Notebook> {
+  return request<Notebook>("/api/notebooks", { method: "POST", body: JSON.stringify(input) });
+}
+
+/**
+ * Renames or re-parents a notebook.
+ */
+export async function updateNotebook(id: string, changes: { title?: string; parentId?: string }): Promise<Notebook> {
+  return request<Notebook>(`/api/notebooks/${id}`, { method: "PUT", body: JSON.stringify(changes) });
+}
+
+/**
+ * Moves a notebook with its sub-notebooks and notes to the trash.
+ */
+export async function deleteNotebook(id: string): Promise<void> {
+  await request(`/api/notebooks/${id}`, { method: "DELETE" });
+}

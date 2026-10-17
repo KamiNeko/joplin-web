@@ -79,6 +79,8 @@ export interface NoteDetail {
   body: string;
   parentId: string;
   notebook: { id: string; title: string } | null;
+  notebookId: string;
+  notebookTitle: string;
   tags: Array<{ id: string; title: string }>;
   createdTime: number;
   updatedTime: number;
