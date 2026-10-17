@@ -11,6 +11,7 @@ import { mockItem, mockItemsOfType, startTestApp, type TestApp } from './helpers
  * against the mock Joplin Server.
  */
 
+const HOUR = 60 * 60 * 1000;
 const NOW = Date.now();
 const UNKNOWN_ID = 'f'.repeat(32);
 /** A tag written by another Joplin client with properties Joplin Web doesn't know about */
@@ -75,7 +76,7 @@ async function upload(name: string, data: Buffer): Promise<string> {
 }
 
 before(async () => {
-  app = await startTestApp({ items: seedItems(), pageSize: 6 });
+  app = await startTestApp({ items: seedItems(), pageSize: 6, cacheTtlMs: HOUR });
   mock = app.mock;
   ({ MAX_UPLOAD_BYTES } = await import('../src/routes/resources.js'));
   await app.login();
@@ -145,7 +146,7 @@ describe('POST /api/notes/:id/tags', () => {
     assert.equal(mock.items.size, sizeBefore);
   });
 
-  test('rejects tagging a trashed note', { todo: 'see #53' }, async () => {
+  test('rejects tagging a trashed note', async () => {
     const trashed = demoId('note-old-draft');
     const sizeBefore = mock.items.size;
     const res = await api(`/api/notes/${trashed}/tags`, json('POST', { title: 'x-trashed' }));

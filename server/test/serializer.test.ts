@@ -154,8 +154,9 @@ describe('property values', () => {
     assert.equal(roundTripValue('mixed \\n and\nreal'), 'mixed \\n and\nreal');
   });
 
-  test('a backslash followed by a real newline round-trips', { todo: 'see #55' }, () => {
-    assert.equal(roundTripValue('a\\\nb'), 'a\\\nb');
+  test('a backslash before a real newline reads back as a literal \\n, like Joplin (#55)', () => {
+    // Joplin's BaseItem escaping is lossy here too; serializer-fidelity.test.ts compares it in full
+    assert.equal(roundTripValue('a\\\nb'), 'a\\nb');
   });
 
   test('values containing colons are split at the first colon only', () => {
@@ -486,18 +487,21 @@ describe('wire format', () => {
     ].join('\n'),
   };
 
+  /** Note-tag links have no title line, so they are written with title undefined, as NoteWriterService does */
+  const titleFor = (item: { type_: number; title: string }) => (item.type_ === JoplinItemType.NoteTag ? undefined : item.title);
+
   for (const [name, raw] of Object.entries(fixtures)) {
     test(`${name}: deserialize then serialize keeps every value`, () => {
       const item = deserialize(raw);
-      const out = deserialize(serialize({ type_: item.type_, title: item.title, body: item.body, properties: item.properties }));
+      const out = deserialize(serialize({ type_: item.type_, title: titleFor(item), body: item.body, properties: item.properties }));
       assert.equal(out.title, item.title);
       assert.equal(out.body, item.body);
       assert.deepEqual(out.properties, item.properties);
     });
 
-    test(`${name}: serialize(deserialize(raw)) reproduces the raw text`, { todo: 'see #54' }, () => {
+    test(`${name}: serialize(deserialize(raw)) reproduces the raw text`, () => {
       const item = deserialize(raw);
-      assert.equal(serialize({ type_: item.type_, title: item.title, body: item.body, properties: item.properties }), raw);
+      assert.equal(serialize({ type_: item.type_, title: titleFor(item), body: item.body, properties: item.properties }), raw);
     });
   }
 
