@@ -150,29 +150,36 @@ export function Sidebar({
         )}
       </div>
 
-      {/* Search Input Bar */}
-      <div className="p-3 border-b border-border/30">
-        <div className="relative">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-          <Input
-            type="text"
-            placeholder="Search notes... (Ctrl+K)"
-            value={searchQuery}
-            onChange={(e) => onSearchChange(e.target.value)}
-            className="h-8 pl-8 pr-7 text-xs bg-background/60 border-sidebar-border focus-visible:ring-primary/60"
-          />
-          {searchQuery && (
-            <button
-              type="button"
-              onClick={() => onSearchChange("")}
-              className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded text-muted-foreground hover:text-foreground"
-              aria-label="Clear search text"
-            >
-              <X className="h-3 w-3" />
-            </button>
-          )}
+      {/* Search Input Bar: only in the mobile slide-out menu; on desktop the header holds the search field */}
+      {onCloseMobile && (
+        <div className="p-3 border-b border-border/30">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+            <Input
+              type="search"
+              placeholder="Search notes..."
+              value={searchQuery}
+              onChange={(e) => onSearchChange(e.target.value)}
+              onKeyDown={(e) => {
+                // Close the menu so the results are visible
+                if (e.key === "Enter") onCloseMobile();
+              }}
+              enterKeyHint="search"
+              className="h-8 pl-8 pr-7 text-xs bg-background/60 border-sidebar-border focus-visible:ring-primary/60 [&::-webkit-search-cancel-button]:hidden"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => onSearchChange("")}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded text-muted-foreground hover:text-foreground"
+                aria-label="Clear search text"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Navigable Sidebar Items */}
       <ScrollArea className="flex-1 px-3 py-2">

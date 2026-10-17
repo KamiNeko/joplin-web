@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useAuth } from "@/hooks/use-auth";
 import { ThemeToggle } from "@/components/common/ThemeToggle";
 import { Button } from "@/components/ui/button";
@@ -18,35 +18,48 @@ import {
   Menu,
   Search,
   User,
+  X,
 } from "lucide-react";
 
 interface HeaderProps {
   notebookTitle?: string;
   noteTitle?: string;
   onToggleSidebar?: () => void;
-  onOpenSearch?: () => void;
+  searchQuery: string;
+  onSearchChange: (query: string) => void;
+  /** Ctrl+K on small screens, where the header search field is hidden */
+  onOpenMobileSearch?: () => void;
 }
 
 export function Header({
   notebookTitle,
   noteTitle,
   onToggleSidebar,
-  onOpenSearch,
+  searchQuery,
+  onSearchChange,
+  onOpenMobileSearch,
 }: HeaderProps) {
   const { logout, email } = useAuth();
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // Listen for global Command+K / Ctrl+K shortcut
+  // Ctrl+K / Cmd+K focuses the search field (or opens the mobile menu that holds it)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        onOpenSearch?.();
+        const input = searchInputRef.current;
+        if (input && input.offsetParent !== null) {
+          input.focus();
+          input.select();
+        } else {
+          onOpenMobileSearch?.();
+        }
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onOpenSearch]);
+  }, [onOpenMobileSearch]);
 
   return (
     <header className="h-14 border-b border-border/40 bg-card/60 backdrop-blur-md px-4 flex items-center justify-between gap-4 z-20">
@@ -91,21 +104,44 @@ export function Header({
         </nav>
       </div>
 
-      {/* Right: Search shortcut button, Theme toggle, and User Menu */}
+      {/* Right: Search field, Theme toggle, and User Menu */}
       <div className="flex items-center gap-2 shrink-0">
-        {/* Quick search shortcut trigger */}
-        <button
-          type="button"
-          onClick={onOpenSearch}
-          className="hidden sm:flex items-center gap-2 h-8 px-2.5 rounded-lg border border-border/40 bg-muted/30 hover:bg-muted/60 text-xs text-muted-foreground transition-colors"
-          aria-label="Open search shortcut"
-        >
-          <Search className="h-3.5 w-3.5 text-muted-foreground" />
-          <span>Quick search...</span>
-          <kbd className="pointer-events-none inline-flex h-4 select-none items-center gap-1 rounded border border-border bg-muted px-1.5 font-mono text-[10px] font-medium text-muted-foreground">
-            <span className="text-[10px]">Ctrl</span>K
-          </kbd>
-        </button>
+        {/* Search field (desktop; on mobile the search lives in the slide-out menu) */}
+        <div className="relative hidden md:block">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+          <input
+            ref={searchInputRef}
+            type="search"
+            value={searchQuery}
+            onChange={(e) => onSearchChange(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                onSearchChange("");
+                e.currentTarget.blur();
+              }
+            }}
+            placeholder="Search notes..."
+            aria-label="Search notes"
+            className="h-8 w-56 lg:w-72 rounded-lg border border-border/40 bg-muted/30 pl-8 pr-14 text-xs text-foreground placeholder:text-muted-foreground outline-none transition-colors hover:bg-muted/50 focus:bg-background focus:border-primary/50 focus:ring-1 focus:ring-primary/40 [&::-webkit-search-cancel-button]:hidden"
+          />
+          {searchQuery ? (
+            <button
+              type="button"
+              onClick={() => {
+                onSearchChange("");
+                searchInputRef.current?.focus();
+              }}
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded text-muted-foreground hover:text-foreground"
+              aria-label="Clear search"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          ) : (
+            <kbd className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 inline-flex h-4 select-none items-center gap-1 rounded border border-border bg-muted px-1.5 font-mono text-[10px] font-medium text-muted-foreground">
+              Ctrl K
+            </kbd>
+          )}
+        </div>
 
         {/* Theme toggle */}
         <ThemeToggle />

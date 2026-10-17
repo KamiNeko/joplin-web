@@ -198,11 +198,8 @@ export function NotesPage() {
     <AppLayout
       notebookTitle={notebookTitle}
       noteTitle={noteTitle}
-      onOpenSearch={() => {
-        // Focus search input or trigger search mode
-        const input = document.querySelector<HTMLInputElement>("input[placeholder*='Search notes']");
-        input?.focus();
-      }}
+      searchQuery={searchQuery}
+      onSearchChange={setSearchQuery}
       sidebar={({ onCloseMobile }) => (
         <Sidebar
           selectedNotebookId={selectedNotebookId}

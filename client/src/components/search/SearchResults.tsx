@@ -129,7 +129,7 @@ export function SearchResults({
               const relativeTime = formatRelativeTime(note.updatedTime || note.createdTime);
 
               // Use snippet matches if available from API
-              const snippetMatch = note.matches?.find((m) => m.snippet)?.snippet;
+              const snippetMatch = note.matches?.snippet;
               const displaySnippet = snippetMatch || note.preview;
 
               return (
