@@ -340,3 +340,41 @@ export async function updateNotebook(id: string, changes: { title?: string; pare
 export async function deleteNotebook(id: string): Promise<void> {
   await request(`/api/notebooks/${id}`, { method: "DELETE" });
 }
+
+const RESOURCE_ID_IN_URL = /(?:^:\/?|\/api\/resources\/)([0-9a-fA-F]{32})(?:[?#].*)?$/;
+
+/**
+ * Extracts the Joplin resource id from ":/<id>" or ".../api/resources/<id>" URLs.
+ */
+export function getResourceIdFromUrl(src: string | undefined): string | null {
+  if (!src) return null;
+  const match = RESOURCE_ID_IN_URL.exec(src);
+  return match ? match[1].toLowerCase() : null;
+}
+
+// Resources are immutable, so each one is downloaded once per page load
+const resourceObjectUrls = new Map<string, Promise<string>>();
+
+/**
+ * Loads a resource with the session headers (an <img src> request can't send them)
+ * and returns a blob: URL for it.
+ */
+export function getResourceObjectUrl(resourceId: string): Promise<string> {
+  let pending = resourceObjectUrls.get(resourceId);
+  if (!pending) {
+    pending = (async () => {
+      const sessionId = getStoredSessionId();
+      const response = await fetch(`${API_BASE_URL}/api/resources/${resourceId}`, {
+        headers: sessionId ? { Authorization: `Bearer ${sessionId}`, "X-API-AUTH": sessionId } : {},
+      });
+      if (!response.ok) {
+        throw new ApiError(response.status, `Could not load resource (HTTP ${response.status})`);
+      }
+      return URL.createObjectURL(await response.blob());
+    })();
+    // Allow a retry later if this attempt failed
+    pending.catch(() => resourceObjectUrls.delete(resourceId));
+    resourceObjectUrls.set(resourceId, pending);
+  }
+  return pending;
+}

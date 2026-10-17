@@ -5,7 +5,8 @@ import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import rehypeHighlight from "rehype-highlight";
 import { Check, Copy, ExternalLink } from "lucide-react";
-import { getResourceUrl } from "@/lib/api";
+import { getResourceIdFromUrl, getResourceUrl } from "@/lib/api";
+import { ResourceImage } from "./ResourceImage";
 import { cn } from "@/lib/utils";
 import { useNavigate } from "react-router-dom";
 
@@ -91,10 +92,11 @@ const sanitizeSchema = {
 function preprocessJoplinMarkdown(raw: string): string {
   if (!raw) return "";
 
-  // Replace Markdown image syntax: ![alt](:/id) -> ![alt](/api/resources/id)
+  // Replace Markdown image syntax: ![alt](:/id "title") -> ![alt](/api/resources/id "title").
+  // The ":/" form has to go: the sanitizer would drop it as an unknown URL protocol.
   let transformed = raw.replace(
-    /!\[(.*?)\]\(:([a-zA-Z0-9_-]+)\)/g,
-    (_, alt, id) => `![${alt}](${getResourceUrl(id)})`
+    /!\[([^\]]*)\]\(\s*:\/?([0-9a-fA-F]{32})(\s+"[^"]*")?\s*\)/g,
+    (_, alt, id, title = "") => `![${alt}](${getResourceUrl(id)}${title})`
   );
 
   // Replace HTML image src: <img src=":/id" ...> -> <img src="/api/resources/id" ...>
@@ -227,24 +229,17 @@ export function MarkdownRenderer({ content, className, onToggleTask }: MarkdownR
               </a>
             );
           },
-          img: ({ src, alt, ...props }) => {
-            let actualSrc = src || "";
-            if (actualSrc.startsWith(":/")) {
-              actualSrc = getResourceUrl(actualSrc);
-            }
+          img: ({ src, alt, title, width, height }) => {
+            const imageClass =
+              "rounded-lg border border-border/40 max-w-full h-auto object-contain shadow-sm bg-muted/20";
+            // Joplin resources need the session, so they are loaded through the API
+            const resourceId = getResourceIdFromUrl(src);
             return (
               <span className="block my-4">
-                <img
-                  src={actualSrc}
-                  alt={alt || "Note image"}
-                  className="rounded-lg border border-border/40 max-w-full h-auto object-contain shadow-sm bg-muted/20"
-                  loading="lazy"
-                  {...props}
-                />
-                {alt && (
-                  <span className="block text-center text-xs text-muted-foreground mt-1.5 italic">
-                    {alt}
-                  </span>
+                {resourceId ? (
+                  <ResourceImage resourceId={resourceId} alt={alt} title={title} width={width} height={height} className={imageClass} />
+                ) : (
+                  <img src={src} alt={alt ?? ""} title={title} width={width} height={height} className={imageClass} loading="lazy" />
                 )}
               </span>
             );
