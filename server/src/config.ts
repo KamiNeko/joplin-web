@@ -8,11 +8,16 @@ dotenv.config();
 export interface AppConfig {
   port: number;
   joplinServerUrl: string;
-  corsOrigin: string | string[];
+  /** Allowed cross-origin callers; false means same-origin only (no CORS headers) */
+  corsOrigin: string | string[] | false;
   nodeEnv: string;
   cacheTtlMs: number;
   authCacheTtlMs: number;
   clientDistPath: string;
+  /** Release version from APP_VERSION (set at image build time), "dev" otherwise */
+  appVersion: string;
+  /** Git commit the build was made from (GIT_SHA), or null when unknown */
+  gitSha: string | null;
 }
 
 /**
@@ -25,8 +30,14 @@ export class ConfigError extends Error {
   }
 }
 
-const parseCorsOrigin = (origin?: string): string | string[] => {
-  if (!origin || origin === '*') return '*';
+/**
+ * Parses CORS_ORIGIN. Unset means same-origin only in production (the bundled UI needs no CORS)
+ * and the Vite dev server origin otherwise.
+ */
+const parseCorsOrigin = (raw: string | undefined, nodeEnv: string): string | string[] | false => {
+  const origin = raw?.trim();
+  if (!origin) return nodeEnv === 'production' ? false : 'http://localhost:5173';
+  if (origin === '*') return '*';
   if (origin.includes(',')) {
     return origin.split(',').map((o) => o.trim());
   }
@@ -62,6 +73,22 @@ function parseJoplinServerUrl(raw: string | undefined): string {
   return value.replace(/\/+$/, '');
 }
 
+/**
+ * Build metadata is public (GET /api/health), so only plain version strings are accepted.
+ */
+function parseAppVersion(raw: string | undefined): string {
+  const value = raw?.trim();
+  return value && /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/.test(value) ? value : 'dev';
+}
+
+/**
+ * Accepts a hex commit hash (7-40 characters); anything else means unknown.
+ */
+function parseGitSha(raw: string | undefined): string | null {
+  const value = raw?.trim().toLowerCase();
+  return value && /^[0-9a-f]{7,40}$/.test(value) ? value : null;
+}
+
 // Resolved from this module, not process.cwd(): src/config.ts (tsx) and dist/config.js (compiled)
 // both sit two levels below the repo root, so this finds client/dist wherever the server is started.
 const defaultClientDistPath = fileURLToPath(new URL('../../client/dist', import.meta.url));
@@ -71,14 +98,17 @@ const defaultClientDistPath = fileURLToPath(new URL('../../client/dist', import.
  * JOPLIN_SERVER_URL is missing or invalid.
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
+  const nodeEnv = env.NODE_ENV || 'development';
   return {
     port: parseInt(env.PORT || '3001', 10),
     joplinServerUrl: parseJoplinServerUrl(env.JOPLIN_SERVER_URL),
-    corsOrigin: parseCorsOrigin(env.CORS_ORIGIN || 'http://localhost:5173'),
-    nodeEnv: env.NODE_ENV || 'development',
+    corsOrigin: parseCorsOrigin(env.CORS_ORIGIN, nodeEnv),
+    nodeEnv,
     cacheTtlMs: parseInt(env.CACHE_TTL_MS || '30000', 10),
     authCacheTtlMs: parseInt(env.AUTH_CACHE_TTL_MS || '300000', 10),
     clientDistPath: defaultClientDistPath,
+    appVersion: parseAppVersion(env.APP_VERSION),
+    gitSha: parseGitSha(env.GIT_SHA),
   };
 }
 

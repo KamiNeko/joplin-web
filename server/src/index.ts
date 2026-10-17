@@ -73,11 +73,12 @@ const authLimiter = rateLimit({
 });
 app.use('/api/auth/login', authLimiter);
 
-// Health check endpoint
+// Health check endpoint (public: build metadata only, never configuration or secrets)
 app.get('/api/health', (_req: Request, res: Response) => {
   res.status(200).json({
     status: 'ok',
-    timestamp: new Date().toISOString(),
+    version: config.appVersion,
+    commit: config.gitSha,
   });
 });
 
@@ -117,6 +118,7 @@ app.use(errorHandler);
 export const server = app.listen(config.port, () => {
   console.log('====================================================');
   console.log(` Joplin Web Backend Server running on port ${config.port}`);
+  console.log(` Version: ${config.appVersion}${config.gitSha ? ` (${config.gitSha.slice(0, 7)})` : ''}`);
   console.log(` Mode: ${config.nodeEnv}`);
   console.log(` Joplin Server: ${config.joplinServerUrl}`);
   console.log(` CORS Origin: ${JSON.stringify(config.corsOrigin)}`);
