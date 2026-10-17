@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import { noteCache } from '../services/note-cache.js';
+import { noteWriter } from '../services/note-writer.js';
 
 const router = Router();
 
@@ -16,6 +17,37 @@ router.get('/', async (req: Request, res: Response, next: NextFunction): Promise
     const sessionId = req.sessionId!;
     const tags = await noteCache.getTags(sessionId);
     res.status(200).json(tags);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * PUT /api/tags/:id
+ * Renames a tag. Body: { title }
+ */
+router.put('/:id', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { title } = req.body ?? {};
+    if (typeof title !== 'string' || !title.trim()) {
+      res.status(400).json({ error: 'title is required' });
+      return;
+    }
+    const tag = await noteWriter.renameTag(req.sessionId!, req.params.id, title);
+    res.status(200).json(tag);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * DELETE /api/tags/:id
+ * Deletes a tag and removes it from all notes
+ */
+router.delete('/:id', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const result = await noteWriter.deleteTag(req.sessionId!, req.params.id);
+    res.status(200).json(result);
   } catch (error) {
     next(error);
   }

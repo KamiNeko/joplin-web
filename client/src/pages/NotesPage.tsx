@@ -6,6 +6,7 @@ import { NoteList } from "@/components/notes/NoteList";
 import { NoteViewer } from "@/components/notes/NoteViewer";
 import { SearchResults } from "@/components/search/SearchResults";
 import { useNotebooks } from "@/hooks/use-notebooks";
+import { useTags } from "@/hooks/use-tags";
 import { useNotes, useNote } from "@/hooks/use-notes";
 import { useSearch } from "@/hooks/use-search";
 import { useCreateNote, useUpdateNote } from "@/hooks/use-mutations";
@@ -62,6 +63,7 @@ export function NotesPage() {
 
   // TanStack queries
   const { data: notebooks } = useNotebooks();
+  const { data: tags } = useTags();
   const { data: notes, isLoading: isLoadingNotes } = useNotes(
     selectedNotebookId || undefined,
     selectedTagId || undefined,
@@ -97,10 +99,10 @@ export function NotesPage() {
 
   const notebookTitle = useMemo(() => {
     if (isTrashSelected) return "Trash";
-    if (selectedTagId) return `Tag #${selectedTagId}`;
+    if (selectedTagId) return `#${tags?.find((t) => t.id === selectedTagId)?.title ?? "Tag"}`;
     if (currentNotebook) return currentNotebook.title;
     return undefined;
-  }, [currentNotebook, selectedTagId, isTrashSelected]);
+  }, [currentNotebook, selectedTagId, isTrashSelected, tags]);
 
   const noteTitle = fullNote ? fullNote.title || "Untitled Note" : undefined;
 

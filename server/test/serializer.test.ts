@@ -68,6 +68,22 @@ const baseProps = {
   check('folder round-trips without body', out.type_ === JoplinItemType.Folder && out.title === 'Notebook' && out.body === '', out);
 }
 
+// Note-tag links have no title line, only properties
+{
+  const props = { id: baseProps.id, note_id: 'a'.repeat(32), tag_id: 'b'.repeat(32) };
+  const serialized = serialize({ type_: JoplinItemType.NoteTag, body: '', properties: props });
+  const out = deserialize(serialized);
+  check(
+    'note-tag link round-trips without a title line',
+    !serialized.startsWith('\n') &&
+      serialized.split('\n')[0] === `id: ${baseProps.id}` &&
+      out.type_ === JoplinItemType.NoteTag &&
+      out.properties.note_id === props.note_id &&
+      out.properties.tag_id === props.tag_id,
+    serialized
+  );
+}
+
 // deleted_time is kept as epoch milliseconds
 {
   const out = deserialize(

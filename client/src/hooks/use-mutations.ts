@@ -7,6 +7,10 @@ import {
   createNotebook,
   updateNotebook,
   deleteNotebook,
+  addTagToNote,
+  removeTagFromNote,
+  renameTag,
+  deleteTag,
   NoteUpdate,
 } from "@/lib/api";
 import { Note } from "@/lib/types";
@@ -100,6 +104,50 @@ export function useDeleteNotebook() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => deleteNotebook(id),
+    onSuccess: () => {
+      invalidateLists(queryClient);
+      queryClient.invalidateQueries({ queryKey: ["note"] });
+    },
+  });
+}
+
+export function useAddTag() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ noteId, title }: { noteId: string; title: string }) => addTagToNote(noteId, title),
+    onSuccess: (note) => {
+      queryClient.setQueryData(["note", note.id], note);
+      invalidateLists(queryClient);
+    },
+  });
+}
+
+export function useRemoveTag() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ noteId, tagId }: { noteId: string; tagId: string }) => removeTagFromNote(noteId, tagId),
+    onSuccess: (note) => {
+      queryClient.setQueryData(["note", note.id], note);
+      invalidateLists(queryClient);
+    },
+  });
+}
+
+export function useRenameTag() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, title }: { id: string; title: string }) => renameTag(id, title),
+    onSuccess: () => {
+      invalidateLists(queryClient);
+      queryClient.invalidateQueries({ queryKey: ["note"] });
+    },
+  });
+}
+
+export function useDeleteTag() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => deleteTag(id),
     onSuccess: () => {
       invalidateLists(queryClient);
       queryClient.invalidateQueries({ queryKey: ["note"] });

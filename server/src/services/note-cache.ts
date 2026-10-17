@@ -222,6 +222,13 @@ export class NoteCacheService {
       entry.notes.set(item.id, item);
     } else if (item.type_ === JoplinItemType.Folder) {
       entry.notebooks.set(item.id, item);
+    } else if (item.type_ === JoplinItemType.Tag) {
+      entry.tags.set(item.id, item);
+    } else if (item.type_ === JoplinItemType.NoteTag) {
+      const noteId = item.properties.note_id || '';
+      const tagId = item.properties.tag_id || '';
+      entry.noteTags = entry.noteTags.filter((link) => link.id !== item.id);
+      if (noteId && tagId) entry.noteTags.push({ id: item.id, noteId, tagId });
     }
   }
 

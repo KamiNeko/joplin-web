@@ -126,6 +126,37 @@ router.delete('/:id', async (req: Request, res: Response, next: NextFunction): P
 });
 
 /**
+ * POST /api/notes/:id/tags
+ * Adds a tag to a note by title (an existing tag is reused, matched case-insensitively). Body: { title }
+ */
+router.post('/:id/tags', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { title } = req.body ?? {};
+    if (typeof title !== 'string' || !title.trim()) {
+      res.status(400).json({ error: 'title is required' });
+      return;
+    }
+    const note = await noteWriter.addTagToNote(req.sessionId!, req.params.id, title);
+    res.status(200).json(note);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * DELETE /api/notes/:id/tags/:tagId
+ * Removes a tag from a note
+ */
+router.delete('/:id/tags/:tagId', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const note = await noteWriter.removeTagFromNote(req.sessionId!, req.params.id, req.params.tagId);
+    res.status(200).json(note);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * POST /api/notes/:id/restore
  * Restores a note (and its trashed parent notebooks) from the trash
  */
