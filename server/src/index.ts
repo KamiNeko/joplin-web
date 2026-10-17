@@ -103,6 +103,7 @@ if (fs.existsSync(config.clientDistPath)) {
     }
   });
 } else {
+  console.log(`[Server] No client build at ${config.clientDistPath}, serving the API only`);
   // Catch 404 for unmatched API routes
   app.use('/api/*', (req: Request, res: Response) => {
     res.status(404).json({ error: `Endpoint not found: ${req.method} ${req.originalUrl}` });

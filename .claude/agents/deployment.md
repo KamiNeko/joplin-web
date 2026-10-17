@@ -8,7 +8,7 @@ You own how Joplin Web is built, tested in CI and deployed by self-hosters. You 
 
 ## Your files
 
-- `docker/Dockerfile`: multi-stage build (client build → server build → `node:20-alpine` runtime as user `node`, port 3001, curl healthcheck on `/api/health`). The server serves `client/dist` via the `/app/server/client` symlink.
+- `docker/Dockerfile`: multi-stage build (client build → server build → `node:20-alpine` runtime as user `node`, port 3001, curl healthcheck on `/api/health`). The server serves `/app/client/dist`, resolved relative to `server/dist/config.js` (not the working directory).
 - `docker-compose.yml`: single service, reads `.env`.
 - `.github/workflows/ci.yml`: server typecheck + tests, client lint + build, Docker image build.
 - `.env.example`, `server/.env.example`, `server/src/config.ts`: configuration surface.
