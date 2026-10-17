@@ -7,31 +7,43 @@ import {
   LoginResponse,
 } from "./types";
 
-const SESSION_KEY = "joplin_session_id";
-const USER_KEY = "joplin_user_id";
+/**
+ * The session token lives in an httpOnly cookie set by the backend: scripts can't read it. Only the
+ * email address is kept in localStorage, for display.
+ */
 const EMAIL_KEY = "joplin_user_email";
+/** Keys used by older versions, which stored the token itself */
+const LEGACY_KEYS = ["joplin_session_id", "joplin_user_id"];
 
 // Base URL defaults to empty string in browser so Vite proxy handles /api,
 // or uses VITE_API_BASE_URL if configured.
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
 
 /**
- * Retrieves the stored session token.
+ * Options for every API request: send the session cookie, and send the Origin header the backend's
+ * CSRF check needs (the page's Referrer-Policy is no-referrer, which would turn it into "null").
  */
-export function getStoredSessionId(): string | null {
-  return localStorage.getItem(SESSION_KEY);
+const SESSION_FETCH_OPTIONS: RequestInit = {
+  credentials: "include",
+  referrerPolicy: "same-origin",
+};
+
+function removeStorageKey(key: string): void {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // storage unavailable
+  }
 }
 
 /**
- * Persists session token to local storage.
+ * Remembers the email address the current session was opened with (display only).
  */
-export function setStoredSession(sessionId: string, userId?: string, email?: string): void {
-  localStorage.setItem(SESSION_KEY, sessionId);
-  if (userId) {
-    localStorage.setItem(USER_KEY, userId);
-  }
-  if (email) {
+export function setStoredEmail(email: string): void {
+  try {
     localStorage.setItem(EMAIL_KEY, email);
+  } catch {
+    // storage unavailable
   }
 }
 
@@ -39,16 +51,19 @@ export function setStoredSession(sessionId: string, userId?: string, email?: str
  * Retrieves the email address the current session was opened with.
  */
 export function getStoredEmail(): string | null {
-  return localStorage.getItem(EMAIL_KEY);
+  try {
+    return localStorage.getItem(EMAIL_KEY);
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Clears stored authentication data.
+ * Clears stored client-side session data, including tokens stored by older versions.
  */
 export function clearStoredSession(): void {
-  localStorage.removeItem(SESSION_KEY);
-  localStorage.removeItem(USER_KEY);
-  localStorage.removeItem(EMAIL_KEY);
+  removeStorageKey(EMAIL_KEY);
+  LEGACY_KEYS.forEach(removeStorageKey);
 }
 
 /**
@@ -66,60 +81,83 @@ export class ApiError extends Error {
   }
 }
 
+/** Writes (POST/PUT/DELETE) that haven't finished yet; logout waits for them */
+const pendingWrites = new Set<Promise<unknown>>();
+
+/**
+ * Resolves once all writes started so far have finished (successfully or not), or after the timeout.
+ */
+export async function waitForPendingWrites(timeoutMs = 10000): Promise<void> {
+  if (pendingWrites.size === 0) return;
+  await Promise.race([
+    Promise.allSettled([...pendingWrites]),
+    new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
+}
+
+interface RequestOptions extends RequestInit {
+  /** Don't treat a 401 as an expired session (login and the startup session check) */
+  skipAuthRedirect?: boolean;
+}
+
+async function readErrorMessage(response: Response): Promise<{ message: string; data: unknown }> {
+  let message = `Request failed with status ${response.status}`;
+  let data: unknown;
+  try {
+    data = await response.json();
+    if (typeof data === "object" && data !== null) {
+      if ("error" in data && typeof (data as { error: unknown }).error === "string") {
+        message = (data as { error: string }).error;
+      } else if ("message" in data && typeof (data as { message: unknown }).message === "string") {
+        message = (data as { message: string }).message;
+      }
+    }
+  } catch {
+    // response wasn't JSON
+  }
+  return { message, data };
+}
+
 /**
  * Internal request wrapper handling headers, auth, and error conditions.
  */
-async function request<T>(
-  endpoint: string,
-  options: RequestInit = {}
-): Promise<T> {
-  const url = `${API_BASE_URL}${endpoint}`;
-  const sessionId = getStoredSessionId();
+async function request<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
+  const { skipAuthRedirect, ...init } = options;
+  const method = (init.method ?? "GET").toUpperCase();
+  const pending = send<T>(endpoint, init, Boolean(skipAuthRedirect));
+  if (method !== "GET" && method !== "HEAD") {
+    pendingWrites.add(pending);
+    void pending.catch(() => undefined).finally(() => pendingWrites.delete(pending));
+  }
+  return pending;
+}
 
+async function send<T>(endpoint: string, init: RequestInit, skipAuthRedirect: boolean): Promise<T> {
   const headers: Record<string, string> = {
     Accept: "application/json",
-    ...(options.headers as Record<string, string>),
+    ...(init.headers as Record<string, string>),
   };
 
-  if (!(options.body instanceof FormData) && !headers["Content-Type"]) {
+  if (!(init.body instanceof FormData) && !headers["Content-Type"]) {
     headers["Content-Type"] = "application/json";
   }
 
-  if (sessionId) {
-    headers["Authorization"] = `Bearer ${sessionId}`;
-    // Joplin server also commonly looks for X-API-AUTH
-    headers["X-API-AUTH"] = sessionId;
-  }
-
-  const response = await fetch(url, {
-    ...options,
+  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+    ...SESSION_FETCH_OPTIONS,
+    ...init,
     headers,
   });
 
-  if (response.status === 401) {
-    clearStoredSession();
-    if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
-      window.location.href = "/login";
-    }
-    throw new ApiError(401, "Unauthorized session. Please sign in again.");
-  }
-
   if (!response.ok) {
-    let errorMessage = `Request failed with status ${response.status}`;
-    let errorData: unknown;
-    try {
-      errorData = await response.json();
-      if (typeof errorData === "object" && errorData !== null) {
-        if ("error" in errorData && typeof (errorData as { error: unknown }).error === "string") {
-          errorMessage = (errorData as { error: string }).error;
-        } else if ("message" in errorData && typeof (errorData as { message: unknown }).message === "string") {
-          errorMessage = (errorData as { message: string }).message;
-        }
+    const { message, data } = await readErrorMessage(response);
+    if (response.status === 401 && !skipAuthRedirect) {
+      clearStoredSession();
+      if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+        window.location.href = "/login";
       }
-    } catch {
-      // response wasn't JSON
+      throw new ApiError(401, "Your session has expired. Please sign in again.", data);
     }
-    throw new ApiError(response.status, errorMessage, errorData);
+    throw new ApiError(response.status, message, data);
   }
 
   if (response.status === 204) {
@@ -130,52 +168,42 @@ async function request<T>(
 }
 
 /**
- * Authenticates user with email and password.
+ * Authenticates user with email and password. The backend sets the session cookie.
  */
 export async function login(email: string, password: string): Promise<LoginResponse> {
-  // Try /api/login or /api/auth/login
-  try {
-    const data = await request<LoginResponse>("/api/login", {
-      method: "POST",
-      body: JSON.stringify({ email, password }),
-    });
-    if (data.sessionId) {
-      setStoredSession(data.sessionId, data.userId);
-    }
-    return data;
-  } catch (err) {
-    if (err instanceof ApiError && err.status === 404) {
-      const data = await request<LoginResponse>("/api/auth/login", {
-        method: "POST",
-        body: JSON.stringify({ email, password }),
-      });
-      if (data.sessionId) {
-        setStoredSession(data.sessionId, data.userId);
-      }
-      return data;
-    }
-    throw err;
-  }
+  return request<LoginResponse>("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+    skipAuthRedirect: true,
+  });
 }
 
 /**
- * Terminates the active session.
+ * Ends the session on the server (and on Joplin Server) and clears client-side session data.
  */
 export async function logout(): Promise<void> {
   try {
-    await request("/api/logout", { method: "POST" });
+    await request("/api/auth/logout", { method: "POST", skipAuthRedirect: true });
   } catch {
-    // Ignore server error on logout
+    // The session cookie is cleared by the response; a failed request still logs out locally
   } finally {
     clearStoredSession();
+    clearResourceCache();
   }
 }
 
 /**
- * Checks whether the client has an active stored session.
+ * Asks the server whether the session cookie is valid. Resolves false for an expired or missing
+ * session; other failures (server unreachable) are thrown.
  */
-export function checkAuth(): boolean {
-  return Boolean(getStoredSessionId());
+export async function checkSession(): Promise<boolean> {
+  try {
+    await request("/api/auth/check", { skipAuthRedirect: true });
+    return true;
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) return false;
+    throw err;
+  }
 }
 
 /**
@@ -352,31 +380,63 @@ export function getResourceIdFromUrl(src: string | undefined): string | null {
   return match ? match[1].toLowerCase() : null;
 }
 
-// Resources are immutable, so each one is downloaded once per page load
+// Resources are immutable, so each one is downloaded once per session
 const resourceObjectUrls = new Map<string, Promise<string>>();
 
 /**
- * Loads a resource with the session headers (an <img src> request can't send them)
- * and returns a blob: URL for it.
+ * Downloads a resource with the session cookie.
+ */
+async function fetchResourceBlob(resourceId: string): Promise<Blob> {
+  const response = await fetch(`${API_BASE_URL}/api/resources/${resourceId}`, SESSION_FETCH_OPTIONS);
+  if (!response.ok) {
+    throw new ApiError(response.status, `Could not load resource (HTTP ${response.status})`);
+  }
+  return response.blob();
+}
+
+function readAsDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+/**
+ * Loads a resource for display and returns a URL for <img src>. SVG becomes a data: URL instead of a
+ * blob: URL: a blob: URL opened directly ("Open image in new tab") would run the SVG's scripts in
+ * this origin, while browsers refuse to open data: URLs as top-level documents.
  */
 export function getResourceObjectUrl(resourceId: string): Promise<string> {
   let pending = resourceObjectUrls.get(resourceId);
   if (!pending) {
     pending = (async () => {
-      const sessionId = getStoredSessionId();
-      const response = await fetch(`${API_BASE_URL}/api/resources/${resourceId}`, {
-        headers: sessionId ? { Authorization: `Bearer ${sessionId}`, "X-API-AUTH": sessionId } : {},
-      });
-      if (!response.ok) {
-        throw new ApiError(response.status, `Could not load resource (HTTP ${response.status})`);
+      const blob = await fetchResourceBlob(resourceId);
+      if (blob.type.split(";")[0].trim().toLowerCase() === "image/svg+xml") {
+        return readAsDataUrl(blob);
       }
-      return URL.createObjectURL(await response.blob());
+      return URL.createObjectURL(blob);
     })();
     // Allow a retry later if this attempt failed
     pending.catch(() => resourceObjectUrls.delete(resourceId));
     resourceObjectUrls.set(resourceId, pending);
   }
   return pending;
+}
+
+/**
+ * Revokes and forgets all loaded resource URLs (on logout, so the next user can't reach them).
+ */
+export function clearResourceCache(): void {
+  for (const pending of resourceObjectUrls.values()) {
+    pending
+      .then((url) => {
+        if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+      })
+      .catch(() => undefined);
+  }
+  resourceObjectUrls.clear();
 }
 
 /**
@@ -434,11 +494,14 @@ export async function uploadResource(file: File): Promise<UploadedResource> {
  * Downloads a resource (attachment) with the session and saves it under the given name.
  */
 export async function downloadResource(resourceId: string, fileName: string): Promise<void> {
-  const url = await getResourceObjectUrl(resourceId);
+  // Always octet-stream: the blob: URL is only a download, never a document the browser renders
+  const blob = await fetchResourceBlob(resourceId);
+  const url = URL.createObjectURL(new Blob([blob], { type: "application/octet-stream" }));
   const link = document.createElement("a");
   link.href = url;
   link.download = fileName;
   document.body.appendChild(link);
   link.click();
   link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
