@@ -7,13 +7,17 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    # Every variable from .env (JOPLIN_SERVER_URL, CORS_ORIGIN, CACHE_TTL_MS, ...) is passed in
-    env_file: .env
+    # Every variable from .env (CORS_ORIGIN, CACHE_TTL_MS, ...) is passed in, if the file exists
+    env_file:
+      - path: .env
+        required: false
     environment:
       NODE_ENV: production
       # The container always listens on 3001; HOST_PORT only changes the published port
       PORT: "3001"
+      JOPLIN_SERVER_URL: ${JOPLIN_SERVER_URL:?set JOPLIN_SERVER_URL in .env}
     ports:
-      - "${HOST_PORT:-3001}:3001"
+      # PORT is still honoured as the host port for one release cycle (deprecated, use HOST_PORT)
+      - "${HOST_PORT:-${PORT:-3001}}:3001"
     restart: unless-stopped
     # Healthcheck is defined in docker/Dockerfile (GET /api/health)

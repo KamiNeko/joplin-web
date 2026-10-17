@@ -94,12 +94,12 @@ To publish on another host port, change only the left side of the mapping, e.g. 
 
 ### Configuration
 
-Docker Compose passes every variable in `.env` to the container. [`.env.example`](.env.example) lists them all.
+Docker Compose (2.24 or newer) passes every variable in `.env` to the container. [`.env.example`](.env.example) lists them all.
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `JOPLIN_SERVER_URL` | *(required)* | Base URL of your Joplin Server, e.g. `https://notes.example.com`. Joplin Web refuses to start without it. |
-| `HOST_PORT` | `3001` | Docker Compose only: the port published on the host. The container itself always listens on 3001. |
+| `HOST_PORT` | `3001` | Docker Compose only: the port published on the host. The container itself always listens on 3001. (`PORT` still works here but is deprecated.) |
 | `CORS_ORIGIN` | *(none)* | Allowed origins for API calls (comma-separated). Only needed when the UI is served from another origin than the API; the single-container setup doesn't need it. Without Docker in development mode the default is `http://localhost:5173`. |
 | `CACHE_TTL_MS` | `30000` | How long the note cache is used before it is re-synced with Joplin Server, in milliseconds. |
 | `AUTH_CACHE_TTL_MS` | `300000` | How long a validated session is trusted before it is checked again, in milliseconds. |
