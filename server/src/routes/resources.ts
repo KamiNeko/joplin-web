@@ -1,4 +1,4 @@
-import express, { Router, Request, Response, NextFunction } from 'express';
+import express, { Router } from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import { joplinApi, JoplinNotFoundError } from '../services/joplin-api.js';
 import { noteCache } from '../services/note-cache.js';
@@ -38,40 +38,36 @@ const MIME_BY_EXTENSION: Record<string, string> = {
 router.post(
   '/',
   express.raw({ type: () => true, limit: MAX_UPLOAD_BYTES }),
-  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    try {
-      const data = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
-      if (data.length === 0) {
-        res.status(400).json({ error: 'No file content received' });
-        return;
-      }
-
-      let name = 'file';
-      const rawName = req.headers['x-file-name'];
-      if (typeof rawName === 'string' && rawName) {
-        try {
-          name = decodeURIComponent(rawName);
-        } catch {
-          name = rawName;
-        }
-      }
-      name = name.replace(/[\\/]/g, '_').slice(0, 255);
-
-      // Prefer a known type for the extension over a generic one from the browser
-      const extension = name.includes('.') ? name.split('.').pop()!.toLowerCase() : '';
-      const typeHeader = req.headers['x-file-type'];
-      const headerType = (typeof typeHeader === 'string' ? typeHeader : '').split(';')[0].trim().toLowerCase();
-      const validHeaderType = /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(headerType) ? headerType : '';
-      const mime =
-        validHeaderType && validHeaderType !== 'application/octet-stream'
-          ? validHeaderType
-          : MIME_BY_EXTENSION[extension] || detectMimeType(data) || 'application/octet-stream';
-
-      const resource = await noteWriter.createResource(req.sessionId!, { name, mime, data });
-      res.status(201).json(resource);
-    } catch (error) {
-      next(error);
+  async (req, res) => {
+    const data = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    if (data.length === 0) {
+      res.status(400).json({ error: 'No file content received' });
+      return;
     }
+
+    let name = 'file';
+    const rawName = req.headers['x-file-name'];
+    if (typeof rawName === 'string' && rawName) {
+      try {
+        name = decodeURIComponent(rawName);
+      } catch {
+        name = rawName;
+      }
+    }
+    name = name.replace(/[\\/]/g, '_').slice(0, 255);
+
+    // Prefer a known type for the extension over a generic one from the browser
+    const extension = name.includes('.') ? name.split('.').pop()!.toLowerCase() : '';
+    const typeHeader = req.headers['x-file-type'];
+    const headerType = (typeof typeHeader === 'string' ? typeHeader : '').split(';')[0].trim().toLowerCase();
+    const validHeaderType = /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(headerType) ? headerType : '';
+    const mime =
+      validHeaderType && validHeaderType !== 'application/octet-stream'
+        ? validHeaderType
+        : MIME_BY_EXTENSION[extension] || detectMimeType(data) || 'application/octet-stream';
+
+    const resource = await noteWriter.createResource(req.sessionId!, { name, mime, data });
+    res.status(201).json(resource);
   }
 );
 
@@ -187,7 +183,7 @@ export function contentDisposition(type: 'inline' | 'attachment', fileName: stri
  * GET /api/resources/:id
  * Proxies binary resource files (images, attachments) from Joplin Server
  */
-router.get('/:id', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+router.get('/:id', async (req, res) => {
   try {
     const sessionId = req.sessionId!;
     const resourceId = assertValidId(req.params.id, 'resource id');
@@ -229,7 +225,7 @@ router.get('/:id', async (req: Request, res: Response, next: NextFunction): Prom
       res.status(404).json({ error: 'Resource not found on Joplin Server' });
       return;
     }
-    next(error);
+    throw error;
   }
 });
 
@@ -237,13 +233,9 @@ router.get('/:id', async (req: Request, res: Response, next: NextFunction): Prom
  * DELETE /api/resources/:id
  * Permanently deletes an attachment (metadata and file). Notes linking to it are not changed.
  */
-router.delete('/:id', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-  try {
-    await noteWriter.deleteResource(req.sessionId!, req.params.id);
-    res.status(204).end();
-  } catch (error) {
-    next(error);
-  }
+router.delete('/:id', async (req, res) => {
+  await noteWriter.deleteResource(req.sessionId!, req.params.id);
+  res.status(204).end();
 });
 
 export const resourcesRouter = router;

@@ -122,7 +122,7 @@ export function createApp(config: AppConfig): Express {
     app.use(express.static(config.clientDistPath));
 
     // SPA fallback for frontend client routing
-    app.get('*', (req: Request, res: Response) => {
+    app.get('/{*splat}', (req: Request, res: Response) => {
       if (!req.path.startsWith('/api/')) {
         res.sendFile(path.join(config.clientDistPath, 'index.html'));
       } else {
@@ -132,7 +132,7 @@ export function createApp(config: AppConfig): Express {
   } else {
     console.log(`[Server] No client build at ${config.clientDistPath}, serving the API only`);
     // Catch 404 for unmatched API routes
-    app.use('/api/*', (req: Request, res: Response) => {
+    app.use('/api/*splat', (req: Request, res: Response) => {
       res.status(404).json({ error: `Endpoint not found: ${req.method} ${req.originalUrl}` });
     });
   }
