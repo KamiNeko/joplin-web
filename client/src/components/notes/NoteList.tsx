@@ -38,6 +38,8 @@ interface NoteListProps {
   onCreateNote?: (isTodo: boolean) => void;
   isCreating?: boolean;
   onToggleTodo?: (id: string, completed: boolean) => void;
+  /** Content above the notes (e.g. trashed notebooks), given the current filter text */
+  renderLeading?: (filterText: string) => React.ReactNode;
 }
 
 type SortField = "updated" | "created" | "title";
@@ -108,6 +110,7 @@ export function NoteList({
   onCreateNote,
   isCreating = false,
   onToggleTodo,
+  renderLeading,
 }: NoteListProps) {
   const [filterText, setFilterText] = useState("");
   const [sort, setSort] = useState<SortChoice>(loadSort);
@@ -250,6 +253,7 @@ export function NoteList({
         {isStale && !isLoading && !error && (
           <StaleDataHint className="px-1 pb-2" onRetry={onRetry} isRetrying={isRetrying} />
         )}
+        {renderLeading?.(filterText)}
         {isLoading ? (
           <div className="space-y-3">
             {Array.from({ length: 6 }).map((_, i) => (
