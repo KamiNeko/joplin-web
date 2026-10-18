@@ -4,7 +4,7 @@
 
 **Your Joplin notes, in any browser.**
 
-A fast, modern web client for your self-hosted [Joplin Server](https://joplinapp.org/help/apps/sync/joplin_server/).<br>
+A fast, modern web client for your self-hosted [Joplin Server](https://joplinapp.org).<br>
 Read, write and organize your notes from any device, with nothing to install.
 
 [![CI](https://github.com/KamiNeko/joplin-web/actions/workflows/ci.yml/badge.svg)](https://github.com/KamiNeko/joplin-web/actions/workflows/ci.yml)
