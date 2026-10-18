@@ -22,6 +22,23 @@ You already run Joplin Server to sync your notes. Joplin's desktop and mobile ap
 - 🔄 **Stays in sync.** Changes are written in Joplin's own sync format, so they show up in your desktop and mobile apps.
 - 🔐 **Uses your Joplin account.** Sign in with your Joplin Server email and password. Nothing is stored on the web server.
 
+Edits made in Joplin Web have been checked to show up correctly in the Joplin apps for Windows and Android.
+
+### How is this different from Joplin's official web app?
+
+A web interface for Joplin is nothing new: Joplin also offers an official web app. It works like the desktop and mobile apps: it **syncs your whole notebook into the browser's storage** and works on that local copy. Joplin Web takes a fundamentally different approach: **there is no local sync.** The browser shows what the backend reads live from your Joplin Server, and every change is written straight back.
+
+| | Joplin Web | Official web app |
+| :--- | :--- | :--- |
+| **Where notes live** | On your Joplin Server only; the browser keeps nothing but unsaved drafts | A full copy in the browser's storage |
+| **First start** | Immediate, no initial sync | Must download and index all notes first |
+| **Browsers** | Any current browser, including phones and tablets | Needs browser storage features that not every browser supports |
+| **Shared or borrowed computers** | Nothing to clean up after signing out | Leaves a copy of your notes in that browser |
+| **Offline use** | No: needs a connection to your server (unsaved typing is kept until it returns) | Yes, works offline and syncs later |
+| **End-to-end encryption** | Not supported | Supported |
+
+In short: choose Joplin Web if you want quick, install-free access to your notes from any browser and don't need offline mode or E2EE. If you need to work offline or use encryption, the official app is the better fit.
+
 ## Features
 
 | | |
