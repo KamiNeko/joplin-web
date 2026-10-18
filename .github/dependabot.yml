@@ -28,6 +28,11 @@ updates:
     groups:
       client-minor-patch:
         update-types: [minor, patch]
+    ignore:
+      # TypeScript 7 has no JS compiler API, which typescript-eslint needs (peer typescript <6.1.0).
+      # Move the client to TS 7 once typescript-eslint supports it; the server is already on 7.
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
 
   - package-ecosystem: github-actions
     directory: /
