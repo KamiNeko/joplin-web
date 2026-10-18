@@ -60,6 +60,14 @@ export function isConnectionFailure(status: number): boolean {
   return status === 0 || status >= 500;
 }
 
+/**
+ * True for failures worth retrying later: connection failures, and 429 (rate limited), which is
+ * temporary but not a connection problem.
+ */
+export function isTemporaryFailure(status: number): boolean {
+  return status === 429 || isConnectionFailure(status);
+}
+
 /** Records the outcome of a request that got an HTTP response. */
 export function recordResponse(status: number, isRead: boolean, message: string): void {
   if (status === 401) {

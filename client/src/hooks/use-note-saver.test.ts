@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryClient } from "@tanstack/react-query";
 import { ApiError, updateNote } from "@/lib/api";
-import { Note } from "@/lib/types";
+import { Note, NoteListItem, SearchResult } from "@/lib/types";
 import { createNoteSaver } from "./use-note-saver";
 
 vi.mock("@/lib/api", async (importOriginal) => ({
@@ -35,7 +35,6 @@ beforeEach(() => {
 describe("createNoteSaver", () => {
   it("sends the base, adopts the returned updatedTime and caches the saved note", async () => {
     mockedUpdate.mockResolvedValueOnce(note(2000, "new"));
-    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     const onSaved = vi.fn();
     const saver = createNoteSaver(queryClient, NOTE_ID, 1000);
 
@@ -44,7 +43,6 @@ describe("createNoteSaver", () => {
     expect(mockedUpdate).toHaveBeenCalledWith(NOTE_ID, { body: "new", force: false, baseUpdatedTime: 1000 });
     expect(saver.baseUpdatedTime).toBe(2000);
     expect(queryClient.getQueryData<Note>(["note", NOTE_ID])?.body).toBe("new");
-    expect(invalidate).toHaveBeenCalled();
     expect(onSaved).toHaveBeenCalledWith(note(2000, "new"));
   });
 
@@ -108,5 +106,83 @@ describe("createNoteSaver", () => {
     );
     expect(ok).toBe(false);
     expect(onError).toHaveBeenCalledWith(failure);
+  });
+});
+
+describe("list updates after a save", () => {
+  const OTHER_ID = "fedcba9876543210fedcba9876543210";
+  const item = (id: string, updatedTime: number, title = "Item"): NoteListItem => ({
+    id,
+    title,
+    updatedTime,
+    createdTime: 1,
+    preview: "old preview",
+  });
+  const NOTES_KEY = ["notes", { notebookId: "f".repeat(32) }];
+  const OTHER_LIST_KEY = ["notes", { notebookId: "e".repeat(32) }];
+  const SEARCH_KEY = ["search", "title"];
+
+  /** Seeds a notebook list (this note is older than the other one), an unrelated list and a search */
+  function seedLists() {
+    queryClient.setQueryData<NoteListItem[]>(NOTES_KEY, [item(OTHER_ID, 1500, "Other"), item(NOTE_ID, 1000, "Title")]);
+    queryClient.setQueryData<NoteListItem[]>(OTHER_LIST_KEY, [item(OTHER_ID, 1500, "Other")]);
+    queryClient.setQueryData<SearchResult[]>(SEARCH_KEY, [
+      { ...item(NOTE_ID, 1000, "Title"), matches: { inTitle: true, inBody: false } },
+    ]);
+  }
+  const saved = (changes: Partial<Note> = {}): Note => ({
+    ...note(2000, "# New **text**"),
+    title: "New title",
+    preview: "New text",
+    ...changes,
+  });
+
+  it("patches title, preview and time in place and keeps the newest first, without refetching", async () => {
+    seedLists();
+    const otherList = queryClient.getQueryData(OTHER_LIST_KEY);
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    mockedUpdate.mockResolvedValueOnce(saved());
+
+    await createNoteSaver(queryClient, NOTE_ID, 1000).send({ title: "New title", body: "# New **text**" });
+
+    expect(queryClient.getQueryData<NoteListItem[]>(NOTES_KEY)).toEqual([
+      { ...item(NOTE_ID, 2000, "New title"), preview: "New text" },
+      item(OTHER_ID, 1500, "Other"),
+    ]);
+    expect(queryClient.getQueryData(OTHER_LIST_KEY)).toBe(otherList);
+    expect(queryClient.getQueryData<SearchResult[]>(SEARCH_KEY)?.[0]).toMatchObject({
+      title: "New title",
+      preview: "New text",
+      updatedTime: 2000,
+      matches: { inTitle: true, inBody: false },
+    });
+    // Notes, notebooks and tags are not refetched; searches only become stale (their matches may differ)
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["search"], refetchType: "none" });
+    expect(queryClient.getQueryState(SEARCH_KEY)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(NOTES_KEY)?.isInvalidated).toBe(false);
+  });
+
+  it("refetches the lists when the note moved or its to-do state changed", async () => {
+    for (const changes of [{ parentId: "e".repeat(32) }, { todoCompleted: true }]) {
+      seedLists();
+      const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+      mockedUpdate.mockResolvedValueOnce(saved());
+      await createNoteSaver(queryClient, NOTE_ID, 1000).send(changes);
+      const keys = invalidate.mock.calls.map(([filters]) => filters?.queryKey?.[0]);
+      expect(keys).toEqual(expect.arrayContaining(["notes", "notebooks", "tags", "search"]));
+      invalidate.mockRestore();
+    }
+  });
+
+  it("refetches the note lists when the server sends no preview", async () => {
+    seedLists();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    mockedUpdate.mockResolvedValueOnce(saved({ preview: undefined }));
+    await createNoteSaver(queryClient, NOTE_ID, 1000).send({ body: "x" });
+    const keys = invalidate.mock.calls.map(([filters]) => filters?.queryKey?.[0]);
+    expect(keys).toContain("notes");
+    expect(keys).not.toContain("notebooks");
+    expect(keys).not.toContain("tags");
   });
 });

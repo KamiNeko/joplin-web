@@ -26,6 +26,8 @@ export interface AppConfig {
   appVersion: string;
   /** Git commit the build was made from (GIT_SHA), or null when unknown */
   gitSha: string | null;
+  /** Requests per client address and 15 minutes allowed on /api/ (RATE_LIMIT_MAX) */
+  rateLimitMax: number;
 }
 
 /**
@@ -145,6 +147,19 @@ function parseGitSha(raw: string | undefined): string | null {
   return value && /^[0-9a-f]{7,40}$/.test(value) ? value : null;
 }
 
+/**
+ * Parses RATE_LIMIT_MAX, the general request limit per client address and 15 minutes. Unset means
+ * 1000; anything but a positive whole number is rejected.
+ */
+export function parseRateLimitMax(raw: string | undefined): number {
+  const value = raw?.trim();
+  if (!value) return 1000;
+  if (!/^\d+$/.test(value) || parseInt(value, 10) < 1) {
+    throw new ConfigError(`RATE_LIMIT_MAX must be a positive whole number, got: ${raw}`);
+  }
+  return parseInt(value, 10);
+}
+
 // Resolved from this module, not process.cwd(): src/config.ts (tsx) and dist/config.js (compiled)
 // both sit two levels below the repo root, so this finds client/dist wherever the server is started.
 const defaultClientDistPath = fileURLToPath(new URL('../../client/dist', import.meta.url));
@@ -169,6 +184,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     cookieSecure: parseCookieSecure(env.COOKIE_SECURE),
     appVersion: parseAppVersion(env.APP_VERSION),
     gitSha: parseGitSha(env.GIT_SHA),
+    rateLimitMax: parseRateLimitMax(env.RATE_LIMIT_MAX),
   };
 }
 

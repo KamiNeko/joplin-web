@@ -6,6 +6,7 @@ import {
   getConnectionSnapshot,
   hasUnsavedChanges,
   isConnectionFailure,
+  isTemporaryFailure,
   recordNetworkError,
   recordResponse,
   resetConnection,
@@ -78,6 +79,15 @@ describe("connection store", () => {
     expect(isConnectionFailure(503)).toBe(true);
     expect(isConnectionFailure(404)).toBe(false);
     expect(isConnectionFailure(409)).toBe(false);
+    expect(isConnectionFailure(429)).toBe(false);
+  });
+
+  it("treats connection failures and 429 as temporary (worth retrying)", () => {
+    expect(isTemporaryFailure(0)).toBe(true);
+    expect(isTemporaryFailure(502)).toBe(true);
+    expect(isTemporaryFailure(429)).toBe(true);
+    expect(isTemporaryFailure(400)).toBe(false);
+    expect(isTemporaryFailure(409)).toBe(false);
   });
 
   it("records failures and clears them on the next answer", () => {

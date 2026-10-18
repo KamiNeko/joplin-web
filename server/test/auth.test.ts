@@ -308,6 +308,15 @@ describe('reverse proxy', () => {
     assert.equal((await failedLogin(baseUrl, '203.0.113.99')).status, 429, 'spoofed X-Forwarded-For does not bypass the limit');
   });
 
+  test('the general limit follows RATE_LIMIT_MAX and answers 429 with Retry-After', async () => {
+    const baseUrl = await startApp({ rateLimitMax: 2 });
+    assert.equal((await call(baseUrl, '/api/health')).status, 200);
+    assert.equal((await call(baseUrl, '/api/health')).status, 200);
+    const limited = await call(baseUrl, '/api/health');
+    assert.equal(limited.status, 429);
+    assert.match(limited.headers.get('retry-after') ?? '', /^\d+$/, 'clients can tell when to retry');
+  });
+
   test('parses TRUST_PROXY', async () => {
     const { parseTrustProxy, ConfigError } = await import('../src/config.js');
     assert.equal(parseTrustProxy(undefined), false);

@@ -122,10 +122,14 @@ describe('writing', () => {
   test('updates a note', async () => {
     const res = await api(`/api/notes/${noteId}`, {
       method: 'PUT',
-      body: JSON.stringify({ body: 'Changed', baseUpdatedTime: updatedTime }),
+      body: JSON.stringify({ body: '# Changed **body**', baseUpdatedTime: updatedTime }),
     });
     assert.equal(res.status, 200);
-    assert.equal(res.data.body, 'Changed');
+    assert.equal(res.data.body, '# Changed **body**');
+    // Same preview as the note list, so the client can update its list entry without a refetch
+    assert.equal(res.data.preview, 'Changed body');
+    const list = await api(`/api/notes?notebookId=${demoId('nb-reading')}`);
+    assert.equal(list.data.find((n: { id: string }) => n.id === noteId).preview, res.data.preview);
   });
 
   test('detects conflicting edits', async () => {
@@ -281,6 +285,16 @@ describe('security', () => {
     assert.equal(tagged.gitSha, sha);
     assert.equal(loadConfig({ ...base, APP_VERSION: '<script>', GIT_SHA: 'not-a-sha' }).appVersion, 'dev');
     assert.equal(loadConfig({ ...base, GIT_SHA: 'not-a-sha' }).gitSha, null);
+  });
+
+  test('reads RATE_LIMIT_MAX', async () => {
+    const { loadConfig, ConfigError } = await import('../src/config.js');
+    const base = { JOPLIN_SERVER_URL: 'https://notes.example.com' };
+    assert.equal(loadConfig(base).rateLimitMax, 1000);
+    assert.equal(loadConfig({ ...base, RATE_LIMIT_MAX: ' 5000 ' }).rateLimitMax, 5000);
+    for (const bad of ['0', '-1', '1.5', 'lots']) {
+      assert.throws(() => loadConfig({ ...base, RATE_LIMIT_MAX: bad }), ConfigError);
+    }
   });
 
   test('allows no cross-origin callers in production unless CORS_ORIGIN is set', async () => {

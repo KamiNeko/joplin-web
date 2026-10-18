@@ -48,6 +48,8 @@ export interface Note {
   id: string;
   title: string;
   body: string;
+  /** Plain-text preview of the body, as in note lists (built by the server) */
+  preview?: string;
   updatedTime: number;
   createdTime: number;
   deletedTime?: number;

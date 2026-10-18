@@ -93,6 +93,8 @@ export interface NoteDetail {
   id: string;
   title: string;
   body: string;
+  /** Plain-text preview of the body, as in note lists (lets clients update a list entry after a save) */
+  preview: string;
   parentId: string;
   notebook: { id: string; title: string } | null;
   notebookId: string;

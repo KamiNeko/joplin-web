@@ -15,7 +15,7 @@ import {
   deleteTag,
   NoteUpdate,
 } from "@/lib/api";
-import { Note } from "@/lib/types";
+import { Note, NoteListItem, SearchResult } from "@/lib/types";
 import { NOTES_QUERY_KEY } from "./use-notes";
 import { NOTEBOOKS_QUERY_KEY } from "./use-notebooks";
 import { TAGS_QUERY_KEY } from "./use-tags";
@@ -28,6 +28,33 @@ export function invalidateLists(queryClient: QueryClient) {
   queryClient.invalidateQueries({ queryKey: NOTEBOOKS_QUERY_KEY });
   queryClient.invalidateQueries({ queryKey: TAGS_QUERY_KEY });
   queryClient.invalidateQueries({ queryKey: ["search"] });
+}
+
+/**
+ * Brings the note's entry in the cached note lists and search results up to date after a change
+ * of its title or body only, without refetching anything: notebook counts, tags and list
+ * membership stay the same. Lists keep the server's order (newest change first). Search results
+ * are only marked stale, as their matches and snippets may have changed; they reload the next
+ * time a search is shown.
+ */
+export function updateNoteInLists(queryClient: QueryClient, saved: Note) {
+  const { preview } = saved;
+  if (preview === undefined) {
+    // A server that doesn't send the preview: let the lists build it
+    queryClient.invalidateQueries({ queryKey: NOTES_QUERY_KEY });
+    queryClient.invalidateQueries({ queryKey: ["search"] });
+    return;
+  }
+  const patch = <T extends NoteListItem>(items: T[] | undefined, resort: boolean): T[] | undefined => {
+    if (!items?.some((item) => item.id === saved.id)) return items;
+    const next = items.map((item) =>
+      item.id === saved.id ? { ...item, title: saved.title, preview, updatedTime: saved.updatedTime } : item
+    );
+    return resort ? next.sort((a, b) => b.updatedTime - a.updatedTime) : next;
+  };
+  queryClient.setQueriesData<NoteListItem[]>({ queryKey: NOTES_QUERY_KEY }, (items) => patch(items, true));
+  queryClient.setQueriesData<SearchResult[]>({ queryKey: ["search"] }, (items) => patch(items, false));
+  queryClient.invalidateQueries({ queryKey: ["search"], refetchType: "none" });
 }
 
 export function useCreateNote() {
