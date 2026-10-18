@@ -22,8 +22,20 @@ import {
  */
 const localWriteMarker = (now = Date.now()): number => -now;
 
+/**
+ * Cache entries not used for this long are dropped. Sessions that expire on Joplin Server or are
+ * simply abandoned never log out, so without this their copy of the account would stay forever.
+ * Dropping an entry only costs a full listing if the session comes back.
+ */
+export const IDLE_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
+
+/** Idle entries are looked for at most this often */
+const IDLE_SWEEP_INTERVAL_MS = 60 * 1000;
+
 export interface CacheEntry {
   lastFetched: number;
+  /** Last time the session read or wrote through the cache, for idle eviction */
+  lastAccessed: number;
   fetchPromise: Promise<void> | null;
   notebooks: Map<string, RawJoplinItem>;
   notes: Map<string, RawJoplinItem>;
@@ -55,15 +67,19 @@ export interface CacheEntry {
  */
 export class NoteCacheService {
   private caches: Map<string, CacheEntry> = new Map();
+  private lastIdleSweep = 0;
 
   /**
    * Retrieves or initializes the cache entry for a given session
    */
   private getOrCreateEntry(sessionId: string): CacheEntry {
+    const now = Date.now();
+    if (now - this.lastIdleSweep >= IDLE_SWEEP_INTERVAL_MS) this.evictIdleCaches(now);
     let entry = this.caches.get(sessionId);
     if (!entry) {
       entry = {
         lastFetched: 0,
+        lastAccessed: now,
         fetchPromise: null,
         notebooks: new Map(),
         notes: new Map(),
@@ -79,7 +95,31 @@ export class NoteCacheService {
       };
       this.caches.set(sessionId, entry);
     }
+    entry.lastAccessed = now;
     return entry;
+  }
+
+  /**
+   * Drops the caches of sessions that have not used them for `IDLE_CACHE_TTL_MS` (runs on access,
+   * at most once a minute). Entries with a refresh in flight are kept.
+   *
+   * @returns The number of dropped entries
+   */
+  public evictIdleCaches(now = Date.now()): number {
+    this.lastIdleSweep = now;
+    let evicted = 0;
+    for (const [sessionId, entry] of this.caches) {
+      if (entry.fetchPromise || now - entry.lastAccessed < IDLE_CACHE_TTL_MS) continue;
+      this.caches.delete(sessionId);
+      evicted++;
+    }
+    if (evicted > 0) console.log(`[NoteCache] Dropped ${evicted} idle session cache(s)`);
+    return evicted;
+  }
+
+  /** Whether a session currently has a cache entry (for tests and diagnostics) */
+  public hasCache(sessionId: string): boolean {
+    return this.caches.has(sessionId);
   }
 
   /**
@@ -242,11 +282,12 @@ export class NoteCacheService {
   }
 
   /**
-   * Clears the cache for a session (e.g. upon logout)
+   * Clears the cache for a session (on logout, or when the session turned out to be invalid)
    */
   public clearCache(sessionId: string): void {
-    this.caches.delete(sessionId);
-    console.log(`[NoteCache] Cleared cache for session ${sessionId.substring(0, 8)}...`);
+    if (this.caches.delete(sessionId)) {
+      console.log(`[NoteCache] Cleared cache for session ${sessionId.substring(0, 8)}...`);
+    }
   }
 
   /**

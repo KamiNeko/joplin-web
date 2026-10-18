@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from 'express';
 import { config } from '../config.js';
 import { joplinApi, JoplinAuthError, JoplinConnectionError } from '../services/joplin-api.js';
+import { noteCache } from '../services/note-cache.js';
 
 interface SessionValidationEntry {
   isValid: boolean;
@@ -33,11 +34,12 @@ export function cacheSessionValidation(sessionId: string, isValid: boolean): voi
 }
 
 /**
- * Marks a session as logged out: it is rejected without asking Joplin Server until the validation
- * cache entry expires, even if ending it on Joplin Server failed.
+ * Marks a session as logged out or expired: it is rejected without asking Joplin Server until the
+ * validation cache entry expires, even if ending it on Joplin Server failed. Its note cache is freed.
  */
 export function invalidateSessionValidation(sessionId: string): void {
   cacheSessionValidation(sessionId, false);
+  noteCache.clearCache(sessionId);
 }
 
 /** httpOnly cookie that carries the session for the browser client over plain HTTP */
@@ -161,6 +163,7 @@ export async function requireAuth(
     });
 
     if (!isValid) {
+      noteCache.clearCache(sessionId);
       res.status(401).json({ error: 'Unauthorized: Session has expired or is invalid' });
       return;
     }
