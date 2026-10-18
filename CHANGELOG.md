@@ -4,6 +4,35 @@ Notable changes to Joplin Web. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [1.1.0] – 2026-10-18
+
+### Features
+
+- **Math and diagrams:** Joplin's Markdown extensions render like in the Joplin apps: `$inline$` and `$$display$$` math (KaTeX), ` ```mermaid ` diagrams, `==mark==`, `++insert++`, `~sub~` and `^sup^`. KaTeX and Mermaid load only when a note uses them (#112).
+- **Editor toolbar:** bold, italic, strikethrough, code, headings, lists, checkboxes and links from a toolbar above the editor, with `Ctrl/Cmd+B`, `I`, `E` and `K`. *Link to note* searches your notes and inserts a `:/id` link; *Copy Markdown link* in the note menu copies a link to the open note (#114).
+- **To-do due dates:** the note list and note header show a to-do's due date, overdue open to-dos are highlighted, and the due date can be set, changed or cleared (#113).
+- **Better search:** every word must match (in any order) instead of the whole query as one phrase. `"quoted phrases"`, `-word`, and the filters `tag:`, `notebook:` (including sub-notebooks), `type:todo|note` and `iscompleted:0|1` work like in Joplin. Each matched word is highlighted (#115).
+- **HTML notes:** notes saved with the Joplin Web Clipper are rendered as HTML instead of garbled Markdown. They can still be edited as raw HTML (#104).
+- **Conflict copies:** the copies Joplin desktop/mobile keep after a sync conflict are listed under *Conflicts* in the sidebar (shown only while there are any) instead of appearing as duplicates, with a link to the original note (#107).
+- **E2EE accounts read-only:** accounts with end-to-end encryption get a read-only mode with a banner explaining why, instead of edits that fail on every save. Encrypted items show with a lock (#105).
+
+### Changed
+
+- Faster reads: once the 30 s cache expires, Joplin Web shows the cached data at once and re-syncs with Joplin Server in the background (up to 10 × `CACHE_TTL_MS` old). Notebook and tag counts are computed in one pass (#110).
+- Autosave no longer reloads every list after each save, which used up the rate limit when typing a lot. Rate-limited saves (429) are retried after the server's `Retry-After` (#108).
+- New `RATE_LIMIT_MAX` setting (default 1000 requests per address and 15 minutes) (#108).
+- The README explains how Joplin Web differs from Joplin's official web app (#103).
+
+### Fixed
+
+- The server frees the note cache of sessions unused for two hours and of sessions Joplin Server rejects; before, it was only freed on logout (#106).
+- Cache headers for the web app: hashed assets are cached for a year, `index.html` is always revalidated (#111).
+- Corrected the Joplin Server link in the README (#101).
+
+### Internal
+
+- Component tests for the pages, sidebar, search, tag editor and uploads, and Playwright end-to-end smoke tests against the demo, which also run in CI (#116).
+
 ## [1.0.1] – 2026-10-18
 
 ### Fixed

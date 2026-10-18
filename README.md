@@ -84,14 +84,14 @@ In short: choose Joplin Web if you want quick, install-free access to your notes
 
 ## Getting started
 
-You need a running **Joplin Server** and **Docker** with Docker Compose (2.24 or newer). Prebuilt images for amd64 and arm64 are published at `ghcr.io/kamineko/joplin-web` (`1.0.1`, `1.0`, `1` and `latest`).
+You need a running **Joplin Server** and **Docker** with Docker Compose (2.24 or newer). Prebuilt images for amd64 and arm64 are published at `ghcr.io/kamineko/joplin-web` (`1.1.0`, `1.1`, `1` and `latest`).
 
 Create a `docker-compose.yml`:
 
 ```yaml
 services:
   joplin-web:
-    image: ghcr.io/kamineko/joplin-web:1.0.1
+    image: ghcr.io/kamineko/joplin-web:1.1.0
     container_name: joplin-web
     environment:
       JOPLIN_SERVER_URL: https://notes.example.com   # your Joplin Server
@@ -118,7 +118,7 @@ Open `http://localhost:3001` and sign in with your Joplin Server account. Add fu
 ```bash
 docker run -d --name joplin-web -p 3001:3001 \
   -e JOPLIN_SERVER_URL=https://notes.example.com \
-  --restart unless-stopped ghcr.io/kamineko/joplin-web:1.0.1
+  --restart unless-stopped ghcr.io/kamineko/joplin-web:1.1.0
 ```
 
 To publish on another host port, change only the left side of the mapping, e.g. `-p 8080:3001`.
@@ -163,7 +163,7 @@ Each release is tagged `vX.Y.Z`, published as `ghcr.io/kamineko/joplin-web:X.Y.Z
 
 To update, set the new version in `image:` and run `docker compose pull && docker compose up -d`. Pin an exact version so that you choose when to update, and roll back by setting the previous version again. `latest` always points to the newest release.
 
-For a source build, check out the release tag instead (`git fetch --tags && git checkout v1.0.1`) and run `docker compose up -d --build`.
+For a source build, check out the release tag instead (`git fetch --tags && git checkout v1.1.0`) and run `docker compose up -d --build`.
 
 To see which version is running, open *About Joplin Web* in the user menu, or `http://localhost:3001/api/health`. The endpoint returns the version and commit (and nothing about your configuration). Please include them in bug reports.
 
