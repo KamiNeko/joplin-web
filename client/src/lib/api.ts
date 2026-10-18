@@ -372,6 +372,8 @@ export interface NoteUpdate {
   body?: string;
   parentId?: string;
   todoCompleted?: boolean;
+  /** To-do due date in Unix ms; 0 or null clears it */
+  todoDue?: number | null;
   /** updatedTime of the version the change is based on; enables conflict detection */
   baseUpdatedTime?: number;
   /** Overwrite even if the note changed on the server */

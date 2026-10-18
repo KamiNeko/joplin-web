@@ -257,6 +257,47 @@ describe('writing', () => {
     assert.ok(!mock.items.has(`${noteId}.md`));
   });
 
+  test('sets, changes and clears a to-do due date with conflict detection', async () => {
+    const put = (id: string, payload: unknown) => api(`/api/notes/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
+    const storedDue = (id: string) => /^todo_due: (.*)$/m.exec(mock.items.get(`${id}.md`)!.content.toString('utf8'))?.[1];
+
+    const created = await api('/api/notes', {
+      method: 'POST',
+      body: JSON.stringify({ title: 'Water plants', parentId: demoId('nb-personal'), isTodo: true }),
+    });
+    assert.equal(created.status, 201);
+    const id = created.data.id;
+    assert.equal(created.data.todoDue, 0);
+    assert.equal(storedDue(id), '0');
+
+    const due = Date.UTC(2026, 10, 3, 9, 30);
+    const set = await put(id, { todoDue: due, baseUpdatedTime: created.data.updatedTime });
+    assert.equal(set.status, 200);
+    assert.equal(set.data.todoDue, due);
+    assert.equal(set.data.title, 'Water plants', 'other fields are kept');
+    assert.equal(storedDue(id), String(due), 'stored as Unix ms like Joplin desktop');
+    assert.ok(set.data.updatedTime > created.data.updatedTime);
+    const listed = (await api(`/api/notes?notebook_id=${demoId('nb-personal')}`)).data.find((n: any) => n.id === id);
+    assert.equal(listed.todoDue, due, 'cache updated');
+
+    const stale = await put(id, { todoDue: due + 1, baseUpdatedTime: created.data.updatedTime });
+    assert.equal(stale.status, 409);
+    assert.equal(storedDue(id), String(due));
+
+    for (const bad of ['2026-11-03', -1, 1.5, 9e15, true, {}]) {
+      assert.equal((await put(id, { todoDue: bad })).status, 400, `rejects ${JSON.stringify(bad)}`);
+    }
+
+    const cleared = await put(id, { todoDue: null, baseUpdatedTime: set.data.updatedTime });
+    assert.equal(cleared.status, 200);
+    assert.equal(cleared.data.todoDue, 0);
+    assert.equal(storedDue(id), '0');
+
+    assert.equal((await put(demoId('note-roadmap'), { todoDue: due })).status, 400, 'plain notes cannot get a due date');
+    assert.equal((await api(`/api/notes/${id}`, { method: 'DELETE' })).status, 204);
+    assert.equal((await api(`/api/notes/${id}?permanent=true`, { method: 'DELETE' })).status, 204);
+  });
+
   test('rejects invalid ids before touching Joplin Server', async () => {
     const res = await api('/api/notes/..%2Fevil', { method: 'PUT', body: JSON.stringify({ body: 'x' }) });
     assert.equal(res.status, 400);

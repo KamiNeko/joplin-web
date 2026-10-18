@@ -76,18 +76,39 @@ router.post('/', async (req, res) => {
   res.status(201).json(note);
 });
 
+/** Latest time a JavaScript Date can hold */
+const MAX_DATE_MS = 8.64e15;
+
+/**
+ * Validates a `todoDue` request value: undefined leaves the due date as is, 0 or null clear it,
+ * otherwise it must be an integer Unix ms timestamp. Returns null for invalid input.
+ */
+function parseTodoDue(value: unknown): number | undefined | null {
+  if (value === undefined) return undefined;
+  if (value === null) return 0;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > MAX_DATE_MS) return null;
+  return value;
+}
+
 /**
  * PUT /api/notes/:id
- * Updates a note. Body: { title?, body?, parentId?, todoCompleted?, baseUpdatedTime?, force? }
+ * Updates a note. Body: { title?, body?, parentId?, todoCompleted?, todoDue?, baseUpdatedTime?, force? }
+ * `todoDue` is a Unix ms timestamp, or 0 / null to clear the due date.
  * Responds 409 with details.current when the note changed since baseUpdatedTime.
  */
 router.put('/:id', async (req, res) => {
-  const { title, body, parentId, todoCompleted, baseUpdatedTime, force } = req.body ?? {};
+  const { title, body, parentId, todoCompleted, todoDue, baseUpdatedTime, force } = req.body ?? {};
+  const due = parseTodoDue(todoDue);
+  if (due === null) {
+    res.status(400).json({ error: 'todoDue must be a timestamp in milliseconds, 0 or null' });
+    return;
+  }
   const note = await noteWriter.updateNote(req.sessionId!, req.params.id, {
     title: typeof title === 'string' ? title : undefined,
     body: typeof body === 'string' ? body : undefined,
     parentId: typeof parentId === 'string' ? parentId : undefined,
     todoCompleted: typeof todoCompleted === 'boolean' ? todoCompleted : undefined,
+    todoDue: due,
     baseUpdatedTime: typeof baseUpdatedTime === 'number' ? baseUpdatedTime : undefined,
     force: force === true,
   });

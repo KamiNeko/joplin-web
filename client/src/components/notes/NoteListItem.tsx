@@ -2,13 +2,15 @@ import { NoteListItem as NoteListItemType, Tag } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { formatRelativeTime, noteDisplayTitle } from "@/lib/format";
-import { CheckSquare, Square, FileText, Lock } from "lucide-react";
+import { dueTime, formatDueDate, isOverdue } from "@/lib/due";
+import { AlarmClock, CheckSquare, Square, FileText, Lock } from "lucide-react";
 
 interface NoteListItemProps {
   note: NoteListItemType & {
     tags?: Tag[];
     isTodo?: boolean;
     todoCompleted?: boolean;
+    todoDue?: number;
   };
   isActive?: boolean;
   onClick?: () => void;
@@ -20,6 +22,8 @@ export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteList
   const relativeTime = formatRelativeTime(note.updatedTime || note.createdTime);
   const title = noteDisplayTitle(note);
   const NoteIcon = note.encrypted ? Lock : FileText;
+  const due = dueTime(note);
+  const overdue = isOverdue(note);
 
   return (
     <div
@@ -104,6 +108,20 @@ export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteList
         </p>
       ) : (
         <p className="text-xs text-muted-foreground italic">Empty note</p>
+      )}
+
+      {due > 0 && (
+        <p
+          className={cn(
+            "flex items-center gap-1 text-[11px] font-medium",
+            overdue ? "text-destructive" : "text-muted-foreground"
+          )}
+        >
+          <AlarmClock className="h-3 w-3 shrink-0" aria-hidden="true" />
+          <span>
+            {overdue ? "Overdue" : "Due"} {formatDueDate(due)}
+          </span>
+        </p>
       )}
 
       {/* Tags if present */}

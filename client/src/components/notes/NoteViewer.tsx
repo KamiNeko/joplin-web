@@ -41,6 +41,7 @@ import {
 } from "lucide-react";
 import { formatRelativeTime, noteDisplayTitle } from "@/lib/format";
 import { TagEditor } from "@/components/tags/TagEditor";
+import { TodoDueDate } from "./TodoDueDate";
 import { Button } from "@/components/ui/button";
 import { useDeleteNote, useRestoreNote, useUpdateNote } from "@/hooks/use-mutations";
 import { useNoteSaver } from "@/hooks/use-note-saver";
@@ -341,6 +342,7 @@ export function NoteViewer({
               Conflict
             </Badge>
           )}
+          <TodoDueDate note={note} readOnly={!canEdit} />
 
           {isTrashed && (
             <Badge

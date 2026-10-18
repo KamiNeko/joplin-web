@@ -47,7 +47,7 @@ In short: choose Joplin Web if you want quick, install-free access to your notes
 | 📝 **Markdown editor** | CodeMirror editor with *Edit*, *Split* and *Preview* modes, autosave and `Ctrl+S`. |
 | ✨ **Rich rendering** | GitHub-flavored Markdown: tables, task lists, syntax-highlighted code blocks. HTML notes (e.g. from the Web Clipper) are shown as sanitized HTML. |
 | 🖼️ **Images & attachments** | Shows Joplin resources inline. Drop, paste or attach files to upload them. |
-| ✅ **To-dos** | Create to-dos and tick them off, right from the note list. |
+| ✅ **To-dos** | Create to-dos and tick them off, right from the note list. Set, change or clear due dates (synced with Joplin's alarms); overdue to-dos are highlighted. |
 | 🏷️ **Tags** | Tag notes, browse by tag, rename and delete tags. |
 | 🔎 **Search** | Instant search across titles and content (`Ctrl+K`): all words must match, `"exact phrases"`, `-word` to exclude, and Joplin-style filters `tag:`, `notebook:`, `type:todo`, `iscompleted:0`. |
 | 🗑️ **Trash** | Deleted notes and notebooks go to Joplin's trash, where you can restore them or delete them permanently. |
