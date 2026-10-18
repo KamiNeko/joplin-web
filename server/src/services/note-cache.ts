@@ -29,6 +29,17 @@ export interface CacheEntry {
   noteTags: NoteTagLink[];
   resources: Map<string, ResourceMetadata>;
   itemTimestamps: Map<string, number>;
+  /** `updated_time` of the sync target's info.json in the last listing, null when it has none */
+  syncInfoUpdatedTime: number | null;
+  /** Ids of items stored with `encryption_applied: 1` */
+  encryptedItemIds: Set<string>;
+  /** Ids of master key items (type 9), which exist only on accounts that used E2EE */
+  masterKeyIds: Set<string>;
+  /**
+   * Item names written or deleted by Joplin Web, with the time of the change. A refresh that
+   * started before such a change must not apply the (older) content it fetched for that item.
+   */
+  localChanges: Map<string, number>;
 }
 
 /**
@@ -53,6 +64,10 @@ export class NoteCacheService {
         noteTags: [],
         resources: new Map(),
         itemTimestamps: new Map(),
+        syncInfoUpdatedTime: null,
+        encryptedItemIds: new Set(),
+        masterKeyIds: new Set(),
+        localChanges: new Map(),
       };
       this.caches.set(sessionId, entry);
     }
@@ -102,9 +117,11 @@ export class NoteCacheService {
 
     // Identify which items need fetching/updating
     const itemsToFetch: Array<{ name: string; updated_time: number }> = [];
+    let syncInfoUpdatedTime: number | null = null;
 
     for (const item of childItems) {
       currentItemNames.add(item.name);
+      if (item.name === 'info.json') syncInfoUpdatedTime = item.updated_time;
       // Only process markdown item files for metadata
       if (item.name.endsWith('.md')) {
         const lastKnownTime = entry.itemTimestamps.get(item.name);
@@ -114,18 +131,14 @@ export class NoteCacheService {
       }
     }
 
+    entry.syncInfoUpdatedTime = syncInfoUpdatedTime;
+
     // Remove deleted items from the local cache
     for (const [name, timestamp] of entry.itemTimestamps) {
       // Written by Joplin Web while the listing was loading, so it may be missing from it
       const writtenDuringListing = timestamp < 0 && -timestamp > listingStartedAt;
       if (!currentItemNames.has(name) && !writtenDuringListing) {
-        const id = name.replace(/\.md$/i, '');
-        entry.itemTimestamps.delete(name);
-        entry.notebooks.delete(id);
-        entry.notes.delete(id);
-        entry.tags.delete(id);
-        entry.resources.delete(id);
-        entry.noteTags = entry.noteTags.filter((link) => link.id !== id);
+        this.forgetItem(entry, name.replace(/\.md$/i, ''));
       }
     }
 
@@ -139,8 +152,14 @@ export class NoteCacheService {
             const rawContent = await joplinApi.getItemContent(sessionId, item.name);
             const parsed = deserialize(rawContent, item.name);
 
+            // Joplin Web wrote or deleted the item since this refresh started, so the fetched
+            // content may predate that change: keep the local state, the next refresh re-reads it
+            const localChange = entry.localChanges.get(item.name);
+            if (localChange !== undefined && localChange >= listingStartedAt) return;
+
             // Record timestamp
             entry.itemTimestamps.set(item.name, item.updated_time);
+            this.trackEncryption(entry, parsed);
 
             // Categorize by type_
             switch (parsed.type_) {
@@ -191,6 +210,10 @@ export class NoteCacheService {
       );
     }
 
+    for (const [name, time] of entry.localChanges) {
+      if (time < listingStartedAt) entry.localChanges.delete(name);
+    }
+
     entry.lastFetched = Date.now();
     console.log(
       `[NoteCache] Synced session in ${Date.now() - startTime}ms. ` +
@@ -228,7 +251,10 @@ export class NoteCacheService {
    */
   public upsertItem(sessionId: string, item: RawJoplinItem): void {
     const entry = this.getOrCreateEntry(sessionId);
-    entry.itemTimestamps.set(`${item.id}.md`, localWriteMarker());
+    const now = Date.now();
+    entry.itemTimestamps.set(`${item.id}.md`, localWriteMarker(now));
+    entry.localChanges.set(`${item.id}.md`, now);
+    this.trackEncryption(entry, item);
     if (item.type_ === JoplinItemType.Note) {
       entry.notes.set(item.id, item);
     } else if (item.type_ === JoplinItemType.Folder) {
@@ -258,12 +284,27 @@ export class NoteCacheService {
    */
   public removeItem(sessionId: string, id: string): void {
     const entry = this.getOrCreateEntry(sessionId);
+    entry.localChanges.set(`${id}.md`, Date.now());
+    this.forgetItem(entry, id);
+  }
+
+  /** Drops an item from every map of a cache entry */
+  private forgetItem(entry: CacheEntry, id: string): void {
     entry.itemTimestamps.delete(`${id}.md`);
     entry.notebooks.delete(id);
     entry.notes.delete(id);
     entry.tags.delete(id);
     entry.resources.delete(id);
     entry.noteTags = entry.noteTags.filter((link) => link.id !== id);
+    entry.encryptedItemIds.delete(id);
+    entry.masterKeyIds.delete(id);
+  }
+
+  /** Records whether an item is encrypted or a master key, for the writer's E2EE guard */
+  private trackEncryption(entry: CacheEntry, item: RawJoplinItem): void {
+    if (item.properties.encryption_applied === '1') entry.encryptedItemIds.add(item.id);
+    else entry.encryptedItemIds.delete(item.id);
+    if (item.type_ === JoplinItemType.MasterKey) entry.masterKeyIds.add(item.id);
   }
 
   /**

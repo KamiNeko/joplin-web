@@ -36,6 +36,11 @@ export interface MockJoplinServerOptions {
 export interface MockJoplinServer {
   url: string;
   items: Map<string, MockItem>;
+  /**
+   * Makes the next `count` requests to /api/items answer with `status`, to simulate
+   * Joplin Server failures (e.g. 500) in tests
+   */
+  failNextItemRequests: (status: number, count?: number) => void;
   close: () => Promise<void>;
 }
 
@@ -55,7 +60,7 @@ export function syncTargetInfoItem(e2ee: boolean, updatedTime = Date.now()): Moc
   return { content: Buffer.from(JSON.stringify(info)), contentType: 'application/json', updatedTime };
 }
 
-const ITEM_PATH =/^\/root:\/(.*?):(\/content|\/children)?$/;
+const ITEM_PATH = /^\/root:\/(.*?):(\/content|\/children)?$/;
 
 function parseMultipartFile(body: Buffer, contentType: string): Buffer | null {
   const boundaryMatch = /boundary=(.+)$/i.exec(contentType);
@@ -88,6 +93,7 @@ export async function startMockJoplinServer(
   const sessions = new Set<string>();
   let clock = Date.now();
   const tick = () => (clock = Math.max(clock + 1, Date.now()));
+  let failure: { status: number; remaining: number } | null = null;
 
   const app = express();
 
@@ -116,6 +122,11 @@ export async function startMockJoplinServer(
   });
 
   app.use('/api/items', express.raw({ type: () => true, limit: '50mb' }), (req: Request, res: Response) => {
+    if (failure && failure.remaining > 0) {
+      failure.remaining--;
+      res.status(failure.status).json({ error: `Injected failure (HTTP ${failure.status})` });
+      return;
+    }
     const session = req.headers['x-api-auth'];
     if (typeof session !== 'string' || !sessions.has(session)) {
       res.status(403).json({ error: 'Invalid session' });
@@ -189,6 +200,9 @@ export async function startMockJoplinServer(
   return {
     url: `http://127.0.0.1:${boundPort}`,
     items,
+    failNextItemRequests: (status, count = 1) => {
+      failure = { status, remaining: count };
+    },
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }

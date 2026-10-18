@@ -60,6 +60,26 @@ function assertType(item: RawJoplinItem, type: JoplinItemType): void {
   }
 }
 
+/** How long a successful E2EE check of info.json is reused while its `updated_time` is unchanged */
+const WRITABLE_CHECK_TTL_MS = 60_000;
+
+/** Parallel Joplin Server reads when collecting a notebook subtree (same as the cache refresh) */
+const SUBTREE_READ_CONCURRENCY = 10;
+
+/** Maps items with at most `limit` calls of `fn` in flight, keeping the input order */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
 /** Generates a Joplin-style id (uuid v4 without dashes) */
 function newId(): string {
   return randomUUID().replace(/-/g, '');
@@ -203,15 +223,51 @@ function defaultNoteTagProperties(id: string, noteId: string, tagId: string): Re
  * keeps its original properties, and updates the in-memory cache afterwards.
  */
 export class NoteWriterService {
+  /** Successful info.json checks per session, see `assertWritable` */
+  private writableChecks = new Map<string, { checkedAt: number; infoUpdatedTime: number | null; infoMissing: boolean }>();
+
   /**
    * Refuses every write when the account uses end-to-end encryption. Joplin Web cannot encrypt,
-   * so anything it wrote would be stored and synced in plaintext. Mirrors Joplin's
-   * SyncTargetInfo: E2EE is on when `info.json` has `e2ee.value === true`. An unreadable
-   * info.json fails closed, as Joplin desktop also refuses to sync with it.
+   * so anything it wrote would be stored and synced in plaintext.
+   *
+   * A successful check is reused for up to a minute while the cache listing shows the same
+   * info.json `updated_time`, so autosaves do not re-read info.json each time. Without an
+   * info.json (sync targets from before sync version 3), master key items or encrypted items in
+   * the cache are taken as a sign of E2EE and also make the account read-only.
    */
   private async assertWritable(sessionId: string): Promise<void> {
+    const entry = await noteCache.getEntry(sessionId);
+    const now = Date.now();
+    const cached = this.writableChecks.get(sessionId);
+    let infoMissing: boolean;
+    if (cached && now - cached.checkedAt < WRITABLE_CHECK_TTL_MS && cached.infoUpdatedTime === entry.syncInfoUpdatedTime) {
+      infoMissing = cached.infoMissing;
+    } else {
+      this.writableChecks.delete(sessionId);
+      infoMissing = await this.checkSyncTargetInfo(sessionId);
+      for (const [id, check] of this.writableChecks) {
+        if (now - check.checkedAt >= WRITABLE_CHECK_TTL_MS) this.writableChecks.delete(id);
+      }
+      this.writableChecks.set(sessionId, { checkedAt: now, infoUpdatedTime: entry.syncInfoUpdatedTime, infoMissing });
+    }
+    if (infoMissing && (entry.masterKeyIds.size > 0 || entry.encryptedItemIds.size > 0)) {
+      throw new WriteValidationError(
+        'This account has end-to-end encrypted data. Joplin Web cannot encrypt data, so it is read-only here',
+        422
+      );
+    }
+  }
+
+  /**
+   * Reads info.json and throws when E2EE is enabled. Mirrors Joplin's SyncTargetInfo: E2EE is on
+   * when `info.json` has `e2ee.value === true`. An unreadable info.json fails closed, as Joplin
+   * desktop also refuses to sync with it.
+   *
+   * @returns true when the sync target has no info.json
+   */
+  private async checkSyncTargetInfo(sessionId: string): Promise<boolean> {
     const raw = await joplinApi.getSyncTargetInfo(sessionId);
-    if (raw === null || raw.trim() === '') return;
+    if (raw === null || raw.trim() === '') return true;
     let e2ee: unknown;
     try {
       const info = JSON.parse(raw) as { e2ee?: unknown };
@@ -229,6 +285,7 @@ export class NoteWriterService {
         422
       );
     }
+    return false;
   }
 
   /** Reads the current server version of an item (bypassing the cache), or null if it is gone */
@@ -532,26 +589,34 @@ export class NoteWriterService {
     const folders: RawJoplinItem[] = [root];
     const folderIds = new Set([root.id]);
 
-    // Breadth-first, so a parent is always verified before its children
-    for (let i = 0; i < folders.length; i++) {
-      const parentId = folders[i].id;
-      for (const cached of entry.notebooks.values()) {
-        if (cached.parentId !== parentId || folderIds.has(cached.id) || !ID_PATTERN.test(cached.id)) continue;
-        const fresh = await this.readFresh(sessionId, cached.id);
-        if (!fresh || fresh.type_ !== JoplinItemType.Folder || fresh.parentId !== parentId) continue;
-        assertNotEncrypted(fresh);
-        folders.push(fresh);
-        folderIds.add(fresh.id);
+    // Breadth-first, one level at a time, so a parent is always verified before its children
+    let level: RawJoplinItem[] = [root];
+    while (level.length > 0) {
+      const parentIds = new Set(level.map((folder) => folder.id));
+      const candidates = [...entry.notebooks.values()].filter(
+        (cached) => parentIds.has(cached.parentId) && !folderIds.has(cached.id) && ID_PATTERN.test(cached.id)
+      );
+      const fresh = await mapLimit(candidates, SUBTREE_READ_CONCURRENCY, (cached) => this.readFresh(sessionId, cached.id));
+      level = [];
+      for (const [index, folder] of fresh.entries()) {
+        if (!folder || folder.type_ !== JoplinItemType.Folder || folder.parentId !== candidates[index].parentId) continue;
+        if (folderIds.has(folder.id)) continue;
+        assertNotEncrypted(folder);
+        folders.push(folder);
+        folderIds.add(folder.id);
+        level.push(folder);
       }
     }
 
+    const candidates = [...entry.notes.values()].filter(
+      (cached) => folderIds.has(cached.parentId) && ID_PATTERN.test(cached.id)
+    );
+    const fresh = await mapLimit(candidates, SUBTREE_READ_CONCURRENCY, (cached) => this.readFresh(sessionId, cached.id));
     const notes: RawJoplinItem[] = [];
-    for (const cached of entry.notes.values()) {
-      if (!folderIds.has(cached.parentId) || !ID_PATTERN.test(cached.id)) continue;
-      const fresh = await this.readFresh(sessionId, cached.id);
-      if (!fresh || fresh.type_ !== JoplinItemType.Note || !folderIds.has(fresh.parentId)) continue;
-      assertNotEncrypted(fresh);
-      notes.push(fresh);
+    for (const note of fresh) {
+      if (!note || note.type_ !== JoplinItemType.Note || !folderIds.has(note.parentId)) continue;
+      assertNotEncrypted(note);
+      notes.push(note);
     }
     return { folders, notes };
   }
