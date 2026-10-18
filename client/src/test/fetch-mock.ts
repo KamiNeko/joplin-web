@@ -7,7 +7,7 @@ export interface FetchCall {
   body: unknown;
 }
 
-type Handler = (call: FetchCall) => Response | Promise<Response> | undefined;
+type Handler = (call: FetchCall) => Response | undefined | Promise<Response | undefined>;
 
 /** Builds a JSON response like the backend sends. */
 export function jsonResponse(data: unknown, status = 200): Response {

@@ -29,6 +29,8 @@ lerna-debug.log*
 # Testing & Coverage
 coverage/
 .nyc_output/
+test-results/
+playwright-report/
 
 # Editor / IDE settings
 .vscode/*
