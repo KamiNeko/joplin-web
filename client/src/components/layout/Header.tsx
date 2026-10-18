@@ -24,6 +24,8 @@ import {
 interface HeaderProps {
   notebookTitle?: string;
   noteTitle?: string;
+  /** Shows "Search" in the breadcrumb while search results replace the list */
+  isSearchActive?: boolean;
   onToggleSidebar?: () => void;
   searchQuery: string;
   onSearchChange: (query: string) => void;
@@ -34,6 +36,7 @@ interface HeaderProps {
 export function Header({
   notebookTitle,
   noteTitle,
+  isSearchActive = false,
   onToggleSidebar,
   searchQuery,
   onSearchChange,
@@ -82,7 +85,12 @@ export function Header({
           aria-label="Breadcrumb"
           className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0"
         >
-          {notebookTitle ? (
+          {isSearchActive ? (
+            <div className="flex items-center gap-1.5 shrink-0 text-foreground/80 font-medium">
+              <Search className="h-3.5 w-3.5 text-primary" />
+              <span>Search</span>
+            </div>
+          ) : notebookTitle ? (
             <div className="flex items-center gap-1.5 shrink-0 text-foreground/80 font-medium">
               <Folder className="h-3.5 w-3.5 text-primary" />
               <span className="truncate max-w-[140px] sm:max-w-[200px]">

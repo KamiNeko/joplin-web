@@ -41,11 +41,14 @@ import { TagEditor } from "@/components/tags/TagEditor";
 import { Button } from "@/components/ui/button";
 import { invalidateLists, useDeleteNote, useRestoreNote, useUpdateNote } from "@/hooks/use-mutations";
 import { cn } from "@/lib/utils";
+import { QueryError } from "@/components/common/QueryError";
 
 interface NoteViewerProps {
   note?: Note | null;
   isLoading?: boolean;
   error?: Error | null;
+  onRetry?: () => void;
+  isRetrying?: boolean;
   notebooks?: Notebook[];
   /** Open the note directly in the editor (e.g. right after creating it) */
   startInEdit?: boolean;
@@ -60,6 +63,8 @@ export function NoteViewer({
   note,
   isLoading = false,
   error = null,
+  onRetry,
+  isRetrying = false,
   notebooks,
   startInEdit = false,
   onTagClick,
@@ -99,14 +104,22 @@ export function NoteViewer({
 
   if (error) {
     return (
-      <div className="flex flex-col items-center justify-center h-full p-6 text-center">
-        <div className="h-12 w-12 rounded-full bg-destructive/10 text-destructive flex items-center justify-center mb-3">
-          <AlertCircle className="h-6 w-6" />
-        </div>
-        <h3 className="text-base font-semibold text-foreground">Failed to load note</h3>
-        <p className="text-xs text-muted-foreground mt-1 max-w-sm">
-          {error.message || "An error occurred while fetching note contents."}
-        </p>
+      <div className="flex flex-col h-full">
+        {onClose && (
+          <div className="md:hidden px-4 py-3 border-b border-border/40">
+            <Button variant="ghost" size="sm" className="h-8" onClick={onClose}>
+              <X className="h-3.5 w-3.5" />
+              Close
+            </Button>
+          </div>
+        )}
+        <QueryError
+          className="flex-1 h-auto"
+          message="Couldn't load note"
+          error={error}
+          onRetry={onRetry}
+          isRetrying={isRetrying}
+        />
       </div>
     );
   }
@@ -214,12 +227,14 @@ export function NoteViewer({
               type="button"
               onClick={handleToggleTodo}
               disabled={isTrashed || updateNote.isPending}
+              aria-pressed={Boolean(note.todoCompleted)}
+              aria-label={note.todoCompleted ? "Done: mark as not done" : "To do: mark as done"}
               title={note.todoCompleted ? "Mark as not done" : "Mark as done"}
               className={cn(
                 "inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors disabled:opacity-60",
                 note.todoCompleted
-                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/20"
-                  : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30 hover:bg-amber-500/20"
+                  ? "bg-success/10 text-success border-success/30 hover:bg-success/20"
+                  : "bg-warning/10 text-warning border-warning/30 hover:bg-warning/20"
               )}
             >
               {note.todoCompleted ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Circle className="h-3.5 w-3.5" />}
@@ -250,6 +265,7 @@ export function NoteViewer({
                 variant="ghost"
                 className="h-8 text-destructive hover:text-destructive hover:bg-destructive/10"
                 onClick={() => setConfirmPurge(true)}
+                aria-label="Delete permanently"
               >
                 <Trash2 className="h-3.5 w-3.5" />
                 <span className="hidden sm:inline">Delete permanently</span>

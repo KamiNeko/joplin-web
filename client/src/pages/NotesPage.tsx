@@ -71,21 +71,16 @@ export function NotesPage() {
   // TanStack queries
   const { data: notebooks } = useNotebooks();
   const { data: tags } = useTags();
-  const { data: notes, isLoading: isLoadingNotes } = useNotes(
+  const notesQuery = useNotes(
     selectedNotebookId || undefined,
     selectedTagId || undefined,
     isTrashSelected
   );
-  const {
-    data: fullNote,
-    isLoading: isLoadingNote,
-    error: noteError,
-  } = useNote(selectedNoteId);
-  const {
-    data: searchResults,
-    isLoading: isLoadingSearch,
-    debouncedQuery,
-  } = useSearch(searchQuery);
+  const { data: notes, isLoading: isLoadingNotes } = notesQuery;
+  const noteQuery = useNote(selectedNoteId);
+  const { data: fullNote, isLoading: isLoadingNote, error: noteError } = noteQuery;
+  const searchQueryResult = useSearch(searchQuery);
+  const { data: searchResults, isLoading: isLoadingSearch, debouncedQuery } = searchQueryResult;
 
   // When the page is opened on a plain /notes/:id URL, show that note's notebook in the list
   // (first load only, so picking a note from "All Notes" doesn't switch the list)
@@ -181,18 +176,30 @@ export function NotesPage() {
   };
 
   const isSearchActive = debouncedQuery.length >= 2;
+  // Remount the list per scope so its filter doesn't carry over to another notebook or tag
+  // (the sort choice is stored separately and stays)
+  const listKey = selectedNotebookId ?? (selectedTagId ? `tag:${selectedTagId}` : isTrashSelected ? "trash" : "all");
+
+  const emptyState = isTrashSelected
+    ? { title: "Trash is empty", description: "Deleted notes and notebooks appear here." }
+    : selectedTagId
+    ? { title: "No notes with this tag", description: "Add the tag to a note to see it here." }
+    : selectedNotebookId
+    ? { title: "This notebook is empty", description: "Create a note to get started." }
+    : { title: "No notes yet", description: "Create your first note to get started." };
 
   return (
     <AppLayout
       notebookTitle={notebookTitle}
       noteTitle={noteTitle}
+      isSearchActive={isSearchActive}
       searchQuery={searchQuery}
       onSearchChange={setSearchQuery}
       sidebar={({ onCloseMobile }) => (
         <Sidebar
           selectedNotebookId={selectedNotebookId}
           selectedTagId={selectedTagId}
-          isAllNotesSelected={!selectedNotebookId && !selectedTagId && !isTrashSelected && !searchQuery}
+          isAllNotesSelected={!selectedNotebookId && !selectedTagId && !isTrashSelected}
           isTrashSelected={isTrashSelected}
           onSelectAllNotes={() => {
             handleSelectAllNotes();
@@ -228,14 +235,24 @@ export function NotesPage() {
               query={debouncedQuery}
               results={searchResults || []}
               isLoading={isLoadingSearch}
+              error={searchQueryResult.error}
+              onRetry={() => void searchQueryResult.refetch()}
+              isRetrying={searchQueryResult.isFetching}
               selectedNoteId={selectedNoteId}
               onSelectNote={handleSelectNote}
               onClearQuery={() => setSearchQuery("")}
             />
           ) : (
             <NoteList
+              key={listKey}
               notes={notes || []}
               isLoading={isLoadingNotes}
+              // Keep showing a list that loaded before; only a list that never loaded is an error
+              error={notes ? null : notesQuery.error}
+              onRetry={() => void notesQuery.refetch()}
+              isRetrying={notesQuery.isFetching}
+              emptyTitle={emptyState.title}
+              emptyDescription={emptyState.description}
               selectedNoteId={selectedNoteId}
               onSelectNote={handleSelectNote}
               title={notebookTitle || "All Notes"}
@@ -269,6 +286,8 @@ export function NotesPage() {
             onRemoved={handleNoteRemoved}
             isLoading={isLoadingNote}
             error={noteError}
+            onRetry={() => void noteQuery.refetch()}
+            isRetrying={noteQuery.isFetching}
             onTagClick={handleSelectTag}
             onNotebookClick={handleSelectNotebook}
             onClose={handleCloseNoteViewer}

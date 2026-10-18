@@ -30,7 +30,7 @@ export function LoginPage() {
       </div>
 
       {/* Subtle footer */}
-      <div className="absolute bottom-4 text-xs text-muted-foreground/60 text-center w-full select-none">
+      <div className="absolute bottom-4 text-xs text-muted-foreground text-center w-full select-none">
         Joplin Web &bull; Fast, Secure, Markdown Notes
       </div>
     </div>

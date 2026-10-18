@@ -61,6 +61,7 @@ export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteList
       onClick={onClick}
       role="button"
       tabIndex={0}
+      aria-current={isActive ? "true" : undefined}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
@@ -95,9 +96,9 @@ export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteList
               className="shrink-0 mt-0.5 rounded-sm enabled:hover:scale-110 transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
             >
               {note.todoCompleted ? (
-                <CheckSquare className="h-4 w-4 text-emerald-500" />
+                <CheckSquare className="h-4 w-4 text-success" />
               ) : (
-                <Square className="h-4 w-4 text-amber-500" />
+                <Square className="h-4 w-4 text-warning" />
               )}
             </button>
           ) : (
@@ -132,7 +133,7 @@ export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteList
           {note.preview}
         </p>
       ) : (
-        <p className="text-xs text-muted-foreground/50 italic">Empty note</p>
+        <p className="text-xs text-muted-foreground italic">Empty note</p>
       )}
 
       {/* Tags if present */}

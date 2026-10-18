@@ -1,6 +1,7 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Header } from "./Header";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { MOBILE_SEARCH_INPUT_ID } from "@/lib/ui-constants";
 
 interface AppLayoutProps {
   sidebar: (props: { onCloseMobile?: () => void }) => React.ReactNode;
@@ -9,6 +10,8 @@ interface AppLayoutProps {
   noteTitle?: string;
   searchQuery: string;
   onSearchChange: (query: string) => void;
+  /** Search results are shown instead of the selected list */
+  isSearchActive?: boolean;
 }
 
 export function AppLayout({
@@ -18,8 +21,11 @@ export function AppLayout({
   noteTitle,
   searchQuery,
   onSearchChange,
+  isSearchActive = false,
 }: AppLayoutProps) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  // Set when the menu is opened via Ctrl+K, so its search field gets focus instead of the first item
+  const focusSearchOnOpen = useRef(false);
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-background">
@@ -28,9 +34,22 @@ export function AppLayout({
         {sidebar({})}
       </div>
 
-      {/* Mobile Slide-over Sidebar (Sheet) */}
+      {/* Mobile Slide-over Sidebar (Sheet). The sidebar has its own close button, so the
+          sheet's built-in one (its first child) is hidden. */}
       <Sheet open={mobileSidebarOpen} onOpenChange={setMobileSidebarOpen}>
-        <SheetContent side="left" className="p-0 w-72 bg-card border-r border-border/40">
+        <SheetContent
+          side="left"
+          className="p-0 w-72 bg-card border-r border-border/40 [&>button:first-child]:hidden"
+          onOpenAutoFocus={(e) => {
+            if (!focusSearchOnOpen.current) return;
+            focusSearchOnOpen.current = false;
+            const input = document.getElementById(MOBILE_SEARCH_INPUT_ID);
+            if (input) {
+              e.preventDefault();
+              input.focus();
+            }
+          }}
+        >
           <SheetTitle className="sr-only">Navigation Menu</SheetTitle>
           {sidebar({ onCloseMobile: () => setMobileSidebarOpen(false) })}
         </SheetContent>
@@ -41,10 +60,18 @@ export function AppLayout({
         <Header
           notebookTitle={notebookTitle}
           noteTitle={noteTitle}
+          isSearchActive={isSearchActive}
           onToggleSidebar={() => setMobileSidebarOpen(true)}
           searchQuery={searchQuery}
           onSearchChange={onSearchChange}
-          onOpenMobileSearch={() => setMobileSidebarOpen(true)}
+          onOpenMobileSearch={() => {
+            if (mobileSidebarOpen) {
+              document.getElementById(MOBILE_SEARCH_INPUT_ID)?.focus();
+              return;
+            }
+            focusSearchOnOpen.current = true;
+            setMobileSidebarOpen(true);
+          }}
         />
         <main className="flex-1 h-[calc(100vh-3.5rem)] overflow-hidden">
           {children}

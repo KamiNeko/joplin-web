@@ -231,8 +231,8 @@ function CodeBlock({ inline, className, children, ...props }: CodeBlockProps) {
         >
           {copied ? (
             <>
-              <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-              <span className="text-emerald-600 dark:text-emerald-400">Copied!</span>
+              <Check className="h-3.5 w-3.5 text-success" />
+              <span className="text-success">Copied!</span>
             </>
           ) : (
             <>

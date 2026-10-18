@@ -29,6 +29,8 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { QueryError } from "@/components/common/QueryError";
+import { MOBILE_SEARCH_INPUT_ID } from "@/lib/ui-constants";
 
 interface SidebarProps {
   selectedNotebookId?: string | null;
@@ -59,8 +61,10 @@ export function Sidebar({
   onCloseMobile,
   className,
 }: SidebarProps) {
-  const { data: notebooks, isLoading: isLoadingNotebooks } = useNotebooks();
-  const { data: tags, isLoading: isLoadingTags } = useTags();
+  const notebooksQuery = useNotebooks();
+  const tagsQuery = useTags();
+  const { data: notebooks, isLoading: isLoadingNotebooks } = notebooksQuery;
+  const { data: tags, isLoading: isLoadingTags } = tagsQuery;
   const createNotebook = useCreateNotebook();
   const updateNotebook = useUpdateNotebook();
   const deleteNotebook = useDeleteNotebook();
@@ -162,14 +166,9 @@ export function Sidebar({
           <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary/15 text-primary border border-primary/25 shadow-sm">
             <BookOpen className="h-5 w-5" />
           </div>
-          <div>
-            <h1 className="text-sm font-bold text-foreground tracking-tight">
-              Joplin Web
-            </h1>
-            <span className="text-[10px] text-muted-foreground font-mono">
-              v1.0 &bull; Synced
-            </span>
-          </div>
+          <h1 className="text-sm font-bold text-foreground tracking-tight">
+            Joplin Web
+          </h1>
         </div>
 
         {onCloseMobile && (
@@ -178,6 +177,7 @@ export function Sidebar({
             size="icon"
             onClick={onCloseMobile}
             className="md:hidden h-8 w-8 text-muted-foreground hover:text-foreground"
+            aria-label="Close menu"
           >
             <X className="h-4 w-4" />
           </Button>
@@ -190,8 +190,10 @@ export function Sidebar({
           <div className="relative">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
             <Input
+              id={MOBILE_SEARCH_INPUT_ID}
               type="search"
               placeholder="Search notes..."
+              aria-label="Search notes"
               value={searchQuery}
               onChange={(e) => onSearchChange(e.target.value)}
               onKeyDown={(e) => {
@@ -223,6 +225,7 @@ export function Sidebar({
             <button
               type="button"
               onClick={onSelectAllNotes}
+              aria-current={isAllNotesSelected ? "page" : undefined}
               className={cn(
                 "w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm transition-all duration-150 font-medium",
                 isAllNotesSelected
@@ -239,15 +242,16 @@ export function Sidebar({
             <button
               type="button"
               onClick={onSelectTrash}
+              aria-current={isTrashSelected ? "page" : undefined}
               className={cn(
                 "w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm transition-all duration-150 font-medium",
                 isTrashSelected
-                  ? "bg-sidebar-accent text-destructive"
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
                   : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
               )}
             >
               <div className="flex items-center gap-2">
-                <Trash2 className="h-4 w-4" />
+                <Trash2 className={cn("h-4 w-4", isTrashSelected && "text-destructive")} />
                 <span>Trash</span>
               </div>
             </button>
@@ -255,7 +259,7 @@ export function Sidebar({
 
           {/* Notebooks Section */}
           <div className="space-y-1.5">
-            <div className="flex items-center justify-between px-2 text-[11px] font-semibold text-muted-foreground/80 uppercase tracking-wider">
+            <div className="flex items-center justify-between px-2 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
               <span className="flex items-center gap-1.5">
                 <FolderTree className="h-3 w-3" />
                 Notebooks
@@ -277,6 +281,13 @@ export function Sidebar({
                 <Skeleton className="h-4 w-5/6" />
                 <Skeleton className="h-4 w-2/3" />
               </div>
+            ) : notebooksQuery.isError && !notebooks ? (
+              <QueryError
+                compact
+                message="Couldn't load notebooks"
+                onRetry={() => void notebooksQuery.refetch()}
+                isRetrying={notebooksQuery.isFetching}
+              />
             ) : (
               <NotebookTree
                 notebooks={notebooks || []}
@@ -289,7 +300,7 @@ export function Sidebar({
 
           {/* Tags Section */}
           <div className="space-y-1.5 pt-2">
-            <div className="flex items-center justify-between px-2 text-[11px] font-semibold text-muted-foreground/80 uppercase tracking-wider">
+            <div className="flex items-center justify-between px-2 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
               <span className="flex items-center gap-1.5">
                 <Hash className="h-3 w-3" />
                 Tags
@@ -306,8 +317,15 @@ export function Sidebar({
                 <Skeleton className="h-4 w-1/2" />
                 <Skeleton className="h-4 w-2/3" />
               </div>
+            ) : tagsQuery.isError && !tags ? (
+              <QueryError
+                compact
+                message="Couldn't load tags"
+                onRetry={() => void tagsQuery.refetch()}
+                isRetrying={tagsQuery.isFetching}
+              />
             ) : !tags || tags.length === 0 ? (
-              <div className="px-2 py-1 text-xs text-muted-foreground/60 italic">
+              <div className="px-2 py-1 text-xs text-muted-foreground italic">
                 No tags
               </div>
             ) : (
