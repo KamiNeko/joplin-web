@@ -5,9 +5,11 @@ import { after, before, describe, test } from 'node:test';
 import {
   startMockJoplinServer,
   syncTargetInfoItem,
+  type MockItem,
   type MockJoplinServer,
 } from '../demo/mock-joplin-server.js';
 import { buildDemoItems, DEMO_EMAIL, DEMO_PASSWORD, demoId } from '../demo/seed.js';
+import type { joplinApi as JoplinApi } from '../src/services/joplin-api.js';
 import { deserialize, serialize } from '../src/services/serializer.js';
 import { JoplinItemType } from '../src/types/index.js';
 
@@ -32,6 +34,8 @@ let mock: MockJoplinServer;
 let server: Server;
 let baseUrl: string;
 let session: string;
+/** The backend's Joplin Server client, patched by some tests to observe or delay requests */
+let joplinApi: typeof JoplinApi;
 
 async function api(path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
@@ -52,6 +56,24 @@ const json = (method: string, body?: unknown): RequestInit => ({
   method,
   body: body === undefined ? undefined : JSON.stringify(body),
 });
+
+/**
+ * Runs `fn` with another info.json on the mock (null: none), then restores the seeded one.
+ * The cache is refreshed around it, so the writer sees the new info.json `updated_time`.
+ */
+async function withSyncInfo(item: MockItem | null, fn: () => Promise<void>): Promise<void> {
+  const seeded = mock.items.get('info.json');
+  assert.ok(seeded, 'the seed has an info.json');
+  if (item) mock.items.set('info.json', item);
+  else mock.items.delete('info.json');
+  try {
+    await refresh();
+    await fn();
+  } finally {
+    mock.items.set('info.json', seeded);
+    await refresh();
+  }
+}
 
 const refresh = async () => assert.equal((await api('/api/notebooks/refresh', { method: 'POST' })).status, 200);
 
@@ -129,6 +151,8 @@ before(async () => {
   process.env.CACHE_TTL_MS = '600000';
   baseUrl = `http://127.0.0.1:${port}`;
   ({ server } = await import('../src/index.js'));
+  // Loaded after the environment is set, like the app itself
+  ({ joplinApi } = await import('../src/services/joplin-api.js'));
   if (!server.listening) await new Promise((resolve) => server.once('listening', resolve));
 
   const login = await api('/api/auth/login', json('POST', { email: DEMO_EMAIL, password: DEMO_PASSWORD }));
@@ -347,8 +371,7 @@ describe('end-to-end encrypted accounts (#48)', () => {
   test('refuses every write while info.json says E2EE is enabled', async () => {
     const nb = await createNotebook('Before E2EE');
     const note = await createNote(nb, 'before e2ee');
-    mock.items.set('info.json', syncTargetInfoItem(true));
-    try {
+    await withSyncInfo(syncTargetInfoItem(true), async () => {
       const before = snapshot();
       const attempts = [
         await api('/api/notes', json('POST', { title: 'plain', body: 'leak', parentId: nb })),
@@ -367,29 +390,22 @@ describe('end-to-end encrypted accounts (#48)', () => {
       assert.deepEqual(snapshot(), before, 'nothing was written');
       // Reading still works
       assert.equal((await api(`/api/notes/${note}`)).status, 200);
-    } finally {
-      mock.items.delete('info.json');
-    }
+    });
   });
 
   test('allows writes when info.json says E2EE is disabled', async () => {
-    mock.items.set('info.json', syncTargetInfoItem(false));
-    try {
+    await withSyncInfo(syncTargetInfoItem(false), async () => {
       const nb = await createNotebook('E2EE off');
       await createNote(nb, 'fine');
-    } finally {
-      mock.items.delete('info.json');
-    }
+    });
   });
 
   test('fails closed when info.json cannot be parsed', async () => {
-    mock.items.set('info.json', { content: Buffer.from('{not json'), contentType: 'application/json', updatedTime: ++clock });
-    try {
+    const broken = { content: Buffer.from('{not json'), contentType: 'application/json', updatedTime: ++clock };
+    await withSyncInfo(broken, async () => {
       const res = await api('/api/notebooks', json('POST', { title: 'unknown state' }));
       assert.equal(res.status, 422);
-    } finally {
-      mock.items.delete('info.json');
-    }
+    });
   });
 
   test('refuses to create a note in an encrypted notebook', async () => {
@@ -520,5 +536,230 @@ describe('write rules (#30)', () => {
     const nb = await createNotebook('Trashed on desktop');
     editOnServer(nb, { deleted_time: String(Date.now()) });
     assert.equal((await api('/api/notes', json('POST', { title: 'x', parentId: nb }))).status, 404);
+  });
+
+  test('a conflict answers 409 with the server version; force and a missing baseUpdatedTime override it', async () => {
+    const res = await api('/api/notes', json('POST', { title: 'conflict', body: 'mine v1', parentId: demoId('nb-reading') }));
+    assert.equal(res.status, 201);
+    const { id, updatedTime } = res.data as { id: string; updatedTime: number };
+    const desktop = itemOf(id);
+    putItem(JoplinItemType.Note, id, desktop.title, 'from desktop', {
+      ...desktop.properties,
+      updated_time: new Date(updatedTime + 5000).toISOString(),
+    });
+
+    const conflict = await api(`/api/notes/${id}`, json('PUT', { body: 'mine v2', baseUpdatedTime: updatedTime }));
+    assert.equal(conflict.status, 409);
+    assert.equal(conflict.data.details.conflict, true);
+    assert.equal(conflict.data.details.current.id, id);
+    assert.equal(conflict.data.details.current.body, 'from desktop');
+    assert.equal(conflict.data.details.current.updatedTime, updatedTime + 5000);
+    assert.equal(itemOf(id).body, 'from desktop', 'the refused write changed nothing');
+
+    const forced = await api(`/api/notes/${id}`, json('PUT', { body: 'mine v2', baseUpdatedTime: updatedTime, force: true }));
+    assert.equal(forced.status, 200);
+    assert.equal(itemOf(id).body, 'mine v2');
+
+    editOnServer(id, { updated_time: new Date(Date.now() + 10_000).toISOString() });
+    const unchecked = await api(`/api/notes/${id}`, json('PUT', { body: 'mine v3' }));
+    assert.equal(unchecked.status, 200, 'without baseUpdatedTime there is no conflict check');
+    assert.equal(itemOf(id).body, 'mine v3');
+  });
+
+  test('to-dos: isTodo on create, todoCompleted sets and clears todo_completed', async () => {
+    const res = await api('/api/notes', json('POST', { title: 'buy milk', parentId: demoId('nb-reading'), isTodo: true }));
+    assert.equal(res.status, 201);
+    const id = res.data.id as string;
+    assert.equal(res.data.isTodo, true);
+    assert.equal(itemOf(id).properties.is_todo, '1');
+    assert.equal(itemOf(id).properties.todo_completed, '0');
+
+    const done = await api(`/api/notes/${id}`, json('PUT', { todoCompleted: true }));
+    assert.equal(done.status, 200);
+    assert.equal(done.data.todoCompleted, true);
+    assert.ok(Number(itemOf(id).properties.todo_completed) > 0);
+    assert.equal(itemOf(id).properties.is_todo, '1');
+
+    const undone = await api(`/api/notes/${id}`, json('PUT', { todoCompleted: false }));
+    assert.equal(undone.status, 200);
+    assert.equal(undone.data.todoCompleted, false);
+    assert.equal(itemOf(id).properties.todo_completed, '0');
+
+    const plain = await api('/api/notes', json('POST', { title: 'plain', parentId: demoId('nb-reading') }));
+    assert.equal(itemOf(plain.data.id).properties.is_todo, '0');
+  });
+});
+
+describe('Joplin Server error mapping (#30)', () => {
+  test('a session revoked on Joplin Server answers 401 and stays rejected', async () => {
+    const main = session;
+    const login = await api('/api/auth/login', json('POST', { email: DEMO_EMAIL, password: DEMO_PASSWORD }));
+    assert.equal(login.status, 200);
+    const revoked = login.data.sessionId as string;
+    await fetch(`${mock.url}/logout`, { method: 'POST', headers: { 'X-API-AUTH': revoked }, redirect: 'manual' });
+    session = revoked;
+    try {
+      // Still accepted by the auth validation cache, so Joplin Server's 403 comes mid-request
+      assert.equal((await api(`/api/notes/${demoId('note-tram')}`)).status, 401);
+      assert.equal((await api('/api/notebooks')).status, 401);
+    } finally {
+      session = main;
+    }
+    assert.equal((await api('/api/notebooks')).status, 200, 'other sessions are unaffected');
+  });
+
+  test('a 403 for a still valid session stays 403', async () => {
+    const note = await createNote(demoId('nb-reading'), 'forbidden');
+    mock.failNextItemRequests(403);
+    assert.equal((await api(`/api/notes/${note}`, json('PUT', { body: 'x' }))).status, 403);
+    assert.equal((await api('/api/notebooks')).status, 200, 'the session is still accepted');
+  });
+
+  test('a Joplin Server 500 answers 500 without internal details', async () => {
+    const note = await createNote(demoId('nb-reading'), 'server error');
+    mock.failNextItemRequests(500);
+    const res = await api(`/api/notes/${note}`, json('PUT', { body: 'x' }));
+    assert.equal(res.status, 500);
+    assert.equal(res.data.error, 'The request to Joplin Server failed');
+    assert.doesNotMatch(JSON.stringify(res.data), /Injected|127\.0\.0\.1|info\.json|stack/i);
+  });
+});
+
+describe('write path follow-ups (#61)', () => {
+  test('info.json is not re-read while its updated_time is unchanged', async () => {
+    const note = await createNote(demoId('nb-reading'), 'autosave');
+    const original = joplinApi.getSyncTargetInfo;
+    let reads = 0;
+    joplinApi.getSyncTargetInfo = async (sessionId: string) => {
+      reads++;
+      return original.call(joplinApi, sessionId);
+    };
+    try {
+      for (const body of ['a', 'b', 'c']) {
+        assert.equal((await api(`/api/notes/${note}`, json('PUT', { body }))).status, 200);
+      }
+      assert.equal(reads, 0, 'the earlier check is reused');
+
+      await withSyncInfo(syncTargetInfoItem(false, ++clock), async () => {
+        assert.equal((await api(`/api/notes/${note}`, json('PUT', { body: 'd' }))).status, 200);
+        assert.equal((await api(`/api/notes/${note}`, json('PUT', { body: 'e' }))).status, 200);
+      });
+      assert.equal(reads, 1, 'a changed info.json is read again');
+
+      // E2EE switched on elsewhere: once a refresh sees the new info.json, writes stop
+      await withSyncInfo(syncTargetInfoItem(true, ++clock), async () => {
+        assert.equal((await api(`/api/notes/${note}`, json('PUT', { body: 'leak' }))).status, 422);
+      });
+    } finally {
+      joplinApi.getSyncTargetInfo = original;
+    }
+  });
+
+  test('without info.json, master keys or encrypted items make the account read-only', async () => {
+    // Remove the encrypted items earlier tests stored, so the account starts clean
+    for (const [name, item] of [...mock.items]) {
+      if (name.endsWith('.md') && /^encryption_applied: 1$/m.test(item.content.toString('utf8'))) mock.items.delete(name);
+    }
+    const note = await createNote(demoId('nb-reading'), 'no info.json');
+    const masterKey = hexId('master-key');
+    const encrypted = hexId('encrypted-without-info');
+
+    await withSyncInfo(null, async () => {
+      assert.equal((await api(`/api/notes/${note}`, json('PUT', { body: 'plain account' }))).status, 200);
+
+      putItem(JoplinItemType.MasterKey, masterKey, '', '', {
+        created_time: '2026-01-01T00:00:00.000Z',
+        updated_time: '2026-01-01T00:00:00.000Z',
+        source_application: 'net.cozic.joplin-desktop',
+        encryption_method: '8',
+        checksum: '',
+        content: '{"iv":"x","ct":"y"}',
+        has_been_used: '1',
+      });
+      await refresh();
+      let before = snapshot();
+      const res = await api(`/api/notes/${note}`, json('PUT', { body: 'leak' }));
+      assert.equal(res.status, 422);
+      assert.match(res.data.error, /end-to-end encrypted/);
+      assert.deepEqual(snapshot(), before);
+
+      mock.items.delete(`${masterKey}.md`);
+      putItem(JoplinItemType.Note, encrypted, '', '', { parent_id: demoId('nb-reading'), deleted_time: '0', ...ENCRYPTED });
+      await refresh();
+      before = snapshot();
+      assert.equal((await api('/api/notebooks', json('POST', { title: 'leak' }))).status, 422);
+      assert.deepEqual(snapshot(), before);
+
+      mock.items.delete(`${encrypted}.md`);
+      await refresh();
+      assert.equal((await api(`/api/notes/${note}`, json('PUT', { body: 'clean again' }))).status, 200);
+    });
+  });
+
+  test('trashing a large notebook reads its items in parallel, at most 10 at a time', async () => {
+    const nb = await createNotebook('Large');
+    const sub = await createNotebook('Large child', nb);
+    for (let i = 0; i < 24; i++) await createNote(i % 2 ? nb : sub, `bulk ${i}`);
+
+    const original = joplinApi.getItemContent;
+    let inFlight = 0;
+    let maxInFlight = 0;
+    joplinApi.getItemContent = async (sessionId: string, name: string) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return await original.call(joplinApi, sessionId, name);
+      } finally {
+        inFlight--;
+      }
+    };
+    try {
+      const res = await api(`/api/notebooks/${nb}`, { method: 'DELETE' });
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.data, { notebooks: 2, notes: 24 });
+    } finally {
+      joplinApi.getItemContent = original;
+    }
+    assert.ok(maxInFlight > 1, `reads overlap (max ${maxInFlight})`);
+    assert.ok(maxInFlight <= 10, `at most 10 parallel reads (max ${maxInFlight})`);
+  });
+
+  test('a refresh that fetched an item before a local write does not overwrite it', async () => {
+    const note = await createNote(demoId('nb-reading'), 'race', 'v1');
+    // Another client's edit, so the next refresh re-reads the note
+    putRaw(note, serialize({ ...itemOf(note), body: 'v2 from desktop' }));
+
+    const original = joplinApi.getItemContent;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let reached!: () => void;
+    const fetched = new Promise<void>((resolve) => (reached = resolve));
+    let armed = true;
+    joplinApi.getItemContent = async (sessionId: string, name: string) => {
+      const content = await original.call(joplinApi, sessionId, name);
+      if (armed && name === `${note}.md`) {
+        armed = false;
+        reached();
+        await gate;
+      }
+      return content;
+    };
+    let pending: Promise<unknown> | undefined;
+    try {
+      pending = api('/api/notebooks/refresh', { method: 'POST' });
+      await fetched; // the refresh now holds "v2 from desktop"
+      const write = await api(`/api/notes/${note}`, json('PUT', { body: 'v3 from web' }));
+      assert.equal(write.status, 200);
+    } finally {
+      release();
+      joplinApi.getItemContent = original;
+      await pending;
+    }
+
+    const read = await api(`/api/notes/${note}`);
+    assert.equal(read.data.body, 'v3 from web');
+    const saved = await api(`/api/notes/${note}`, json('PUT', { body: 'v4', baseUpdatedTime: read.data.updatedTime }));
+    assert.equal(saved.status, 200, 'no false conflict on the next autosave');
   });
 });
