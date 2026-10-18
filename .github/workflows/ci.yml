@@ -35,7 +35,7 @@ jobs:
       - run: npm test
 
   client:
-    name: Client (lint + build)
+    name: Client (lint + tests + build)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -53,6 +53,7 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
       - run: npm run lint
+      - run: npm test
       - run: npm run build
 
   docker:

@@ -6,7 +6,7 @@ Read [docs/architecture.md](docs/architecture.md) before touching the sync proto
 
 ## Layout
 
-- `client/`: React 18 + Vite + TypeScript, Tailwind, shadcn/ui (`src/components/ui/` is generated), TanStack Query, CodeMirror 6. Import alias `@/` → `client/src/`.
+- `client/`: React 18 + Vite + TypeScript, Tailwind, shadcn/ui (`src/components/ui/` is generated), TanStack Query, CodeMirror 6. Import alias `@/` → `client/src/`. Tests sit next to the code as `*.test.ts(x)` (Vitest + Testing Library, jsdom; config in `vitest.config.ts`).
 - `server/`: Express + TypeScript (ESM, `NodeNext`: relative imports need the `.js` suffix).
   - `src/services/`: `joplin-api` (HTTP client), `serializer` (Joplin text format), `note-cache` (reads), `note-writer` (writes).
   - `demo/`: in-memory **mock Joplin Server** + seed data (`demoId(key)` gives stable ids). Used by demo mode, tests and screenshots.
@@ -23,6 +23,7 @@ npm --prefix server run demo        # mock Joplin Server :22300 + API (PORT, def
 npm --prefix server run dev         # API against JOPLIN_SERVER_URL from server/.env
 npm --prefix client run lint
 npm --prefix client run build       # tsc -b + vite build
+npm --prefix client test            # Vitest + Testing Library (jsdom), offline
 npm --prefix client run dev         # Vite :5173, proxies /api to API_PROXY_TARGET (default :3001)
 npm --prefix client run screenshots # README screenshots into docs/images (demo must run; SCREENSHOT_BASE_URL)
 ```
@@ -42,7 +43,7 @@ Browser preview: `.claude/launch.json` has `demo-server` (API :3101) and `demo-c
 ## Definition of done
 
 1. `npm --prefix server run typecheck && npm --prefix server test`
-2. `npm --prefix client run lint && npm --prefix client run build` (warnings OK, no errors)
+2. `npm --prefix client run lint && npm --prefix client run build && npm --prefix client test` (warnings OK, no errors)
 3. UI changes: check in the browser preview against the demo, in light + dark and at phone width (~390px).
 4. Docs updated as described above.
 
@@ -69,5 +70,5 @@ Agents that edit code must still meet the definition of done. Agents report prob
 
 ## Known gaps
 
-- No client-side tests yet (candidate: Vitest + Testing Library; Playwright is already a dev dependency for screenshots).
+- Client tests cover only `lib/tasks`, `lib/version` and `NoteListItem` so far; TanStack Query hooks (query keys, invalidation), the 409 conflict UI, auth redirects and Markdown link rewriting are still untested. No e2e tests yet (Playwright is already a dev dependency for screenshots).
 - E2EE items are not supported; changes made by Joplin Web are not yet verified end-to-end with desktop/mobile sync.
