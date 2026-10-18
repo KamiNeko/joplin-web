@@ -25,13 +25,14 @@ In production the backend also serves the compiled client (`client/dist`) on the
 | `services/serializer.ts` | `deserialize` / `serialize` Joplin's text format, `stripMarkdown` for list previews. |
 | `services/note-cache.ts` | Per-session in-memory cache of all items, refreshed after `CACHE_TTL_MS`; only items whose `updated_time` changed are re-fetched. Builds the notebook tree, note lists, tag counts and search. |
 | `services/note-writer.ts` | All writes: create/update/trash/restore/purge for notes, notebooks, tags, note-tag links and resources; conflict detection. |
+| `services/item-defaults.ts` | Property sets Joplin desktop writes for new notes, notebooks, tags, note-tag links and resources; used by the writer on create. |
 | `app.ts` | `createApp(config)`: helmet/CSP, CORS, rate limits, origin check, routers, static client. `index.ts` only starts it. |
 | `middleware/auth.ts` | Accepts the session as `Authorization: Bearer` / `X-API-AUTH` (API clients) or the httpOnly `joplin_web_session` cookie (browser); never in the query string, which would leak into logs and referrers. Validates it against Joplin Server and caches the result for `AUTH_CACHE_TTL_MS`; logged-out sessions are cached as invalid. |
 | `middleware/origin-check.ts` | CSRF protection for POST/PUT/DELETE: the `Origin` header must match the request's `Host`/`X-Forwarded-Host`, `PUBLIC_URL` or `CORS_ORIGIN`. Requests without `Origin` (non-browser clients) pass only when they don't use the cookie. |
 | `middleware/request-logger.ts` | morgan access log with sensitive query parameters (`auth`, `token`, `password`, …) redacted. |
 | `middleware/error-handler.ts` | Maps errors to JSON responses; 5xx responses carry a generic message only (details are logged). |
 | `config.ts` | Reads the environment (`JOPLIN_SERVER_URL`, `PUBLIC_URL`, `TRUST_PROXY`, `ALLOW_REMOTE_IMAGES`, `COOKIE_SECURE`, …); exits at startup on invalid values or when `JOPLIN_SERVER_URL` is missing. There is no default server. |
-| `routes/*.ts` | Thin Express routers per resource. |
+| `routes/*.ts` | Thin Express 5 routers per resource. Handlers are plain `async` functions: Express 5 forwards rejected promises to the error handler, so they have no try/catch. |
 
 ## Joplin sync protocol
 
