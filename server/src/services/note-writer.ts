@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { JoplinApiError, JoplinNotFoundError, joplinApi } from './joplin-api.js';
-import { noteCache } from './note-cache.js';
+import { isConflictNote, noteCache } from './note-cache.js';
 import { deserialize, serialize } from './serializer.js';
 import { trashedTogether } from './trash.js';
 import {
@@ -283,9 +283,16 @@ export class NoteWriterService {
     }
 
     const props = { ...current.properties };
-    if (changes.parentId !== undefined && changes.parentId !== current.parentId) {
+    // Like Joplin's Note.moveToFolder: a conflict copy moved to a notebook (its own one too)
+    // becomes a regular note there
+    const conflictMoved = changes.parentId !== undefined && isConflictNote(current);
+    if (changes.parentId !== undefined && (changes.parentId !== current.parentId || conflictMoved)) {
       await this.assertActiveNotebook(sessionId, changes.parentId);
       props.parent_id = changes.parentId;
+      if (conflictMoved) {
+        props.is_conflict = '0';
+        props.conflict_original_id = '';
+      }
     }
     if (changes.todoCompleted !== undefined) {
       props.todo_completed = changes.todoCompleted ? String(Date.now()) : '0';
@@ -312,7 +319,10 @@ export class NoteWriterService {
     await this.write(sessionId, { type_: JoplinItemType.Note, title: current.title, body: current.body, properties: props });
   }
 
-  /** Restores a note from the trash, including any trashed parent notebooks */
+  /**
+   * Restores a note from the trash, including any trashed parent notebooks. A conflict copy only
+   * gets its own `deleted_time` cleared: it goes back to "Conflicts", which ignores the notebook.
+   */
   public async restoreNote(sessionId: string, id: string): Promise<NoteDetail> {
     assertValidId(id, 'note id');
     await this.assertWritable(sessionId);
@@ -321,7 +331,8 @@ export class NoteWriterService {
     // Read the whole notebook chain first, so an encrypted ancestor stops the restore
     // before anything is written
     const trashedAncestors: RawJoplinItem[] = [];
-    for (const folder of await this.freshAncestors(sessionId, current.parentId)) {
+    const ancestors = isConflictNote(current) ? [] : await this.freshAncestors(sessionId, current.parentId);
+    for (const folder of ancestors) {
       if (folder.deletedTime > 0) {
         assertNotEncrypted(folder);
         trashedAncestors.push(folder);
@@ -345,7 +356,8 @@ export class NoteWriterService {
    * Permanently deletes a note and its note-tag links from Joplin Server. Like Joplin's
    * "Delete permanently", this only applies to notes in the trash: the note itself is trashed
    * or one of its notebooks is. The note is re-read first, so other item types, encrypted
-   * notes and notes restored or moved elsewhere by another client are refused.
+   * notes and notes restored or moved elsewhere by another client are refused. A conflict copy
+   * must be trashed itself: in a trashed notebook it is still listed in "Conflicts", not the trash.
    */
   public async purgeNote(sessionId: string, id: string): Promise<void> {
     assertValidId(id, 'note id');
@@ -360,7 +372,7 @@ export class NoteWriterService {
     assertNotEncrypted(current);
 
     if (!(current.deletedTime > 0)) {
-      const ancestors = await this.freshAncestors(sessionId, current.parentId);
+      const ancestors = isConflictNote(current) ? [] : await this.freshAncestors(sessionId, current.parentId);
       if (!ancestors.some((folder) => folder.deletedTime > 0)) {
         throw new WriteValidationError('Only notes in the trash can be deleted permanently', 409);
       }
@@ -513,13 +525,15 @@ export class NoteWriterService {
   /**
    * Moves a notebook, its sub-notebooks and all their notes to the trash,
    * matching Joplin desktop's trash behaviour. All items are checked before the first write.
+   * Conflict copies are left alone, as Joplin's `Folder.batchDelete` does (`Folder.noteIds`
+   * excludes them): they stay in "Conflicts".
    */
   public async trashNotebook(sessionId: string, id: string): Promise<{ notebooks: number; notes: number }> {
     assertValidId(id, 'notebook id');
     await this.assertWritable(sessionId);
     const root = await this.fetchFreshOfType(sessionId, id, JoplinItemType.Folder);
     const { folders, notes } = await this.freshSubtree(sessionId, root);
-    const activeNotes = notes.filter((note) => !(note.deletedTime > 0));
+    const activeNotes = notes.filter((note) => !(note.deletedTime > 0) && !isConflictNote(note));
 
     const deletedTime = String(Date.now());
     const trash = async (item: RawJoplinItem) => {
@@ -540,6 +554,8 @@ export class NoteWriterService {
    * Permanently deletes a trashed notebook with its sub-notebooks and their notes.
    * Only notebooks that are already in the trash can be purged. The cache is refreshed and
    * every item re-read first, so notes restored or moved out by another client survive.
+   * Conflict copies that are not trashed themselves survive too (like Joplin desktop, which
+   * skips them when deleting a folder); they stay in "Conflicts".
    */
   public async purgeNotebook(sessionId: string, id: string): Promise<{ notebooks: number; notes: number }> {
     assertValidId(id, 'notebook id');
@@ -551,13 +567,14 @@ export class NoteWriterService {
     // Pick up notes moved into or out of the notebook elsewhere since the last refresh
     await noteCache.refreshCache(sessionId);
     const { folders, notes } = await this.freshSubtree(sessionId, root);
+    const purged = notes.filter((note) => note.deletedTime > 0 || !isConflictNote(note));
 
-    for (const note of notes) await this.deleteNoteAndLinks(sessionId, note.id);
+    for (const note of purged) await this.deleteNoteAndLinks(sessionId, note.id);
     for (const folder of [...folders].reverse()) {
       await joplinApi.deleteItem(sessionId, `${folder.id}.md`);
       noteCache.removeItem(sessionId, folder.id);
     }
-    return { notebooks: folders.length, notes: notes.length };
+    return { notebooks: folders.length, notes: purged.length };
   }
 
   /**
@@ -663,7 +680,8 @@ export class NoteWriterService {
     const note = await this.fetchFreshOfType(sessionId, noteId, JoplinItemType.Note);
     // Like creating a note in a trashed notebook: a note in the trash cannot be tagged
     const inTrash =
-      note.deletedTime > 0 || (await this.freshAncestors(sessionId, note.parentId)).some((f) => f.deletedTime > 0);
+      note.deletedTime > 0 ||
+      (!isConflictNote(note) && (await this.freshAncestors(sessionId, note.parentId)).some((f) => f.deletedTime > 0));
     if (inTrash) throw new WriteValidationError(`Note not found: ${noteId}`, 404);
 
     const entry = await noteCache.getEntry(sessionId);

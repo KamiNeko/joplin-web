@@ -76,6 +76,15 @@ describe('reading', () => {
     assert.deepEqual(res.data.map((n: any) => n.title), ['Old draft: landing page copy']);
   });
 
+  test('lists conflict copies only in the conflicts list', async () => {
+    const res = await api('/api/notes?is_conflict=true');
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.data.map((n: any) => n.id), [demoId('note-roadmap-conflict')]);
+    assert.equal(res.data[0].isConflict, true);
+    const all = await api('/api/notes');
+    assert.ok(!all.data.some((n: any) => n.id === demoId('note-roadmap-conflict')));
+  });
+
   test('returns note details with tags', async () => {
     const res = await api(`/api/notes/${demoId('note-roadmap')}`);
     assert.equal(res.status, 200);

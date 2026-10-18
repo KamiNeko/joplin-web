@@ -117,6 +117,22 @@ export function App() {
                   }
                 />
                 <Route
+                  path="/conflicts"
+                  element={
+                    <ProtectedRoute>
+                      <NotesPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/conflicts/:id"
+                  element={
+                    <ProtectedRoute>
+                      <NotesPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
                   path="/trash"
                   element={
                     <ProtectedRoute>

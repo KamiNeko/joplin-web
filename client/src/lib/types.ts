@@ -39,6 +39,8 @@ export interface NoteListItem {
   parentId?: string;
   isTodo?: boolean;
   todoCompleted?: boolean;
+  /** A conflict copy Joplin kept after a sync conflict (listed only under Conflicts) */
+  isConflict?: boolean;
 }
 
 /**
@@ -59,6 +61,10 @@ export interface Note {
   tags: Tag[];
   isTodo: boolean;
   todoCompleted: boolean;
+  /** A conflict copy Joplin kept after a sync conflict (`is_conflict: 1`) */
+  isConflict?: boolean;
+  /** Id of the note the conflict copy was made from, empty when unknown */
+  conflictOriginalId?: string;
 }
 
 /**

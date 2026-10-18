@@ -21,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import {
   BookOpen,
   Files,
+  GitCompareArrows,
   Hash,
   Search,
   Trash2,
@@ -40,8 +41,12 @@ interface SidebarProps {
   selectedTagId?: string | null;
   isAllNotesSelected?: boolean;
   isTrashSelected?: boolean;
+  isConflictsSelected?: boolean;
+  /** Conflict copies Joplin kept after sync conflicts; the Conflicts entry shows only when there are any */
+  conflictCount?: number;
   onSelectAllNotes: () => void;
   onSelectTrash: () => void;
+  onSelectConflicts?: () => void;
   onSelectNotebook: (id: string) => void;
   onSelectTag: (id: string) => void;
   searchQuery: string;
@@ -55,8 +60,11 @@ export function Sidebar({
   selectedTagId,
   isAllNotesSelected,
   isTrashSelected,
+  isConflictsSelected,
+  conflictCount = 0,
   onSelectAllNotes,
   onSelectTrash,
+  onSelectConflicts,
   onSelectNotebook,
   onSelectTag,
   searchQuery,
@@ -272,6 +280,34 @@ export function Sidebar({
                 <span>All Notes</span>
               </div>
             </button>
+
+            {/* Like Joplin desktop's Conflicts folder: only there while there are conflicts (or it is open) */}
+            {onSelectConflicts && (conflictCount > 0 || isConflictsSelected) && (
+              <button
+                type="button"
+                onClick={onSelectConflicts}
+                aria-current={isConflictsSelected ? "page" : undefined}
+                className={cn(
+                  "w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm transition-all duration-150 font-medium",
+                  isConflictsSelected
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
+                )}
+              >
+                <div className="flex items-center gap-2">
+                  <GitCompareArrows className="h-4 w-4 text-warning" />
+                  <span>Conflicts</span>
+                </div>
+                {conflictCount > 0 && (
+                  <span
+                    className="text-[10px] font-mono text-warning"
+                    aria-label={`${conflictCount} conflict${conflictCount === 1 ? "" : "s"}`}
+                  >
+                    {conflictCount}
+                  </span>
+                )}
+              </button>
+            )}
 
             <button
               type="button"

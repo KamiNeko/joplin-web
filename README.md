@@ -52,6 +52,7 @@ In short: choose Joplin Web if you want quick, install-free access to your notes
 | 🔎 **Search** | Instant full-text search across titles and content (`Ctrl+K`). |
 | 🗑️ **Trash** | Deleted notes and notebooks go to Joplin's trash, where you can restore them or delete them permanently. |
 | ⚔️ **Conflict detection** | If a note was changed elsewhere while you edited it, you choose which version to keep. |
+| 🔀 **Sync conflicts** | Conflict copies that Joplin desktop or mobile keep after a sync conflict are listed under *Conflicts* (only when there are any), not as duplicates in your notebooks, tags or search. Compare a copy with the original, then trash it or move it to a notebook to keep it. |
 | 🔄 **Refresh & connection status** | Changes from other devices load when you return to the tab or click *Refresh*. The sidebar shows whether the server is reachable and when data was last updated. |
 | 🛟 **No lost typing** | Unsaved text is kept on the device while offline or after the session expires, saves retry when the connection returns, and you can restore a draft later. |
 | 🌗 **Light & dark mode** | Switch themes with one click. |

@@ -84,6 +84,8 @@ export interface NoteListItem {
   isTodo: boolean;
   todoCompleted: boolean;
   todoDue: number;
+  /** A conflict copy (`is_conflict: 1`) Joplin kept after a sync conflict */
+  isConflict: boolean;
 }
 
 /**
@@ -106,6 +108,10 @@ export interface NoteDetail {
   isTodo: boolean;
   todoCompleted: boolean;
   todoDue: number;
+  /** A conflict copy (`is_conflict: 1`) Joplin kept after a sync conflict */
+  isConflict: boolean;
+  /** Id of the note the conflict copy was made from (`conflict_original_id`), '' if unknown */
+  conflictOriginalId: string;
   properties: Record<string, string>;
 }
 

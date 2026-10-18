@@ -266,6 +266,8 @@ export async function getNotes(params?: {
   notebookId?: string;
   tagId?: string;
   isTrash?: boolean;
+  /** Only conflict copies (Joplin's "Conflicts" folder); the other filters are ignored then */
+  isConflict?: boolean;
 }): Promise<NoteListItem[]> {
   const query = new URLSearchParams();
   if (params?.notebookId) {
@@ -276,6 +278,9 @@ export async function getNotes(params?: {
   }
   if (params?.isTrash) {
     query.set("is_trash", "true");
+  }
+  if (params?.isConflict) {
+    query.set("is_conflict", "true");
   }
 
   const endpoint = `/api/notes${query.toString() ? `?${query.toString()}` : ""}`;
