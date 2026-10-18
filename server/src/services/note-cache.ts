@@ -1,6 +1,7 @@
 import { config } from '../config.js';
 import { joplinApi } from './joplin-api.js';
 import { deserialize, stripMarkdown } from './serializer.js';
+import { trashedTogether } from './trash.js';
 import {
   JoplinItemType,
   Notebook,
@@ -11,6 +12,7 @@ import {
   ResourceMetadata,
   SearchResult,
   TagItem,
+  TrashedNotebook,
 } from '../types/index.js';
 
 /**
@@ -375,6 +377,64 @@ export class NoteCacheService {
 
     sortNodes(rootNodes);
     return rootNodes;
+  }
+
+  /**
+   * Lists the trashed notebooks a user can restore or purge: those whose parent is not trashed
+   * (sub-notebooks trashed with a notebook come back with it). Newest deletion first.
+   */
+  public async getTrashedNotebooks(sessionId: string): Promise<TrashedNotebook[]> {
+    const entry = await this.ensureFresh(sessionId);
+    const isTrashed = (id: string) => (entry.notebooks.get(id)?.deletedTime ?? 0) > 0;
+
+    const childrenOf = new Map<string, RawJoplinItem[]>();
+    for (const nb of entry.notebooks.values()) {
+      const siblings = childrenOf.get(nb.parentId) ?? [];
+      siblings.push(nb);
+      childrenOf.set(nb.parentId, siblings);
+    }
+    const notesPerFolder = new Map<string, RawJoplinItem[]>();
+    for (const note of entry.notes.values()) {
+      const siblings = notesPerFolder.get(note.parentId) ?? [];
+      siblings.push(note);
+      notesPerFolder.set(note.parentId, siblings);
+    }
+
+    const roots = [...entry.notebooks.values()].filter((nb) => nb.deletedTime > 0 && !isTrashed(nb.parentId));
+    return roots
+      .map((root) => {
+        // Same rule as noteWriter.restoreNotebook: what comes back on restore is counted as the
+        // notebook's contents; anything else in the subtree was trashed earlier on its own
+        const comesBack = (item: RawJoplinItem) => !(item.deletedTime > 0) || trashedTogether(item, root.deletedTime);
+        let noteCount = 0;
+        let notebookCount = 0;
+        let earlierNoteCount = 0;
+        const visited = new Set<string>();
+        const stack: Array<{ folder: RawJoplinItem; restored: boolean }> = [{ folder: root, restored: true }];
+        while (stack.length > 0) {
+          const { folder, restored } = stack.pop()!;
+          if (visited.has(folder.id)) continue;
+          visited.add(folder.id);
+          if (folder !== root && restored) notebookCount++;
+          for (const note of notesPerFolder.get(folder.id) ?? []) {
+            if (restored && comesBack(note)) noteCount++;
+            else earlierNoteCount++;
+          }
+          for (const child of childrenOf.get(folder.id) ?? []) {
+            stack.push({ folder: child, restored: restored && comesBack(child) });
+          }
+        }
+        return {
+          id: root.id,
+          title: root.title || 'Untitled Notebook',
+          parentId: root.parentId || '',
+          deletedTime: root.deletedTime,
+          noteCount,
+          notebookCount,
+          earlierNoteCount,
+        };
+      })
+      .sort((a, b) => b.deletedTime - a.deletedTime);
   }
 
   /**

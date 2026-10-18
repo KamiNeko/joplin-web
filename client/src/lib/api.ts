@@ -5,6 +5,7 @@ import {
   Tag,
   SearchResult,
   LoginResponse,
+  TrashedNotebook,
 } from "./types";
 import { changePendingWrites, recordNetworkError, recordResponse } from "./connection";
 
@@ -397,6 +398,27 @@ export async function updateNotebook(id: string, changes: { title?: string; pare
  */
 export async function deleteNotebook(id: string): Promise<void> {
   await request(`/api/notebooks/${id}`, { method: "DELETE" });
+}
+
+/**
+ * Lists trashed notebooks (the top of each trashed subtree) for the trash view.
+ */
+export async function getTrashedNotebooks(): Promise<TrashedNotebook[]> {
+  return request<TrashedNotebook[]>("/api/notebooks/trash");
+}
+
+/**
+ * Restores a trashed notebook with its sub-notebooks and notes.
+ */
+export async function restoreNotebook(id: string): Promise<void> {
+  await request(`/api/notebooks/${id}/restore`, { method: "POST" });
+}
+
+/**
+ * Permanently deletes a trashed notebook with everything in it from the server.
+ */
+export async function purgeNotebook(id: string): Promise<void> {
+  await request(`/api/notebooks/${id}?permanent=true`, { method: "DELETE" });
 }
 
 const RESOURCE_ID_IN_URL = /(?:^:\/?|\/api\/resources\/)([0-9a-fA-F]{32})(?:[?#].*)?$/;

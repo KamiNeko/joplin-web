@@ -5,7 +5,8 @@ import { Sidebar } from "@/components/layout/Sidebar";
 import { NoteList } from "@/components/notes/NoteList";
 import { NoteViewer } from "@/components/notes/NoteViewer";
 import { SearchResults } from "@/components/search/SearchResults";
-import { useNotebooks } from "@/hooks/use-notebooks";
+import { useNotebooks, useTrashedNotebooks } from "@/hooks/use-notebooks";
+import { TrashedNotebooks } from "@/components/notebooks/TrashedNotebooks";
 import { useTags } from "@/hooks/use-tags";
 import { useNotes, useNote } from "@/hooks/use-notes";
 import { useSearch } from "@/hooks/use-search";
@@ -70,6 +71,7 @@ export function NotesPage() {
 
   // TanStack queries
   const { data: notebooks } = useNotebooks();
+  const { data: trashedNotebooks } = useTrashedNotebooks(isTrashSelected);
   const { data: tags } = useTags();
   const notesQuery = useNotes(
     selectedNotebookId || undefined,
@@ -181,7 +183,9 @@ export function NotesPage() {
   const listKey = selectedNotebookId ?? (selectedTagId ? `tag:${selectedTagId}` : isTrashSelected ? "trash" : "all");
 
   const emptyState = isTrashSelected
-    ? { title: "Trash is empty", description: "Deleted notes and notebooks appear here." }
+    ? trashedNotebooks?.length
+      ? { title: "No notes in the trash", description: undefined }
+      : { title: "Trash is empty", description: "Deleted notes and notebooks appear here." }
     : selectedTagId
     ? { title: "No notes with this tag", description: "Add the tag to a note to see it here." }
     : selectedNotebookId
@@ -260,6 +264,7 @@ export function NotesPage() {
               onCreateNote={isTrashSelected ? undefined : handleCreateNote}
               isCreating={createNote.isPending}
               onToggleTodo={isTrashSelected ? undefined : handleToggleTodo}
+              renderLeading={isTrashSelected ? (filter) => <TrashedNotebooks filterText={filter} notesHeading={(notes?.length ?? 0) > 0} /> : undefined}
               subtitle={
                 isTrashSelected
                   ? "Deleted notes and notebooks"

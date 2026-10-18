@@ -96,6 +96,12 @@ async function createNotebook(title: string, parentId?: string): Promise<string>
   return res.data.id;
 }
 
+/** Rewrites an item's deleted_time on the mock, as if it had been trashed at that time */
+function setDeletedTime(id: string, deletedTime: number) {
+  const item = mockItem(mock, id)!;
+  putMockItem(mock, { ...item, properties: { ...item.properties, deleted_time: String(deletedTime) } });
+}
+
 async function createNote(title: string, parentId: string): Promise<string> {
   const res = await api('/api/notes', json('POST', { title, body: 'body', parentId }));
   assert.equal(res.status, 201, JSON.stringify(res.data));
@@ -384,6 +390,134 @@ describe('DELETE /api/notebooks/:id', () => {
     const before = mock.items.get(`${ENCRYPTED_ID}.md`)!.content.toString();
     assert.equal((await api(`/api/notebooks/${ENCRYPTED_ID}`, { method: 'DELETE' })).status, 422);
     assert.equal(mock.items.get(`${ENCRYPTED_ID}.md`)!.content.toString(), before);
+  });
+});
+
+describe('trashed notebooks: list and restore', () => {
+  let root: string;
+  let child: string;
+  let rootNote: string;
+  let childNote: string;
+  let earlierTrashedNote: string;
+
+  before(async () => {
+    root = await createNotebook('Restore me');
+    child = await createNotebook('Restore child', root);
+    rootNote = await createNote('Restore root note', root);
+    childNote = await createNote('Restore child note', child);
+    earlierTrashedNote = await createNote('Trashed before the notebook', child);
+    assert.equal((await api(`/api/notes/${earlierTrashedNote}`, { method: 'DELETE' })).status, 204);
+    setDeletedTime(earlierTrashedNote, Date.now() - HOUR);
+    assert.equal((await api('/api/notebooks/refresh', { method: 'POST' })).status, 200);
+    assert.equal((await api(`/api/notebooks/${root}`, { method: 'DELETE' })).status, 200);
+  });
+
+  test('lists only the top of each trashed subtree, with contents counts', async () => {
+    const res = await api('/api/notebooks/trash');
+    assert.equal(res.status, 200);
+    const listed = res.data.find((nb: any) => nb.id === root);
+    assert.ok(listed, 'trashed notebook listed');
+    assert.equal(listed.title, 'Restore me');
+    assert.equal(listed.parentId, '');
+    assert.ok(listed.deletedTime > 0);
+    assert.equal(listed.noteCount, 2, 'notes trashed with the notebook');
+    assert.equal(listed.notebookCount, 1);
+    assert.equal(listed.earlierNoteCount, 1, 'the note trashed on its own an hour earlier');
+    assert.ok(!res.data.some((nb: any) => nb.id === child), 'sub-notebooks are not listed separately');
+    assert.ok(!res.data.some((nb: any) => nb.id === demoId('nb-work')), 'active notebooks are not listed');
+  });
+
+  test('refuses to restore a notebook that is not in the trash', async () => {
+    const work = demoId('nb-work');
+    const before = mock.items.get(`${work}.md`)!.updatedTime;
+    assert.equal((await api(`/api/notebooks/${work}/restore`, { method: 'POST' })).status, 409);
+    assert.equal(mock.items.get(`${work}.md`)!.updatedTime, before);
+  });
+
+  test('restores the notebook with what was trashed together with it', async () => {
+    const res = await api(`/api/notebooks/${root}/restore`, { method: 'POST' });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.data, { notebooks: 2, notes: 2 });
+    for (const id of [root, child, rootNote, childNote]) {
+      assert.equal(mockItem(mock, id)!.deletedTime, 0, `${mockItem(mock, id)!.title} restored`);
+    }
+    assert.ok(mockItem(mock, earlierTrashedNote)!.deletedTime > 0, 'the earlier trashed note stays in the trash');
+    assert.equal(mockItem(mock, child)!.parentId, root, 'structure kept');
+
+    const ids = (await notebookTree()).map((nb) => nb.id);
+    assert.ok(ids.includes(root) && ids.includes(child), 'back in the tree');
+    assert.ok(!(await api('/api/notebooks/trash')).data.some((nb: any) => nb.id === root), 'gone from the trash');
+    const trashNotes = (await api('/api/notes?is_trash=true')).data.map((n: any) => n.id);
+    assert.ok(!trashNotes.includes(childNote));
+  });
+
+  test('restores a cascade trashed by Joplin desktop (children stamped just before the notebook)', async () => {
+    const t = Date.now() - 2 * HOUR;
+    const folder = (id: string, title: string, parentId: string, deletedTime: number) =>
+      putMockItem(mock, {
+        type_: JoplinItemType.Folder,
+        id,
+        title,
+        parentId,
+        createdTime: t - HOUR,
+        updatedTime: deletedTime,
+        properties: { deleted_time: String(deletedTime), encryption_applied: '0' },
+      });
+    const note = (id: string, title: string, parentId: string, deletedTime: number) =>
+      putMockItem(mock, {
+        type_: JoplinItemType.Note,
+        id,
+        title,
+        body: 'body',
+        parentId,
+        createdTime: t - HOUR,
+        updatedTime: deletedTime,
+        properties: { deleted_time: String(deletedTime), encryption_applied: '0', is_todo: '0' },
+      });
+    const [top, sub, subNote, topNote, oldNote, oldSub, oldSubNote] = [
+      'desk-top', 'desk-sub', 'desk-sub-note', 'desk-top-note', 'desk-old-note', 'desk-old-sub', 'desk-old-sub-note',
+    ].map(demoId);
+    note(topNote, 'Top note', top, t - 30);
+    note(subNote, 'Sub note', sub, t - 20);
+    folder(sub, 'Desktop sub', top, t - 10);
+    folder(top, 'Desktop top', '', t);
+    note(oldNote, 'Trashed last week', top, t - 7 * 24 * HOUR);
+    folder(oldSub, 'Sub trashed last week', top, t - 7 * 24 * HOUR);
+    note(oldSubNote, 'In the old sub', oldSub, t - 7 * 24 * HOUR);
+    assert.equal((await api('/api/notebooks/refresh', { method: 'POST' })).status, 200);
+
+    const listed = (await api('/api/notebooks/trash')).data.find((nb: any) => nb.id === top);
+    assert.deepEqual(
+      [listed.noteCount, listed.notebookCount, listed.earlierNoteCount],
+      [2, 1, 2],
+      'counts match what restore brings back'
+    );
+
+    const res = await api(`/api/notebooks/${top}/restore`, { method: 'POST' });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.data, { notebooks: 2, notes: 2 });
+    for (const id of [top, sub, subNote, topNote]) assert.equal(mockItem(mock, id)!.deletedTime, 0);
+    for (const id of [oldNote, oldSub, oldSubNote]) assert.ok(mockItem(mock, id)!.deletedTime > 0, 'stays in the trash');
+    const trash = (await api('/api/notebooks/trash')).data.map((nb: any) => nb.id);
+    assert.ok(trash.includes(oldSub), 'the older sub-notebook is now its own trash entry');
+  });
+
+  test('restores trashed parent notebooks of a restored notebook', async () => {
+    const parent = await createNotebook('Trashed parent');
+    const nested = await createNotebook('Nested', parent);
+    assert.equal((await api(`/api/notebooks/${parent}`, { method: 'DELETE' })).status, 200);
+    const res = await api(`/api/notebooks/${nested}/restore`, { method: 'POST' });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.data, { notebooks: 2, notes: 0 });
+    assert.equal(mockItem(mock, parent)!.deletedTime, 0);
+    assert.equal(mockItem(mock, nested)!.deletedTime, 0);
+  });
+
+  test('validates the notebook id and refuses encrypted notebooks', async () => {
+    assert.equal((await api('/api/notebooks/..%2Fevil/restore', { method: 'POST' })).status, 400);
+    assert.equal((await api(`/api/notebooks/${UNKNOWN_ID}/restore`, { method: 'POST' })).status, 404);
+    assert.equal((await api(`/api/notebooks/${demoId('note-roadmap')}/restore`, { method: 'POST' })).status, 404);
+    assert.equal((await api(`/api/notebooks/${ENCRYPTED_ID}/restore`, { method: 'POST' })).status, 422);
   });
 });
 

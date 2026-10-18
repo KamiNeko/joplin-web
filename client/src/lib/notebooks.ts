@@ -17,6 +17,32 @@ export function flattenNotebooks(notebooks: Notebook[] | undefined, depth = 0): 
   ]);
 }
 
+const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
+
+/**
+ * Describes what a notebook holds, e.g. "3 notes, 1 sub-notebook" or "empty". Used wherever a
+ * notebook's contents are counted (trash confirmation, trash list) so the numbers read the same.
+ */
+export function notebookContentsLabel(noteCount: number, notebookCount: number): string {
+  if (noteCount === 0 && notebookCount === 0) return "empty";
+  const parts = [plural(noteCount, "note")];
+  if (notebookCount > 0) parts.push(plural(notebookCount, "sub-notebook"));
+  return parts.join(", ");
+}
+
+/**
+ * Counts the notes and sub-notebooks (at any depth) inside a notebook of the tree.
+ */
+export function countNotebookContents(notebook: Notebook): { notes: number; notebooks: number } {
+  return (notebook.children || []).reduce(
+    (sum, child) => {
+      const inner = countNotebookContents(child);
+      return { notes: sum.notes + inner.notes, notebooks: sum.notebooks + 1 + inner.notebooks };
+    },
+    { notes: notebook.noteCount || 0, notebooks: 0 }
+  );
+}
+
 /**
  * Recursively locates a notebook by ID in the tree.
  */

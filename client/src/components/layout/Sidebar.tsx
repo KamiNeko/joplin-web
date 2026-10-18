@@ -3,6 +3,7 @@ import { useTags } from "@/hooks/use-tags";
 import { useState } from "react";
 import { toast } from "sonner";
 import { NotebookTree, NotebookAction } from "@/components/notebooks/NotebookTree";
+import { MoveNotebookDialog } from "@/components/notebooks/MoveNotebookDialog";
 import { ConfirmDialog, PromptDialog } from "@/components/common/Dialogs";
 import {
   useCreateNotebook,
@@ -12,7 +13,7 @@ import {
   useUpdateNotebook,
 } from "@/hooks/use-mutations";
 import { TagListItem } from "@/components/tags/TagListItem";
-import { findNotebookById } from "@/lib/notebooks";
+import { countNotebookContents, findNotebookById, notebookContentsLabel } from "@/lib/notebooks";
 import { Notebook, Tag } from "@/lib/types";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -77,6 +78,7 @@ export function Sidebar({
   const [dialog, setDialog] = useState<
     | { kind: "create"; parent: Notebook | null }
     | { kind: "rename"; notebook: Notebook }
+    | { kind: "move"; notebook: Notebook }
     | { kind: "delete"; notebook: Notebook }
     | { kind: "rename-tag"; tag: Tag }
     | { kind: "delete-tag"; tag: Tag }
@@ -86,7 +88,24 @@ export function Sidebar({
   const handleNotebookAction = (action: NotebookAction, notebook: Notebook) => {
     if (action === "create-child") setDialog({ kind: "create", parent: notebook });
     else if (action === "rename") setDialog({ kind: "rename", notebook });
+    else if (action === "move") setDialog({ kind: "move", notebook });
     else setDialog({ kind: "delete", notebook });
+  };
+
+  const handleMove = (parentId: string) => {
+    if (dialog?.kind !== "move") return;
+    const target = dialog.notebook;
+    const destination = parentId ? findNotebookById(notebooks, parentId)?.title : null;
+    updateNotebook.mutate(
+      { id: target.id, changes: { parentId } },
+      {
+        onSuccess: () => {
+          setDialog(null);
+          toast.success(destination ? `Moved "${target.title}" to "${destination}"` : `Moved "${target.title}" to the top level`);
+        },
+        onError: (err) => toast.error("Could not move notebook", { description: err.message }),
+      }
+    );
   };
 
   const handleCreate = (title: string) => {
@@ -152,8 +171,11 @@ export function Sidebar({
     });
   };
 
-  const countNotes = (nb: Notebook): number =>
-    (nb.noteCount || 0) + (nb.children || []).reduce((sum, child) => sum + countNotes(child), 0);
+  /** Same wording and counting as the trash list, so the numbers match after trashing */
+  const contentsOf = (nb: Notebook) => {
+    const { notes, notebooks } = countNotebookContents(nb);
+    return notebookContentsLabel(notes, notebooks);
+  };
 
   return (
     <aside
@@ -378,13 +400,20 @@ export function Sidebar({
         isPending={updateNotebook.isPending}
         onSubmit={handleRename}
       />
+      <MoveNotebookDialog
+        notebook={dialog?.kind === "move" ? dialog.notebook : null}
+        notebooks={notebooks || []}
+        isPending={updateNotebook.isPending}
+        onOpenChange={(open) => !open && setDialog(null)}
+        onMove={handleMove}
+      />
       <ConfirmDialog
         open={dialog?.kind === "delete"}
         onOpenChange={(open) => !open && setDialog(null)}
         title="Move notebook to trash?"
         description={
           dialog?.kind === "delete"
-            ? `"${dialog.notebook.title}" and everything in it (${countNotes(dialog.notebook)} notes, including sub-notebooks) will be moved to the trash. You can restore notes from the trash.`
+            ? `"${dialog.notebook.title}" and everything in it (${contentsOf(dialog.notebook)}) will be moved to the trash. You can restore it from the trash.`
             : undefined
         }
         confirmLabel="Move to trash"

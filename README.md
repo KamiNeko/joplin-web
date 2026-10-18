@@ -26,14 +26,14 @@ You already run Joplin Server to sync your notes. Joplin's desktop and mobile ap
 
 | | |
 | :--- | :--- |
-| 📚 **Notebooks** | Browse nested notebooks; create, rename, move and delete them. |
+| 📚 **Notebooks** | Browse nested notebooks; create, rename, move (into another notebook or to the top level) and delete them. |
 | 📝 **Markdown editor** | CodeMirror editor with *Edit*, *Split* and *Preview* modes, autosave and `Ctrl+S`. |
 | ✨ **Rich rendering** | GitHub-flavored Markdown: tables, task lists, syntax-highlighted code blocks. |
 | 🖼️ **Images & attachments** | Shows Joplin resources inline. Drop, paste or attach files to upload them. |
 | ✅ **To-dos** | Create to-dos and tick them off, right from the note list. |
 | 🏷️ **Tags** | Tag notes, browse by tag, rename and delete tags. |
 | 🔎 **Search** | Instant full-text search across titles and content (`Ctrl+K`). |
-| 🗑️ **Trash** | Deleted notes go to Joplin's trash and can be restored. |
+| 🗑️ **Trash** | Deleted notes and notebooks go to Joplin's trash, where you can restore them or delete them permanently. |
 | ⚔️ **Conflict detection** | If a note was changed elsewhere while you edited it, you choose which version to keep. |
 | 🔄 **Refresh & connection status** | Changes from other devices load when you return to the tab or click *Refresh*. The sidebar shows whether the server is reachable and when data was last updated. |
 | 🛟 **No lost typing** | Unsaved text is kept on the device while offline or after the session expires, saves retry when the connection returns, and you can restore a draft later. |

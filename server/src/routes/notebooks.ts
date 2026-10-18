@@ -19,6 +19,22 @@ router.get('/', async (req, res) => {
 });
 
 /**
+ * GET /api/notebooks/trash
+ * Lists trashed notebooks (only the top of each trashed subtree) with their contents' counts
+ */
+router.get('/trash', async (req, res) => {
+  res.status(200).json(await noteCache.getTrashedNotebooks(req.sessionId!));
+});
+
+/**
+ * POST /api/notebooks/:id/restore
+ * Restores a trashed notebook with its sub-notebooks and notes (and trashed parent notebooks)
+ */
+router.post('/:id/restore', async (req, res) => {
+  res.status(200).json(await noteWriter.restoreNotebook(req.sessionId!, req.params.id));
+});
+
+/**
  * POST /api/notebooks/refresh
  * Forces a cache refresh for the active session
  */
