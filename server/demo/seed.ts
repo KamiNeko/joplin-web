@@ -263,6 +263,40 @@ Return \`application/problem+json\` with a stable \`type\` URL for every error.`
 </div>`,
   },
   {
+    key: 'markdown-extras',
+    notebook: 'work',
+    title: 'Markdown Extras: Math, Diagrams & More',
+    hoursAgo: 150,
+    tags: ['ideas'],
+    body: `Joplin's Markdown extensions, rendered like in the Joplin apps.
+
+## Inline markup
+
+- ==Highlighted== text and ++inserted++ text, next to ~~struck out~~ text
+- Water is H~2~O, and E = mc^2^
+- [ ] Check the ==release notes== for ~~old~~ ++new++ features
+
+## Math
+
+The roots of $ax^2 + bx + c = 0$ are
+
+$$
+x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}
+$$
+
+Amounts like $5 and $10 stay plain text.
+
+## Diagram
+
+\`\`\`mermaid
+graph LR
+  A[Draft] --> B{Review}
+  B -->|Approved| C[Publish]
+  B -->|Changes| A
+\`\`\`
+`,
+  },
+  {
     key: 'todo-passport',
     notebook: 'personal',
     title: 'Renew passport',
