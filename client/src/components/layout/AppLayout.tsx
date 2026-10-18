@@ -2,6 +2,8 @@ import React, { useRef, useState } from "react";
 import { Header } from "./Header";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { MOBILE_SEARCH_INPUT_ID } from "@/lib/ui-constants";
+import { useAutoRefresh } from "@/hooks/use-connection";
+import { ConnectionBanner } from "./ConnectionBanner";
 
 interface AppLayoutProps {
   sidebar: (props: { onCloseMobile?: () => void }) => React.ReactNode;
@@ -26,6 +28,7 @@ export function AppLayout({
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   // Set when the menu is opened via Ctrl+K, so its search field gets focus instead of the first item
   const focusSearchOnOpen = useRef(false);
+  useAutoRefresh();
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-background">
@@ -73,7 +76,8 @@ export function AppLayout({
             setMobileSidebarOpen(true);
           }}
         />
-        <main className="flex-1 h-[calc(100vh-3.5rem)] overflow-hidden">
+        <ConnectionBanner />
+        <main className="flex-1 min-h-0 overflow-hidden">
           {children}
         </main>
       </div>

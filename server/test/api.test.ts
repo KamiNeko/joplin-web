@@ -46,7 +46,11 @@ describe('auth', () => {
     assert.equal(res.status, 200);
     assert.ok(res.data.sessionId);
     session = app.session = res.data.sessionId;
-    assert.equal((await api('/api/auth/check')).status, 200);
+    const check = await api('/api/auth/check');
+    assert.equal(check.status, 200);
+    assert.equal(check.data.valid, true);
+    assert.equal(typeof check.data.serverHost, 'string', 'check returns the Joplin Server host');
+    assert.ok(!String(check.data.serverHost).includes('/'), 'host only, no scheme or path');
   });
 });
 

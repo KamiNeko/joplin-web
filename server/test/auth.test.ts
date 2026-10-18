@@ -94,7 +94,8 @@ describe('session cookie', () => {
 
     const check = await call(baseUrl, '/api/auth/check', { headers: { Cookie: cookie } });
     assert.equal(check.status, 200);
-    assert.deepEqual(check.data, { valid: true }, 'check never echoes the token');
+    assert.deepEqual(Object.keys(check.data).sort(), ['serverHost', 'valid'], 'check never echoes the token');
+    assert.equal(check.data.valid, true);
     assert.equal((await call(baseUrl, '/api/notebooks', { headers: { Cookie: cookie } })).status, 200);
   });
 

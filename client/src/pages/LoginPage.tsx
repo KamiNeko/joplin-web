@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/use-auth";
 import { LoginForm } from "@/components/auth/LoginForm";
 import { ThemeToggle } from "@/components/common/ThemeToggle";
@@ -7,12 +7,17 @@ import { ThemeToggle } from "@/components/common/ThemeToggle";
 export function LoginPage() {
   const { isAuthenticated, isLoading } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  // Return to the page the user was on (e.g. the open note after an expired session)
+  const fromPath = (location.state as { from?: { pathname?: unknown } } | null)?.from?.pathname;
+  const target =
+    typeof fromPath === "string" && /^\/(notes|notebooks|trash)(\/|$)/.test(fromPath) ? fromPath : "/notes";
 
   useEffect(() => {
     if (!isLoading && isAuthenticated) {
-      navigate("/notes", { replace: true });
+      navigate(target, { replace: true });
     }
-  }, [isAuthenticated, isLoading, navigate]);
+  }, [isAuthenticated, isLoading, navigate, target]);
 
   return (
     <div className="relative min-h-screen w-full flex items-center justify-center p-4 overflow-hidden bg-background">
@@ -26,7 +31,7 @@ export function LoginPage() {
       </div>
 
       <div className="relative z-10 w-full max-w-md animate-in fade-in-50 zoom-in-95 duration-300">
-        <LoginForm onSuccess={() => navigate("/notes", { replace: true })} />
+        <LoginForm onSuccess={() => navigate(target, { replace: true })} />
       </div>
 
       {/* Subtle footer */}

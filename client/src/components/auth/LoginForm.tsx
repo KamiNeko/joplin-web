@@ -18,8 +18,9 @@ interface LoginFormProps {
 }
 
 export function LoginForm({ onSuccess }: LoginFormProps) {
-  const { login } = useAuth();
-  const [email, setEmail] = useState("");
+  const { login, lastEmail } = useAuth();
+  // After an expired session the same account signs in again
+  const [email, setEmail] = useState(lastEmail ?? "");
   const [password, setPassword] = useState("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -95,7 +96,7 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
                 onChange={(e) => setEmail(e.target.value)}
                 required
                 autoComplete="email"
-                autoFocus
+                autoFocus={!lastEmail}
                 className="pl-9 bg-background/60 focus-visible:ring-primary"
                 disabled={isSubmitting}
               />
@@ -113,6 +114,7 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
               <Input
                 id="password"
                 type="password"
+                autoFocus={Boolean(lastEmail)}
                 placeholder="••••••••"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}

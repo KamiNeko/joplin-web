@@ -249,6 +249,7 @@ export function NotesPage() {
               isLoading={isLoadingNotes}
               // Keep showing a list that loaded before; only a list that never loaded is an error
               error={notes ? null : notesQuery.error}
+              isStale={Boolean(notes && notesQuery.isError)}
               onRetry={() => void notesQuery.refetch()}
               isRetrying={notesQuery.isFetching}
               emptyTitle={emptyState.title}
@@ -285,7 +286,9 @@ export function NotesPage() {
             startInEdit={editIntentNoteId !== null && editIntentNoteId === selectedNoteId}
             onRemoved={handleNoteRemoved}
             isLoading={isLoadingNote}
-            error={noteError}
+            // A note that loaded before stays on screen (and in an open editor) when a refetch fails
+            error={fullNote ? null : noteError}
+            isStale={Boolean(fullNote && noteQuery.isError)}
             onRetry={() => void noteQuery.refetch()}
             isRetrying={noteQuery.isFetching}
             onTagClick={handleSelectTag}

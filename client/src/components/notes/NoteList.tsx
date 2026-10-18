@@ -16,13 +16,15 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
-import { QueryError } from "@/components/common/QueryError";
+import { QueryError, StaleDataHint } from "@/components/common/QueryError";
 
 interface NoteListProps {
   notes?: NoteListItemType[];
   isLoading?: boolean;
   /** Set when the list failed to load; shows an error with Retry instead of an empty list */
   error?: Error | null;
+  /** A refetch failed while the earlier list is still shown */
+  isStale?: boolean;
   onRetry?: () => void;
   isRetrying?: boolean;
   selectedNoteId?: string | null;
@@ -94,6 +96,7 @@ export function NoteList({
   notes = [],
   isLoading = false,
   error = null,
+  isStale = false,
   onRetry,
   isRetrying = false,
   selectedNoteId,
@@ -244,6 +247,9 @@ export function NoteList({
 
       {/* Content Area */}
       <ScrollArea className="flex-1 p-3">
+        {isStale && !isLoading && !error && (
+          <StaleDataHint className="px-1 pb-2" onRetry={onRetry} isRetrying={isRetrying} />
+        )}
         {isLoading ? (
           <div className="space-y-3">
             {Array.from({ length: 6 }).map((_, i) => (
