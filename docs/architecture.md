@@ -25,13 +25,14 @@ In production the backend also serves the compiled client (`client/dist`) on the
 | `services/serializer.ts` | `deserialize` / `serialize` Joplin's text format, `stripMarkdown` for list previews. |
 | `services/note-cache.ts` | Per-session in-memory cache of all items, refreshed after `CACHE_TTL_MS`; only items whose `updated_time` changed are re-fetched. Builds the notebook tree, note lists, tag counts and search. |
 | `services/note-writer.ts` | All writes: create/update/trash/restore/purge for notes, notebooks, tags, note-tag links and resources; conflict detection. |
+| `services/item-defaults.ts` | Property sets Joplin desktop writes for new notes, notebooks, tags, note-tag links and resources; used by the writer on create. |
 | `app.ts` | `createApp(config)`: helmet/CSP, CORS, rate limits, origin check, routers, static client. `index.ts` only starts it. |
 | `middleware/auth.ts` | Accepts the session as `Authorization: Bearer` / `X-API-AUTH` (API clients) or the httpOnly `joplin_web_session` cookie (browser); never in the query string, which would leak into logs and referrers. Validates it against Joplin Server and caches the result for `AUTH_CACHE_TTL_MS`; logged-out sessions are cached as invalid. |
 | `middleware/origin-check.ts` | CSRF protection for POST/PUT/DELETE: the `Origin` header must match the request's `Host`/`X-Forwarded-Host`, `PUBLIC_URL` or `CORS_ORIGIN`. Requests without `Origin` (non-browser clients) pass only when they don't use the cookie. |
 | `middleware/request-logger.ts` | morgan access log with sensitive query parameters (`auth`, `token`, `password`, …) redacted. |
 | `middleware/error-handler.ts` | Maps errors to JSON responses; 5xx responses carry a generic message only (details are logged). |
 | `config.ts` | Reads the environment (`JOPLIN_SERVER_URL`, `PUBLIC_URL`, `TRUST_PROXY`, `ALLOW_REMOTE_IMAGES`, `COOKIE_SECURE`, …); exits at startup on invalid values or when `JOPLIN_SERVER_URL` is missing. There is no default server. |
-| `routes/*.ts` | Thin Express routers per resource. |
+| `routes/*.ts` | Thin Express 5 routers per resource. Handlers are plain `async` functions: Express 5 forwards rejected promises to the error handler, so they have no try/catch. |
 
 ## Joplin sync protocol
 
@@ -45,7 +46,7 @@ In production the backend also serves the compiled client (`client/dist`) on the
 | `GET /api/items/root:/:/children?cursor=` | Paginated listing of all items (`{ items, has_more, cursor }`) |
 | `GET /api/items/root:/<id>.md:/content` | Raw item text |
 | `GET /api/items/root:/.resource/<id>:/content` | Attachment binary |
-| `GET /api/items/root:/info.json:/content` | Sync target info (E2EE state), read before every write; 404 means none yet |
+| `GET /api/items/root:/info.json:/content` | Sync target info (E2EE state), checked before writes (see Write rules); 404 means none yet |
 | `PUT /api/items/root:/<name>:/content` | Create or replace an item (multipart, field `file`) |
 | `DELETE /api/items/root:/<name>:` | Delete an item |
 
@@ -79,12 +80,13 @@ type_: 1
 - Updates start from the item's **original property set** and change only the edited fields plus `updated_time` / `user_updated_time`. Unknown properties round-trip untouched.
 - New items get the full default property set Joplin desktop writes (32-hex id, `markup_language: 1`, `source: joplin-web`, …).
 - Ids in paths are validated against `^[0-9a-f]{32}$` before any request is made.
-- **E2EE:** Joplin Web cannot encrypt. Before every write it reads `info.json`; if `e2ee.value` is true (or the file is unreadable) the write is refused with `422`, so nothing is uploaded in plaintext to an encrypted account. Encrypted items (`encryption_applied: 1`) are refused as well, as targets too: no notes or sub-notebooks in an encrypted notebook, no links to an encrypted tag.
+- **E2EE:** Joplin Web cannot encrypt. Before writing it checks `info.json`; if `e2ee.value` is true (or the file is unreadable) the write is refused with `422`, so nothing is uploaded in plaintext to an encrypted account. A successful check is reused per session for up to 60 s while the cache listing shows the same `info.json` `updated_time`, so autosaves do not re-read it; a refresh that sees a changed `info.json` forces a new check. E2EE turned on by another client therefore blocks writes after at most the shorter of the cache TTL and 60 s. Without an `info.json` (sync targets older than sync version 3), master key items (`type_: 9`), any `encryption_applied: 1` item, or an item the cache failed to read (it could be a master key) make the account read-only too. Encrypted items (`encryption_applied: 1`) are refused as well, as targets too: no notes or sub-notebooks in an encrypted notebook, no links to an encrypted tag.
 - Target notebooks (create, move) are re-read from Joplin Server, so one trashed or deleted elsewhere is refused even while the cache still shows it. A note in the trash (or in a trashed notebook) cannot be tagged.
 - **Conflicts:** writes carry the `baseUpdatedTime` the editor started from; the writer re-reads the item and answers `409` with the current version if it changed. The UI offers *Overwrite* (`force: true`) or *Load theirs*.
-- **Trash:** deleting sets `deleted_time`. Trashing a notebook also trashes its sub-notebooks and their notes; restoring a note restores its trashed parent notebooks. Cascades read every affected item first and write only if all pass (no encrypted item), so they never stop halfway on such an item.
+- **Trash:** deleting sets `deleted_time`. Trashing a notebook also trashes its sub-notebooks and their notes; restoring a note restores its trashed parent notebooks. Cascades read every affected item first (up to 10 reads in parallel, level by level) and write only if all pass (no encrypted item), so they never stop halfway on such an item.
 - **Permanent deletion** only applies to items in the trash, like Joplin's *Delete permanently*. A note is re-read and must be a note (not a notebook, tag or resource), not encrypted, and trashed itself or inside a trashed notebook. Purging a notebook refreshes the cache and re-reads each item, so notes another client moved out are kept. Note–tag links are removed too.
-- After each write the cache is updated immediately, so lists reflect the change without waiting for the TTL. Written items get a negative "local write" timestamp, so the next refresh re-reads them and removes them if another client deleted them meanwhile.
+- After each write the cache is updated immediately, so lists reflect the change without waiting for the TTL. Written items get a negative "local write" timestamp, so the next refresh re-reads them and removes them if another client deleted them meanwhile. A refresh that started before a local write or delete does not apply the content it fetched for that item, so a slow refresh cannot put an older version back into the cache (which would cause a false `409` on the next autosave).
+- **Joplin Server errors:** a `401`, or a `403` for a session that Joplin Server no longer accepts (re-checked), answers `401` and marks the session invalid, so the client signs in again. A `403` for a valid session stays `403`. `5xx` errors answer with a generic message, never the upstream text.
 
 ## REST API (backend → browser)
 

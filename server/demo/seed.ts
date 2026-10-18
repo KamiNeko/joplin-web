@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import { serialize } from '../src/services/serializer.js';
 import { JoplinItemType } from '../src/types/index.js';
-import type { MockItem } from './mock-joplin-server.js';
+import { syncTargetInfoItem, type MockItem } from './mock-joplin-server.js';
 
 /**
  * Demo account and sample content for the mock Joplin Server.
@@ -360,6 +360,9 @@ export function buildDemoItems(now = Date.now()): Map<string, MockItem> {
     now - 5 * HOUR
   );
   items.set(`.resource/${resId}`, toItem(svg, now - 5 * HOUR, 'image/svg+xml'));
+
+  // Every sync target written by Joplin 2.x/3.x has an info.json (sync version 3), here without E2EE
+  items.set('info.json', syncTargetInfoItem(false, now - 400 * HOUR));
 
   return items;
 }
