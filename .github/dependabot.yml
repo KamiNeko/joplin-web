@@ -17,10 +17,6 @@ updates:
       - dependency-name: "@types/node"
         versions: [">=25.0.0"]
       # Majors needing migration, tracked in #73; remove when upgrading
-      - dependency-name: express
-        update-types: [version-update:semver-major]
-      - dependency-name: "@types/express"
-        update-types: [version-update:semver-major]
       - dependency-name: typescript
         update-types: [version-update:semver-major]
 

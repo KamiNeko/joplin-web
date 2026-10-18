@@ -1,4 +1,4 @@
-import { CookieOptions, NextFunction, Request, Response, Router } from 'express';
+import { CookieOptions, Request, Response, Router } from 'express';
 import type { AppConfig } from '../config.js';
 import { joplinApi, JoplinAuthError } from '../services/joplin-api.js';
 import { noteCache } from '../services/note-cache.js';
@@ -53,7 +53,7 @@ export function createAuthRouter(config: Pick<AppConfig, 'cookieSecure' | 'publi
    * The token is only included in the JSON body for non-browser API clients (requests without an
    * Origin header); browsers only ever get the httpOnly cookie.
    */
-  router.post('/login', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  router.post('/login', async (req, res) => {
     try {
       const { email, password } = req.body ?? {};
 
@@ -81,7 +81,7 @@ export function createAuthRouter(config: Pick<AppConfig, 'cookieSecure' | 'publi
         res.status(401).json({ error: 'Invalid email or password' });
         return;
       }
-      next(error);
+      throw error;
     }
   });
 
@@ -90,7 +90,7 @@ export function createAuthRouter(config: Pick<AppConfig, 'cookieSecure' | 'publi
    * Ends the session on Joplin Server, drops all cached state for it and clears the cookie.
    * Succeeds even if Joplin Server can't be reached; the session is then still rejected locally.
    */
-  router.post('/logout', async (req: Request, res: Response): Promise<void> => {
+  router.post('/logout', async (req, res) => {
     // With duplicate cookies there is no trustworthy token to end; just clear them
     const { token: sessionId } = getSessionToken(req);
     clearSessionCookies(res);
@@ -117,7 +117,7 @@ export function createAuthRouter(config: Pick<AppConfig, 'cookieSecure' | 'publi
    * GET /api/auth/check
    * Validates the current session. The token itself is never echoed back.
    */
-  router.get('/check', requireAuth, (_req: Request, res: Response): void => {
+  router.get('/check', requireAuth, (_req, res) => {
     res.status(200).json({ valid: true });
   });
 

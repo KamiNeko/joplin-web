@@ -19,9 +19,8 @@ async function isSessionGone(err: JoplinAuthError, sessionId: string | undefined
  * Global Express error handling middleware. Details are logged, but responses only carry messages
  * meant for the client: no stack traces, internal error text or raw Joplin Server responses.
  *
- * Express 4 ignores promises returned by middleware, so the async work runs in `respond` and an
- * error thrown there goes to `next` (Express's default handler) instead of becoming an unhandled
- * rejection. A response that has already started is handed to `next` as well.
+ * The async work runs in `respond`, and an error thrown there goes explicitly to `next` (Express's
+ * default handler). A response that has already started is handed to `next` as well.
  */
 export function errorHandler(err: unknown, req: Request, res: Response, next: NextFunction): void {
   if (res.headersSent) {
