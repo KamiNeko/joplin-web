@@ -114,6 +114,13 @@ describe(":/id#heading links (#93)", () => {
     expect(container.querySelector("script, [onclick], [onmouseover]")).toBeNull();
   });
 
+  it("rewrites HTML links quickly even with huge unterminated tags", () => {
+    const start = performance.now();
+    renderMarkdown(`${"<a ".repeat(2000)}${"x".repeat(20000)}\n\n<a title="t" href=":/${NOTE_ID}#intro">Other note</a>`);
+    expect(performance.now() - start).toBeLessThan(2000);
+    expect(screen.getByRole("button", { name: "Other note" })).toBeTruthy();
+  });
+
   it("scrolls in the current note when the route already has a heading fragment, once", async () => {
     const { rerender } = render(
       <QueryClientProvider client={new QueryClient()}>

@@ -43,7 +43,7 @@ function scopeUrl(scope: ListScope, noteId?: string | null): string {
  */
 export function NotesPage() {
   const params = useParams();
-  const { pathname } = useLocation();
+  const { pathname, hash } = useLocation();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
 
@@ -91,9 +91,10 @@ export function NotesPage() {
     if (!openedViaNoteUrl.current || !fullNote) return;
     openedViaNoteUrl.current = false;
     if (scope.kind === "all" && fullNote.id === selectedNoteId && !fullNote.deletedTime) {
-      navigate(scopeUrl({ kind: "notebook", notebookId: fullNote.notebookId }, fullNote.id), { replace: true });
+      // Keep a "#heading" fragment from a link to a heading in this note
+      navigate(scopeUrl({ kind: "notebook", notebookId: fullNote.notebookId }, fullNote.id) + hash, { replace: true });
     }
-  }, [fullNote, scope.kind, selectedNoteId, navigate]);
+  }, [fullNote, scope.kind, selectedNoteId, navigate, hash]);
 
   // Notebook title lookup
   const currentNotebook = useMemo(

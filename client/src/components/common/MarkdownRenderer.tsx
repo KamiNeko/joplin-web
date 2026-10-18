@@ -152,7 +152,7 @@ function preprocessJoplinMarkdown(raw: string): string {
 
   // Replace HTML image src: <img src=":/id" ...> -> <img src="/api/resources/id" ...>
   transformed = transformed.replace(
-    /<img([^>]+)src=["']:\/?([a-zA-Z0-9_-]+)["']([^>]*)>/gi,
+    /<img([^>]{1,500}?)src=["']:\/?([a-zA-Z0-9_-]+)["']([^>]*)>/gi,
     (_, before, id, after) => `<img${before}src="${getResourceUrl(id)}"${after}>`
   );
 
@@ -164,7 +164,7 @@ function preprocessJoplinMarkdown(raw: string): string {
       `${before}[${text}](${lead}${JOPLIN_ITEM_PATH}${id.toLowerCase()}${fragment}${title}${trail})`
   );
   transformed = transformed.replace(
-    /<a([^>]+)href=(["']):\/?([0-9a-fA-F]{32})(#[^\s"'<>]*)?\2/gi,
+    /<a([^>]{1,500}?)href=(["']):\/?([0-9a-fA-F]{32})(#[^\s"'<>]*)?\2/gi,
     (_, before, _quote, id, fragment = "") => `<a${before}href="${JOPLIN_ITEM_PATH}${id.toLowerCase()}${fragment}"`
   );
 
