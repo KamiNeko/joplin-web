@@ -76,7 +76,10 @@ docker compose up -d --build
 Open `http://localhost:3001` (or the `HOST_PORT` you set) and sign in with your Joplin Server account.
 
 > [!IMPORTANT]
-> Your Joplin password passes through Joplin Web on its way to your Joplin Server. Put Joplin Web behind a reverse proxy with **HTTPS** (Caddy, Traefik, nginx, …) before you use it outside your home network.
+> Your Joplin password passes through Joplin Web on its way to your Joplin Server. Put Joplin Web behind a reverse proxy with **HTTPS** (Caddy, Traefik, nginx, …) before you use it outside your home network. Behind a proxy, also set `PUBLIC_URL` and `TRUST_PROXY` (see below).
+
+> [!NOTE]
+> Browsers scope cookies to the host name, not the port. Over plain HTTP, every other web app on the same host name or IP address (e.g. `http://192.168.1.10:8080`) also receives Joplin Web's session cookie on its `/api/...` paths and could log it. Give Joplin Web its own host name, ideally with HTTPS: the cookie then becomes a `Secure` `__Host-` cookie that other apps can't overwrite, and Joplin Web rejects requests that carry conflicting session cookies.
 
 <details>
 <summary>Without Docker Compose</summary>
@@ -99,6 +102,10 @@ Docker Compose (2.24 or newer) passes every variable in `.env` to the container.
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `JOPLIN_SERVER_URL` | *(required)* | Base URL of your Joplin Server, e.g. `https://notes.example.com`. Joplin Web refuses to start without it. |
+| `PUBLIC_URL` | *(not set)* | Address you open Joplin Web at, e.g. `https://notes-web.example.com`. Set it behind a reverse proxy: writes from other origins are rejected (CSRF protection), and an `https://` value turns on the session cookie's `Secure` flag and the CSP's `upgrade-insecure-requests`. |
+| `TRUST_PROXY` | `false` | Set when Joplin Web runs behind a reverse proxy, so rate limits and logs see the real client address: `1` (number of proxies in front), or a comma-separated list of proxy addresses/subnets (e.g. `loopback, 172.16.0.0/12`). Leave it off when Joplin Web is reachable directly, otherwise clients can fake their address. |
+| `ALLOW_REMOTE_IMAGES` | `false` | Let notes load images from any `https://` URL (e.g. web clippings). Off by default because each remote image tells its host who opened the note and when. |
+| `COOKIE_SECURE` | `auto` | `Secure` flag of the session cookie. `auto` sets it when the request came in over HTTPS (directly, via a trusted proxy, or with an `https://` `PUBLIC_URL`). |
 | `HOST_PORT` | `3001` | Docker Compose only: the port published on the host. The container itself always listens on 3001. (`PORT` still works here but is deprecated.) |
 | `CORS_ORIGIN` | *(none)* | Allowed origins for API calls (comma-separated). Only needed when the UI is served from another origin than the API; the single-container setup doesn't need it. Without Docker in development mode the default is `http://localhost:5173`. |
 | `CACHE_TTL_MS` | `30000` | How long the note cache is used before it is re-synced with Joplin Server, in milliseconds. |

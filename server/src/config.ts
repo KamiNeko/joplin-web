@@ -14,6 +14,14 @@ export interface AppConfig {
   cacheTtlMs: number;
   authCacheTtlMs: number;
   clientDistPath: string;
+  /** Value for Express' "trust proxy" setting; false means X-Forwarded-* headers are ignored */
+  trustProxy: boolean | number | string[];
+  /** Origin users open Joplin Web at (e.g. https://notes-web.example.com), if configured */
+  publicUrl: string | null;
+  /** Allow notes to load images from any https: URL (CSP img-src) */
+  allowRemoteImages: boolean;
+  /** Secure flag of the session cookie; 'auto' sets it when the request came in over HTTPS */
+  cookieSecure: boolean | 'auto';
   /** Release version from APP_VERSION (set at image build time), "dev" otherwise */
   appVersion: string;
   /** Git commit the build was made from (GIT_SHA), or null when unknown */
@@ -74,6 +82,54 @@ function parseJoplinServerUrl(raw: string | undefined): string {
 }
 
 /**
+ * Parses TRUST_PROXY: unset/false/0 (default, X-Forwarded-* is ignored), true (trust every proxy:
+ * only safe if Joplin Web can't be reached except through the proxy), a hop count, or a
+ * comma-separated list of proxy addresses/subnets (e.g. "loopback, 10.0.0.0/8").
+ */
+export function parseTrustProxy(raw: string | undefined): boolean | number | string[] {
+  const value = raw?.trim().toLowerCase();
+  if (!value || value === 'false' || value === '0') return false;
+  if (value === 'true') return true;
+  if (/^\d+$/.test(value)) return parseInt(value, 10);
+  const list = value.split(',').map((entry) => entry.trim()).filter(Boolean);
+  if (list.some((entry) => !/^[0-9a-f.:/]+$|^(loopback|linklocal|uniquelocal)$/.test(entry))) {
+    throw new ConfigError(
+      `TRUST_PROXY must be true, false, a hop count or a comma-separated list of IP addresses/subnets, got: ${raw}`
+    );
+  }
+  return list;
+}
+
+function parseBoolean(name: string, raw: string | undefined, fallback: boolean): boolean {
+  const value = raw?.trim().toLowerCase();
+  if (!value) return fallback;
+  if (['true', '1', 'yes', 'on'].includes(value)) return true;
+  if (['false', '0', 'no', 'off'].includes(value)) return false;
+  throw new ConfigError(`${name} must be true or false, got: ${raw}`);
+}
+
+function parseCookieSecure(raw: string | undefined): boolean | 'auto' {
+  if (!raw?.trim() || raw.trim().toLowerCase() === 'auto') return 'auto';
+  return parseBoolean('COOKIE_SECURE', raw, false);
+}
+
+/** Validates PUBLIC_URL and reduces it to its origin */
+function parsePublicUrl(raw: string | undefined): string | null {
+  const value = raw?.trim();
+  if (!value) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ConfigError(`PUBLIC_URL is not a valid URL: ${value}`);
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new ConfigError(`PUBLIC_URL must start with http:// or https://, got: ${value}`);
+  }
+  return url.origin;
+}
+
+/**
  * Build metadata is public (GET /api/health), so only plain version strings are accepted.
  */
 function parseAppVersion(raw: string | undefined): string {
@@ -107,6 +163,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     cacheTtlMs: parseInt(env.CACHE_TTL_MS || '30000', 10),
     authCacheTtlMs: parseInt(env.AUTH_CACHE_TTL_MS || '300000', 10),
     clientDistPath: defaultClientDistPath,
+    trustProxy: parseTrustProxy(env.TRUST_PROXY),
+    publicUrl: parsePublicUrl(env.PUBLIC_URL),
+    allowRemoteImages: parseBoolean('ALLOW_REMOTE_IMAGES', env.ALLOW_REMOTE_IMAGES, false),
+    cookieSecure: parseCookieSecure(env.COOKIE_SECURE),
     appVersion: parseAppVersion(env.APP_VERSION),
     gitSha: parseGitSha(env.GIT_SHA),
   };
