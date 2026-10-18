@@ -596,7 +596,7 @@ function useTaskToggle(noteId: string | undefined) {
 
     // The new body is built from the cached note, so that is the version it is based on. The cache
     // also holds what the editor saved, so a save there never makes this one a false conflict.
-    saver.baseUpdatedTime = cached.updatedTime;
+    saver.rebase(cached.updatedTime);
     await saver.send(
       { body: cached.body },
       {
@@ -622,7 +622,9 @@ function useTaskToggle(noteId: string | undefined) {
     );
   };
 
-  saveRef.current = save;
+  useEffect(() => {
+    saveRef.current = save;
+  });
 
   return (location: TaskLocation, checked: boolean) => {
     if (!noteId) return;

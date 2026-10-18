@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Folder, FolderTree, Loader2, Search } from "lucide-react";
 import {
   Dialog,
@@ -35,12 +35,15 @@ export function MoveNotebookDialog({ notebook, notebooks, isPending = false, onO
   const [selected, setSelected] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
 
-  useEffect(() => {
+  // Start fresh for every notebook (adjusted while rendering, not in an effect)
+  const [shownFor, setShownFor] = useState(notebook);
+  if (notebook !== shownFor) {
+    setShownFor(notebook);
     if (notebook) {
       setSelected(null);
       setFilter("");
     }
-  }, [notebook]);
+  }
 
   const blockedIds = useMemo(
     () => new Set(notebook ? flattenNotebooks([notebook]).map((nb) => nb.id) : []),

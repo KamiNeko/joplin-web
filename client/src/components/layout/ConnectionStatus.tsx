@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { AlertCircle, Loader2, RefreshCw, WifiOff } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { useConnectionState, useConnectionStatus, useRefresh } from "@/hooks/use-connection";
@@ -38,17 +38,16 @@ export function ConnectionStatus() {
   const isProblem = status.state === "error" || status.state === "expired" || status.state === "offline";
 
   // Screen readers hear problems and the recovery, not every routine "Refreshing…"
+  // (adjusted while rendering, React re-renders right away with the new state)
   const [announcement, setAnnouncement] = useState("");
-  const hadProblemRef = useRef(false);
-  useEffect(() => {
-    if (isProblem) {
-      hadProblemRef.current = true;
-      setAnnouncement(status.label);
-    } else if (hadProblemRef.current && (status.state === "updated" || status.state === "connected")) {
-      hadProblemRef.current = false;
-      setAnnouncement("Connection restored");
-    }
-  }, [isProblem, status.label, status.state]);
+  const [hadProblem, setHadProblem] = useState(false);
+  if (isProblem) {
+    if (!hadProblem) setHadProblem(true);
+    if (announcement !== status.label) setAnnouncement(status.label);
+  } else if (hadProblem && (status.state === "updated" || status.state === "connected")) {
+    setHadProblem(false);
+    setAnnouncement("Connection restored");
+  }
 
   return (
     <div className="border-t border-border/40 px-3 py-2">

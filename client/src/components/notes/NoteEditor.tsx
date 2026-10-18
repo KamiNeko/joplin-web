@@ -116,7 +116,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
    * whatever is still unsaved, so the returned promise tells whether the draft is now stored.
    */
   const save = useCallback(
-    (force = false): Promise<boolean> => {
+    function save(force = false): Promise<boolean> {
       clearTimer();
       if (unmountedRef.current) return Promise.resolve(false);
       if (conflictRef.current && !force) return Promise.resolve(false);
@@ -232,13 +232,13 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
     if (note.updatedTime <= (saver.baseUpdatedTime ?? 0) || saver.inflight || restoredRef.current) return;
     const theirs = { title: note.title, body: note.body };
     if (sameDraft(theirs, savedRef.current)) {
-      saver.baseUpdatedTime = note.updatedTime;
+      saver.rebase(note.updatedTime);
     } else if (conflictRef.current) {
       return;
     } else if (sameDraft(draftRef.current, savedRef.current) && uploadsRef.current === 0) {
       draftRef.current = theirs;
       savedRef.current = theirs;
-      saver.baseUpdatedTime = note.updatedTime;
+      saver.rebase(note.updatedTime);
       setDraft(theirs);
       setEditorKey((k) => k + 1);
       setRemoteChange(null);
@@ -382,7 +382,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
       const next = { title: theirs.title, body: theirs.body };
       draftRef.current = next;
       savedRef.current = next;
-      saver.baseUpdatedTime = theirs.updatedTime;
+      saver.rebase(theirs.updatedTime);
       setDraft(next);
       setEditorKey((k) => k + 1);
       queryClient.setQueryData(["note", note.id], theirs);
@@ -401,7 +401,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
   /** Keeps the editor text and makes it overwrite the version from the other device */
   const keepMine = () => {
     if (!remoteChange) return;
-    saver.baseUpdatedTime = remoteChange.updatedTime;
+    saver.rebase(remoteChange.updatedTime);
     savedRef.current = { title: remoteChange.title, body: remoteChange.body };
     setRemoteChange(null);
     if (!sameDraft(draftRef.current, savedRef.current)) {
