@@ -591,6 +591,7 @@ export class NoteCacheService {
       id: note.id,
       title: note.title,
       body: note.body,
+      preview: stripMarkdown(note.body, 150),
       parentId: note.parentId || '',
       notebook,
       tags,

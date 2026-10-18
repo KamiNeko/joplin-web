@@ -4,19 +4,25 @@ export const RETRY_BASE_MS = 5000;
 export const RETRY_MAX_MS = 60000;
 /** Retries before giving up (the user can still retry by hand, and `online` starts over) */
 export const RETRY_MAX_ATTEMPTS = 6;
+/** Longest Retry-After honoured (the server's rate limit window is 15 minutes) */
+export const RETRY_AFTER_MAX_MS = 15 * 60 * 1000;
 
 /**
  * Delay before retry number `attempt` (0-based): 5 s, 10 s, 20 s, 40 s, 60 s, 60 s, then null
- * (stop).
+ * (stop). `retryAfterMs` (the server's Retry-After) makes it at least that long, up to 15 minutes.
  */
-export function retryDelay(attempt: number): number | null {
+export function retryDelay(attempt: number, retryAfterMs?: number): number | null {
   if (attempt >= RETRY_MAX_ATTEMPTS) return null;
-  return Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** attempt);
+  const backoff = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** attempt);
+  return retryAfterMs ? Math.max(backoff, Math.min(retryAfterMs, RETRY_AFTER_MAX_MS)) : backoff;
 }
 
 export interface RetryScheduler {
-  /** Schedules the next retry; returns false when the attempts are used up or it was disposed */
-  schedule(): boolean;
+  /**
+   * Schedules the next retry, no sooner than `retryAfterMs` when given; returns false when the
+   * attempts are used up or it was disposed
+   */
+  schedule(retryAfterMs?: number): boolean;
   /** Cancels a pending retry and starts counting from zero again (after a success or `online`) */
   reset(): void;
   /** Cancels a pending retry for good; later schedule() calls do nothing (editor closed) */
@@ -36,9 +42,9 @@ export function createRetryScheduler(run: () => void): RetryScheduler {
     timer = null;
   };
   return {
-    schedule() {
+    schedule(retryAfterMs) {
       if (disposed) return false;
-      const delay = retryDelay(attempt);
+      const delay = retryDelay(attempt, retryAfterMs);
       if (delay === null) return false;
       attempt += 1;
       cancel();

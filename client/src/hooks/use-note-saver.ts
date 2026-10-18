@@ -2,7 +2,7 @@ import { useState } from "react";
 import { QueryClient, useQueryClient } from "@tanstack/react-query";
 import { NoteUpdate, updateNote } from "@/lib/api";
 import { Note } from "@/lib/types";
-import { invalidateLists } from "./use-mutations";
+import { invalidateLists, updateNoteInLists } from "./use-mutations";
 
 export interface NoteSaveHandlers {
   /** What to put into the ["note", id] query instead of the saved note (e.g. to keep a newer optimistic body) */
@@ -27,7 +27,10 @@ export interface NoteSaver {
   readonly inflight: Promise<boolean> | null;
   /**
    * Sends `changes` based on `baseUpdatedTime`. On success adopts the returned updatedTime as the new
-   * base, stores the note in the query cache and refreshes the lists. Resolves whether it was saved.
+   * base, stores the note in the query cache and updates the lists: a title/body change patches the
+   * note's list entries in place (autosave runs every few seconds, refetching every list each time
+   * would add up against the rate limit); a move or to-do change refetches them. Resolves whether
+   * it was saved.
    */
   send(changes: Omit<NoteUpdate, "baseUpdatedTime">, handlers?: NoteSaveHandlers): Promise<boolean>;
 }
@@ -59,7 +62,8 @@ export function createNoteSaver(
           const saved = await updateNote(noteId, { ...changes, baseUpdatedTime: base ?? undefined });
           base = saved.updatedTime;
           queryClient.setQueryData(["note", noteId], toCache ? toCache(saved) : saved);
-          invalidateLists(queryClient);
+          if (changes.parentId !== undefined || changes.todoCompleted !== undefined) invalidateLists(queryClient);
+          else updateNoteInLists(queryClient, saved);
           onSaved?.(saved);
           return true;
         } catch (err) {

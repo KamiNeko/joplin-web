@@ -21,7 +21,7 @@ import {
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
-import { getConnectionSnapshot, isConnectionFailure, setNoteUnsaved } from "@/lib/connection";
+import { getConnectionSnapshot, isTemporaryFailure, setNoteUnsaved } from "@/lib/connection";
 import { createRetryScheduler, RetryScheduler } from "@/lib/retry";
 import { clearDraft, saveDraft, StoredDraft } from "@/lib/drafts";
 
@@ -165,9 +165,10 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
             // The indicator only shows "Save failed"; the toast carries the reason (one per note,
             // so repeated autosave failures replace it instead of stacking)
             toast.error("Could not save note", { id: `save-error-${note.id}`, description: message });
-            // Server unreachable: try again with backoff (and right away when the browser is back online)
-            if (err instanceof ApiError && isConnectionFailure(err.status) && navigator.onLine) {
-              retryRef.current?.schedule();
+            // Server unreachable or rate limited: try again with backoff, no sooner than the server's
+            // Retry-After (and right away when the browser is back online)
+            if (err instanceof ApiError && isTemporaryFailure(err.status) && navigator.onLine) {
+              retryRef.current?.schedule(err.retryAfterMs);
             }
           },
         }

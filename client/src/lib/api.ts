@@ -74,13 +74,28 @@ export function clearStoredSession(): void {
 export class ApiError extends Error {
   status: number;
   data?: unknown;
+  /** How long the server asked to wait before trying again (Retry-After), in ms */
+  retryAfterMs?: number;
 
-  constructor(status: number, message: string, data?: unknown) {
+  constructor(status: number, message: string, data?: unknown, retryAfterMs?: number) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.data = data;
+    this.retryAfterMs = retryAfterMs;
   }
+}
+
+/**
+ * Parses a Retry-After header (seconds or an HTTP date) into milliseconds from `now`. Returns
+ * undefined when the header is missing or unreadable.
+ */
+export function parseRetryAfter(value: string | null, now = Date.now()): number | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  if (/^\d+$/.test(trimmed)) return parseInt(trimmed, 10) * 1000;
+  const date = Date.parse(trimmed);
+  return Number.isNaN(date) ? undefined : Math.max(0, date - now);
 }
 
 /** Writes (POST/PUT/DELETE) that haven't finished yet; logout waits for them */
@@ -175,7 +190,7 @@ async function send<T>(endpoint: string, init: RequestInit, skipAuthRedirect: bo
       // The session-expired dialog asks the user to sign in again; unsaved drafts stay on this device
       throw new ApiError(401, "Your session has expired. Please sign in again.", data);
     }
-    throw new ApiError(response.status, message, data);
+    throw new ApiError(response.status, message, data, parseRetryAfter(response.headers.get("Retry-After")));
   }
   if (!skipAuthRedirect) recordResponse(response.status, isRead, "");
 
