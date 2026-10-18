@@ -105,7 +105,7 @@ export function saveDraft(
  * and foreign drafts count as none.
  */
 export function loadDraft(noteId: string, now = Date.now()): StoredDraft | null {
-  let draft: StoredDraft | null = null;
+  let draft: StoredDraft | null;
   try {
     draft = parse(localStorage.getItem(PREFIX + noteId));
   } catch {
