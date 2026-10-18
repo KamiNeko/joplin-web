@@ -41,6 +41,12 @@ export interface MockJoplinServer {
    * Joplin Server failures (e.g. 500) in tests. Calls queue up in order.
    */
   failNextItemRequests: (status: number, count?: number) => void;
+  /**
+   * Test hook called before every /api/items request is handled (after injected failures). The
+   * request waits for a returned promise, so tests can count, hold or reorder requests.
+   * `name` is the item name ('' for the root listing), `suffix` '/content', '/children' or ''.
+   */
+  onItemRequest: ((request: { method: string; name: string; suffix: string }) => void | Promise<void>) | null;
   close: () => Promise<void>;
 }
 
@@ -94,6 +100,16 @@ export async function startMockJoplinServer(
   let clock = Date.now();
   const tick = () => (clock = Math.max(clock + 1, Date.now()));
   const failures: number[] = [];
+  let server: Server | undefined;
+  const handle: MockJoplinServer = {
+    url: '',
+    items,
+    failNextItemRequests: (status, count = 1) => {
+      for (let i = 0; i < count; i++) failures.push(status);
+    },
+    onItemRequest: null,
+    close: () => new Promise((resolve) => (server ? server.close(() => resolve()) : resolve())),
+  };
 
   const app = express();
 
@@ -121,7 +137,7 @@ export async function startMockJoplinServer(
     res.redirect(302, '/login');
   });
 
-  app.use('/api/items', express.raw({ type: () => true, limit: '50mb' }), (req: Request, res: Response) => {
+  app.use('/api/items', express.raw({ type: () => true, limit: '50mb' }), async (req: Request, res: Response) => {
     const failure = failures.shift();
     if (failure !== undefined) {
       res.status(failure).json({ error: `Injected failure (HTTP ${failure})` });
@@ -138,7 +154,8 @@ export async function startMockJoplinServer(
       res.status(404).json({ error: `Unknown item path ${req.path}` });
       return;
     }
-    const [, name, suffix] = match;
+    const [, name, suffix = ''] = match;
+    if (handle.onItemRequest) await handle.onItemRequest({ method: req.method, name, suffix });
 
     if (req.method === 'GET' && suffix === '/children' && name === '') {
       // Resource binaries live in a sub-folder and are not listed at the root
@@ -192,17 +209,12 @@ export async function startMockJoplinServer(
     res.status(405).json({ error: `${req.method} not supported on ${req.path}` });
   });
 
-  const server: Server = await new Promise((resolve) => {
+  const listening: Server = await new Promise((resolve) => {
     const s = app.listen(port, '127.0.0.1', () => resolve(s));
   });
-  const { port: boundPort } = server.address() as AddressInfo;
+  server = listening;
+  const { port: boundPort } = listening.address() as AddressInfo;
 
-  return {
-    url: `http://127.0.0.1:${boundPort}`,
-    items,
-    failNextItemRequests: (status, count = 1) => {
-      for (let i = 0; i < count; i++) failures.push(status);
-    },
-    close: () => new Promise((resolve) => server.close(() => resolve())),
-  };
+  handle.url = `http://127.0.0.1:${boundPort}`;
+  return handle;
 }

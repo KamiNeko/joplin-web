@@ -23,7 +23,7 @@ In production the backend also serves the compiled client (`client/dist`) on the
 | :--- | :--- |
 | `services/joplin-api.ts` | HTTP client for Joplin Server; maps errors to `JoplinAuthError` / `JoplinNotFoundError` / `JoplinConnectionError`. |
 | `services/serializer.ts` | `deserialize` / `serialize` Joplin's text format, `stripMarkdown` / `stripHtml` (via `notePreview`, by `markup_language`) for list previews. |
-| `services/note-cache.ts` | Per-session in-memory cache of all items, refreshed after `CACHE_TTL_MS`; only items whose `updated_time` changed are re-fetched. Builds the notebook tree, note lists, tag counts and search (all without conflict copies, see *Conflict copies*) and the conflicts list; every item in them carries `encrypted` (see *Encrypted items*). A session's cache is freed on logout, when Joplin Server rejects the session, and after 2 hours without use (expired or abandoned sessions never log out). |
+| `services/note-cache.ts` | Per-session in-memory cache of all items, refreshed after `CACHE_TTL_MS`; only items whose `updated_time` changed are re-fetched. Builds the notebook tree, note lists, tag counts (each counted in one pass) and search (all without conflict copies, see *Conflict copies*) and the conflicts list; every item in them carries `encrypted` (see *Encrypted items*). A session's cache is freed on logout, when Joplin Server rejects the session, and after 2 hours without use (expired or abandoned sessions never log out). See *Cache refresh* below. |
 | `services/search-query.ts` | Parses the search syntax (words, phrases, negation, `tag:`/`notebook:`/`type:`/`iscompleted:` filters) for `note-cache`'s search; see *Search syntax*. |
 | `services/note-writer.ts` | All writes: create/update/trash/restore/purge for notes, notebooks, tags, note-tag links and resources; conflict detection; `getWriteState` (the E2EE guard as a yes/no answer for the client). |
 | `services/item-defaults.ts` | Property sets Joplin desktop writes for new notes, notebooks, tags, note-tag links and resources; used by the writer on create. |
@@ -50,6 +50,18 @@ In production the backend also serves the compiled client (`client/dist`) on the
 | `GET /api/items/root:/info.json:/content` | Sync target info (E2EE state), checked before writes (see Write rules); 404 means none yet |
 | `PUT /api/items/root:/<name>:/content` | Create or replace an item (multipart, field `file`) |
 | `DELETE /api/items/root:/<name>:` | Delete an item |
+
+### Cache refresh
+
+A refresh lists all items (`/children`, every page) and re-reads only `.md` items whose `updated_time` differs from the cached one (10 in parallel); items missing from the listing are dropped. When it runs:
+
+- **Reads** (lists, tree, tags, search, note, attachment metadata): within `CACHE_TTL_MS` the cache answers directly. Once it has expired, data up to 10 × `CACHE_TTL_MS` old is still served at once while a refresh runs in the background (stale-while-revalidate); concurrent requests share one refresh. The first load, older data, and the first read after a failed refresh wait for the refresh. With `CACHE_TTL_MS=0` every read waits.
+- **Writes** (`noteCache.getEntry`) never use expired data: they wait for a refresh (or join the one running), since the E2EE check, link cleanup and tag-name lookups rely on it.
+- **Forced** (`POST /api/notebooks/refresh`, notebook purge) always wait; a refresh already running is joined.
+- **Errors:** a failed background refresh is logged and handled (never an unhandled rejection) and marks the entry, so the next read refreshes synchronously and its error reaches the error handler like before: an expired session is answered with `401` and marked invalid one request later; an unreachable server answers `503`. The request that started the failed refresh got the stale data.
+- Background refreshes use the same "local write" guards as before (see Write rules), so a write made while one runs is not undone.
+
+The delta API (`/api/items/root:/:/delta?cursor=`) is not used yet: it would avoid listing every item, but its change entries carry the change time rather than the item's `updated_time`, a first cursor requires walking the account's whole change history, and an expired cursor needs a full resync.
 
 ### Item types (`type_`)
 

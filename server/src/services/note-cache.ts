@@ -52,11 +52,30 @@ const notebookTitle = (item: RawJoplinItem): string =>
 /** Display title of a tag, see `notebookTitle` */
 const tagTitle = (item: RawJoplinItem): string => (isEncrypted(item) ? 'Encrypted tag' : item.title || 'Untitled Tag');
 
+/**
+ * How a caller wants the cache refreshed, see `NoteCacheService.ensureFresh`
+ */
+export type RefreshMode = 'stale-ok' | 'fresh' | 'force';
+
+/**
+ * Reads serve cached data while it is refreshed in the background only up to this many TTLs old.
+ * Beyond that (e.g. the first request after a long idle period) they wait for the refresh. With
+ * `CACHE_TTL_MS=0` the window is empty, so every read re-syncs before it answers.
+ */
+export const STALE_LIMIT_FACTOR = 10;
+
 export interface CacheEntry {
+  /** Time the last successful refresh finished, 0 before the first one */
   lastFetched: number;
   /** Last time the session read or wrote through the cache, for idle eviction */
   lastAccessed: number;
+  /** The refresh running for this session, if any */
   fetchPromise: Promise<void> | null;
+  /**
+   * Whether the last refresh failed. The next read then waits for a refresh instead of serving
+   * stale data, so an expired session or an unreachable server is still reported to the client.
+   */
+  lastRefreshFailed: boolean;
   notebooks: Map<string, RawJoplinItem>;
   notes: Map<string, RawJoplinItem>;
   tags: Map<string, RawJoplinItem>;
@@ -101,6 +120,7 @@ export class NoteCacheService {
         lastFetched: 0,
         lastAccessed: now,
         fetchPromise: null,
+        lastRefreshFailed: false,
         notebooks: new Map(),
         notes: new Map(),
         tags: new Map(),
@@ -143,32 +163,64 @@ export class NoteCacheService {
   }
 
   /**
-   * Ensures the session cache is fresh, triggering background synchronization if expired
+   * Returns the session's cache entry, refreshed from Joplin Server as `mode` requires:
+   *
+   * - `stale-ok` (reads): within `CACHE_TTL_MS` the entry is returned as is. After that, data up to
+   *   `STALE_LIMIT_FACTOR` TTLs old is returned right away while a refresh runs in the background
+   *   (stale-while-revalidate). Older data, the first load, and the first read after a failed
+   *   refresh wait for a refresh instead, so errors (expired session, server down) reach the client.
+   * - `fresh` (writes): an expired entry is always refreshed before it is returned.
+   * - `force` (Refresh button, purge): always refreshes, joining a refresh that is already running.
    */
-  public async ensureFresh(sessionId: string, force = false): Promise<CacheEntry> {
+  public async ensureFresh(sessionId: string, mode: RefreshMode = 'stale-ok'): Promise<CacheEntry> {
     const entry = this.getOrCreateEntry(sessionId);
-    const now = Date.now();
-    const isExpired = now - entry.lastFetched > config.cacheTtlMs;
+    const age = Date.now() - entry.lastFetched;
+    const ttl = config.cacheTtlMs;
+    const loaded = entry.lastFetched > 0;
 
-    if (!force && !isExpired && entry.lastFetched > 0) {
+    if (mode !== 'force' && loaded && age <= ttl) {
       return entry;
     }
 
-    // If already refreshing, wait for the existing promise to resolve
-    if (entry.fetchPromise) {
-      await entry.fetchPromise;
+    if (mode === 'stale-ok' && loaded && !entry.lastRefreshFailed && age <= ttl * STALE_LIMIT_FACTOR) {
+      if (!entry.fetchPromise) this.startRefresh(sessionId, entry);
       return entry;
     }
 
-    // Launch refresh
-    entry.fetchPromise = this.refreshCacheInternal(sessionId, entry);
-    try {
-      await entry.fetchPromise;
-    } finally {
-      entry.fetchPromise = null;
-    }
-
+    // Join a refresh that is already running (a background one too) instead of starting another
+    await (entry.fetchPromise ?? this.startRefresh(sessionId, entry));
     return entry;
+  }
+
+  /**
+   * Starts a refresh and records it on the entry until it settles. The returned promise rejects
+   * when the refresh fails; the failure is also handled here (logged and recorded on the entry), so
+   * a background refresh nobody awaits never becomes an unhandled rejection.
+   */
+  private startRefresh(sessionId: string, entry: CacheEntry): Promise<void> {
+    const refresh = this.refreshCacheInternal(sessionId, entry);
+    entry.fetchPromise = refresh;
+    refresh.then(
+      () => {
+        entry.lastRefreshFailed = false;
+        if (entry.fetchPromise === refresh) entry.fetchPromise = null;
+      },
+      (err: unknown) => {
+        entry.lastRefreshFailed = true;
+        if (entry.fetchPromise === refresh) entry.fetchPromise = null;
+        console.error(`[NoteCache] Refresh failed for session ${sessionId.substring(0, 8)}...:`, err);
+      }
+    );
+    return refresh;
+  }
+
+  /**
+   * Resolves once the session's running refresh (if any) has settled, successfully or not.
+   * Never rejects. Lets callers and tests wait for a background refresh.
+   */
+  public async whenIdle(sessionId: string): Promise<void> {
+    const pending = this.caches.get(sessionId)?.fetchPromise;
+    if (pending) await pending.catch(() => undefined);
   }
 
   /**
@@ -298,7 +350,7 @@ export class NoteCacheService {
    * Forces a cache refresh for the given session
    */
   public async refreshCache(sessionId: string): Promise<void> {
-    await this.ensureFresh(sessionId, true);
+    await this.ensureFresh(sessionId, 'force');
   }
 
   /**
@@ -311,10 +363,11 @@ export class NoteCacheService {
   }
 
   /**
-   * Returns the (fresh) cache entry for direct read access by the write service
+   * Returns the cache entry for the write service. Unlike reads it never serves data older than
+   * `CACHE_TTL_MS`: writes check E2EE state, note-tag links and tag names against it.
    */
   public async getEntry(sessionId: string): Promise<CacheEntry> {
-    return this.ensureFresh(sessionId);
+    return this.ensureFresh(sessionId, 'fresh');
   }
 
   /**
@@ -393,14 +446,18 @@ export class NoteCacheService {
       (nb) => !nb.deletedTime || nb.deletedTime === 0
     );
 
+    // Direct active notes per notebook, counted in one pass over all notes
+    const noteCounts = new Map<string, number>();
+    for (const note of entry.notes.values()) {
+      if ((note.deletedTime && note.deletedTime > 0) || isConflictNote(note)) continue;
+      noteCounts.set(note.parentId, (noteCounts.get(note.parentId) ?? 0) + 1);
+    }
+
     // Map each raw folder into a Notebook object
     const nodeMap = new Map<string, Notebook>();
 
     for (const nb of activeNotebooks) {
-      // Calculate note count for direct active notes belonging to this notebook
-      const directNoteCount = Array.from(entry.notes.values()).filter(
-        (note) => note.parentId === nb.id && (!note.deletedTime || note.deletedTime === 0) && !isConflictNote(note)
-      ).length;
+      const directNoteCount = noteCounts.get(nb.id) ?? 0;
 
       nodeMap.set(nb.id, {
         id: nb.id,
@@ -659,29 +716,32 @@ export class NoteCacheService {
         .map((nb) => nb.id)
     );
 
-    const tagsList: TagItem[] = [];
-
-    for (const tag of entry.tags.values()) {
-      // Count distinct active notes linked to this tag
-      const noteIds = new Set<string>();
-      for (const link of entry.noteTags) {
-        if (link.tagId === tag.id) {
-          const note = entry.notes.get(link.noteId);
-          if (
-            note &&
-            !isConflictNote(note) &&
-            (!note.deletedTime || note.deletedTime === 0) &&
-            (!note.parentId || !deletedNotebookIds.has(note.parentId))
-          ) {
-            noteIds.add(link.noteId);
-          }
-        }
+    // Distinct active notes per tag, collected in one pass over the links
+    const notesPerTag = new Map<string, Set<string>>();
+    for (const link of entry.noteTags) {
+      const note = entry.notes.get(link.noteId);
+      if (
+        !note ||
+        isConflictNote(note) ||
+        (note.deletedTime && note.deletedTime > 0) ||
+        (note.parentId && deletedNotebookIds.has(note.parentId))
+      ) {
+        continue;
       }
+      let noteIds = notesPerTag.get(link.tagId);
+      if (!noteIds) {
+        noteIds = new Set();
+        notesPerTag.set(link.tagId, noteIds);
+      }
+      noteIds.add(link.noteId);
+    }
 
+    const tagsList: TagItem[] = [];
+    for (const tag of entry.tags.values()) {
       tagsList.push({
         id: tag.id,
         title: tagTitle(tag),
-        noteCount: noteIds.size,
+        noteCount: notesPerTag.get(tag.id)?.size ?? 0,
         encrypted: isEncrypted(tag),
       });
     }
