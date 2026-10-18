@@ -70,6 +70,6 @@ Agents that edit code must still meet the definition of done. Agents report prob
 
 ## Known gaps
 
-- Client tests cover `lib/` helpers, `useNoteSaver`, `NoteListItem` and parts of `NoteViewer`; query keys/invalidation, the 409 conflict UI and Markdown link rewriting are still untested. No e2e tests yet (Playwright is already a dev dependency for screenshots).
+- Client tests cover `lib/` helpers, mutation hooks (query invalidation), the 409 conflict dialog, session expiry, Markdown rendering (`:/id` rewriting, XSS guard), the connection status/Refresh and parts of `NoteViewer`; component tests stub `fetch` with `src/test/fetch-mock.ts`. Still untested: pages (`NotesPage`, `LoginPage`), sidebar/notebook tree, search, tag editor, uploads. No e2e tests yet (Playwright is already a dev dependency for screenshots).
 - E2EE is not supported (writes are refused while it is enabled); changes made by Joplin Web are not yet verified end-to-end with desktop/mobile sync.
 - `res.sendFile` in the SPA fallback fails when the checkout path contains a dot directory (#90), so in `.claude/worktrees` point screenshots and previews at the Vite dev server.
