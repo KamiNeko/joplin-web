@@ -49,9 +49,11 @@ export function Header({
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
 
-  // Ctrl+K / Cmd+K focuses the search field (or opens the mobile menu that holds it)
+  // Ctrl+K / Cmd+K focuses the search field (or opens the mobile menu that holds it). In the note
+  // editor it inserts a link instead; the editor marks the event as handled then.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         const input = searchInputRef.current;
