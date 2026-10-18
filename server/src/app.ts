@@ -4,6 +4,7 @@ import express, { Express, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import fs from 'fs';
 import helmet from 'helmet';
+import path from 'path';
 
 import type { AppConfig } from './config.js';
 import { errorHandler } from './middleware/error-handler.js';
@@ -118,12 +119,25 @@ export function createApp(config: AppConfig): Express {
   // Serve frontend static assets if available (production mode)
   if (fs.existsSync(config.clientDistPath)) {
     console.log(`[Server] Serving static client build from: ${config.clientDistPath}`);
-    app.use(express.static(config.clientDistPath));
+    app.use(
+      express.static(config.clientDistPath, {
+        setHeaders: (res, filePath) => {
+          // Vite puts a content hash into every file name under assets/, so they never change
+          if (path.relative(config.clientDistPath, filePath).startsWith(`assets${path.sep}`)) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          } else {
+            res.setHeader('Cache-Control', 'no-cache');
+          }
+        },
+      })
+    );
 
     // SPA fallback for frontend client routing
     app.get('/{*splat}', (req: Request, res: Response) => {
       if (!req.path.startsWith('/api/')) {
         // `root` keeps the dotfiles check to the relative name, so a build path such as .claude/worktrees/... still works
+        // index.html names the current asset hashes, so browsers must revalidate it on every load
+        res.setHeader('Cache-Control', 'no-cache');
         res.sendFile('index.html', { root: config.clientDistPath });
       } else {
         res.status(404).json({ error: `Cannot ${req.method} ${req.path}` });

@@ -15,7 +15,7 @@ flowchart LR
     B -->|"Sync protocol<br/>/api/sessions, /api/items/*<br/>X-API-AUTH: &lt;session&gt;"| C
 ```
 
-In production the backend also serves the compiled client (`client/dist`) on the same port.
+In production the backend also serves the compiled client (`client/dist`) on the same port. Content-hashed files under `/assets/` are sent with `Cache-Control: public, max-age=31536000, immutable`; `index.html` (also the SPA fallback) and other files with `no-cache`, so a new release is picked up on the next load.
 
 ## Backend modules (`server/src`)
 
