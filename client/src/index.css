@@ -11,32 +11,41 @@
     --card-foreground: 60 3% 8%;
     --popover: 0 0% 100%;
     --popover-foreground: 60 3% 8%;
-    --primary: 15 55% 52%;               /* #c96442 */
+    --primary: 15 55% 42%;               /* #a65035, white text 5.6:1 */
     --primary-foreground: 0 0% 100%;
     --secondary: 48 20% 92%;
     --secondary-foreground: 60 3% 8%;
     --muted: 48 20% 92%;                 /* #f0eee6 */
-    --muted-foreground: 50 3% 44%;       /* #73726c */
+    --muted-foreground: 50 3% 38%;       /* #64635e, AA on muted and sidebar-accent */
     --accent: 50 18% 89%;
     --accent-foreground: 60 3% 8%;
     --destructive: 0 62% 48%;
     --destructive-foreground: 0 0% 100%;
     --border: 50 14% 86%;
     --input: 50 14% 83%;
-    --ring: 15 55% 52%;
+    --ring: 15 55% 42%;
     --radius: 0.75rem;
+
+    /* Status colours (text on the page background or a /10 tint of themselves passes AA) */
+    --success: 142 64% 27%;
+    --warning: 32 95% 30%;
+
+    /* Markdown editor syntax colours */
+    --syntax-string: 95 35% 32%;
+    --syntax-number: 290 35% 42%;
+    --syntax-function: 207 55% 38%;
 
     --code-background: 48 20% 94%;
     --code-foreground: 60 3% 15%;
 
     --sidebar-background: 53 25% 94%;    /* #f5f4ed */
     --sidebar-foreground: 60 3% 20%;
-    --sidebar-primary: 15 55% 52%;
+    --sidebar-primary: 15 55% 42%;
     --sidebar-primary-foreground: 0 0% 100%;
     --sidebar-accent: 50 16% 88%;
     --sidebar-accent-foreground: 60 3% 8%;
     --sidebar-border: 50 14% 86%;
-    --sidebar-ring: 15 55% 52%;
+    --sidebar-ring: 15 55% 42%;
   }
 
   .dark {
@@ -47,18 +56,25 @@
     --popover: 60 3% 18%;
     --popover-foreground: 50 20% 88%;
     --primary: 15 63% 60%;               /* #d97757 */
-    --primary-foreground: 0 0% 100%;
+    --primary-foreground: 60 3% 8%;      /* dark text on the light clay, 5.9:1 */
     --secondary: 60 3% 20%;
     --secondary-foreground: 50 20% 88%;
     --muted: 60 3% 19%;
     --muted-foreground: 48 4% 60%;       /* #9c9a92 */
     --accent: 40 3% 22%;                 /* #393937 */
     --accent-foreground: 48 33% 97%;
-    --destructive: 0 62% 62%;
-    --destructive-foreground: 0 0% 100%;
+    --destructive: 0 70% 67%;
+    --destructive-foreground: 60 3% 8%;
     --border: 50 4% 24%;
     --input: 50 4% 28%;
     --ring: 15 63% 60%;
+
+    --success: 142 50% 60%;
+    --warning: 38 90% 60%;
+
+    --syntax-string: 85 35% 65%;
+    --syntax-number: 290 40% 75%;
+    --syntax-function: 207 55% 72%;
 
     --code-background: 30 3% 11%;        /* #1c1b1a */
     --code-foreground: 50 20% 88%;
@@ -66,7 +82,7 @@
     --sidebar-background: 30 3% 12%;     /* #1f1e1d */
     --sidebar-foreground: 50 12% 80%;
     --sidebar-primary: 15 63% 60%;
-    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-primary-foreground: 60 3% 8%;
     --sidebar-accent: 60 3% 18%;
     --sidebar-accent-foreground: 48 33% 97%;
     --sidebar-border: 50 4% 20%;
@@ -83,14 +99,11 @@
     overflow-x: hidden;
   }
 
-  /* Smooth transition on theme switch */
-  body,
-  aside,
-  header,
-  main,
-  div,
-  nav {
-    transition-property: background-color, border-color, color;
+  /* Smooth colour change while switching themes only (ThemeProvider adds the class briefly),
+     so hover and selection changes elsewhere aren't animated */
+  .theme-transition,
+  .theme-transition * {
+    transition-property: background-color, border-color, color, fill, stroke;
     transition-duration: 150ms;
     transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
   }

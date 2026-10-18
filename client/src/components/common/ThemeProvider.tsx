@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from "react";
+import React, { createContext, useContext, useEffect, useRef, useState } from "react";
 
 type Theme = "dark" | "light" | "system";
 
@@ -31,8 +31,17 @@ export function ThemeProvider({
     () => (localStorage.getItem(storageKey) as Theme) || defaultTheme
   );
 
+  const isFirstApply = useRef(true);
+
   useEffect(() => {
     const root = window.document.documentElement;
+    // Animate colours only while the theme actually switches (not on first paint)
+    let transitionTimer: number | undefined;
+    if (!isFirstApply.current) {
+      root.classList.add("theme-transition");
+      transitionTimer = window.setTimeout(() => root.classList.remove("theme-transition"), 200);
+    }
+    isFirstApply.current = false;
     root.classList.remove("light", "dark");
 
     if (theme === "system") {
@@ -41,10 +50,14 @@ export function ThemeProvider({
         ? "dark"
         : "light";
       root.classList.add(systemTheme);
-      return;
+    } else {
+      root.classList.add(theme);
     }
 
-    root.classList.add(theme);
+    return () => {
+      window.clearTimeout(transitionTimer);
+      root.classList.remove("theme-transition");
+    };
   }, [theme]);
 
   const value: ThemeProviderState = {

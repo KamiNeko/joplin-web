@@ -82,10 +82,10 @@ const markdownHighlight = HighlightStyle.define([
   { tag: [t.processingInstruction, t.meta, t.contentSeparator], color: "hsl(var(--muted-foreground))" },
   { tag: t.list, color: "hsl(var(--primary))" },
   { tag: [t.keyword, t.tagName], color: "hsl(var(--primary))" },
-  { tag: [t.string, t.attributeValue], color: "#7c9a4a" },
-  { tag: [t.number, t.bool, t.atom], color: "#a86ab5" },
+  { tag: [t.string, t.attributeValue], color: "hsl(var(--syntax-string))" },
+  { tag: [t.number, t.bool, t.atom], color: "hsl(var(--syntax-number))" },
   { tag: t.comment, color: "hsl(var(--muted-foreground))", fontStyle: "italic" },
-  { tag: [t.function(t.variableName), t.function(t.propertyName)], color: "#4f8ac2" },
+  { tag: [t.function(t.variableName), t.function(t.propertyName)], color: "hsl(var(--syntax-function))" },
 ]);
 
 /**

@@ -27,3 +27,12 @@ Notable changes to Joplin Web. The format follows [Keep a Changelog](https://kee
 ### Removed
 
 - `timestamp` from the `GET /api/health` response.
+- The hard-coded "v1.0 • Synced" label in the sidebar.
+
+### Fixed
+
+- Failed loads of notebooks, tags, notes, search results or a note show an error with a Retry button instead of looking like empty data.
+- Accessibility: notebook rows work with the keyboard, row menus are visible on touch screens, the selected item is announced, the mobile menu has a single labelled close button, and editor save problems are announced to screen readers.
+- Text and buttons meet WCAG AA contrast in light and dark mode. Toasts follow the app theme instead of the OS setting.
+- Note list: the filter resets when you switch notebook, tag or trash (the sort choice stays), each list has its own empty-state text, and title sorting reads A–Z/Z–A.
+- On phones the editor highlights Edit when the stored layout is split, and Ctrl+K focuses the search field in the menu.
