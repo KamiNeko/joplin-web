@@ -241,11 +241,7 @@ export async function refreshServerCache(): Promise<void> {
  * Fetches the hierarchical notebook list.
  */
 export async function getNotebooks(): Promise<Notebook[]> {
-  const data = await request<Notebook[] | { items: Notebook[]; notebooks: Notebook[] }>("/api/notebooks");
-  if (Array.isArray(data)) {
-    return data;
-  }
-  return data.notebooks || data.items || [];
+  return request<Notebook[]>("/api/notebooks");
 }
 
 /**
@@ -268,12 +264,7 @@ export async function getNotes(params?: {
   }
 
   const endpoint = `/api/notes${query.toString() ? `?${query.toString()}` : ""}`;
-  const data = await request<NoteListItem[] | { items: NoteListItem[]; notes: NoteListItem[] }>(endpoint);
-
-  if (Array.isArray(data)) {
-    return data;
-  }
-  return data.notes || data.items || [];
+  return request<NoteListItem[]>(endpoint);
 }
 
 /**
@@ -287,11 +278,7 @@ export async function getNote(id: string): Promise<Note> {
  * Fetches all tags with note count.
  */
 export async function getTags(): Promise<Tag[]> {
-  const data = await request<Tag[] | { items: Tag[]; tags: Tag[] }>("/api/tags");
-  if (Array.isArray(data)) {
-    return data;
-  }
-  return data.tags || data.items || [];
+  return request<Tag[]>("/api/tags");
 }
 
 /**
@@ -303,14 +290,7 @@ export async function searchNotes(query: string): Promise<SearchResult[]> {
     return [];
   }
   const urlQuery = new URLSearchParams({ q: trimmed });
-  const data = await request<SearchResult[] | { items: SearchResult[]; results: SearchResult[] }>(
-    `/api/search?${urlQuery.toString()}`
-  );
-
-  if (Array.isArray(data)) {
-    return data;
-  }
-  return data.results || data.items || [];
+  return request<SearchResult[]>(`/api/search?${urlQuery.toString()}`);
 }
 
 /**

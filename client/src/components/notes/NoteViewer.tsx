@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Note, Notebook } from "@/lib/types";
 import { flattenNotebooks } from "@/lib/notebooks";
 import { setTaskChecked, type TaskLocation } from "@/lib/tasks";
-import { getConflictNote, updateNote as updateNoteRequest } from "@/lib/api";
+import { getConflictNote } from "@/lib/api";
 import { MarkdownRenderer } from "@/components/common/MarkdownRenderer";
 import { ConfirmDialog } from "@/components/common/Dialogs";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -36,14 +36,21 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { formatRelativeTime } from "./NoteListItem";
-import { NoteEditor } from "./NoteEditor";
+import { formatRelativeTime } from "@/lib/format";
 import { TagEditor } from "@/components/tags/TagEditor";
 import { Button } from "@/components/ui/button";
-import { invalidateLists, useDeleteNote, useRestoreNote, useUpdateNote } from "@/hooks/use-mutations";
+import { useDeleteNote, useRestoreNote, useUpdateNote } from "@/hooks/use-mutations";
+import { useNoteSaver } from "@/hooks/use-note-saver";
 import { cn } from "@/lib/utils";
 import { QueryError, StaleDataHint } from "@/components/common/QueryError";
+import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { clearDraft, findRestorableDraft, restoreStoredDraft, StoredDraft } from "@/lib/drafts";
+
+// The editor brings CodeMirror and its language data, so it is a separate chunk
+const loadNoteEditor = () => import("./NoteEditor");
+const lazyNoteEditor = () => lazy(() => loadNoteEditor().then((m) => ({ default: m.NoteEditor })));
+// React.lazy keeps a failed import for good, so Retry replaces it with a fresh one
+let NoteEditor = lazyNoteEditor();
 
 interface NoteViewerProps {
   note?: Note | null;
@@ -83,6 +90,8 @@ export function NoteViewer({
   const [restorable, setRestorable] = useState<StoredDraft | null>(() => (note ? findRestorableDraft(note) : null));
   const [restoredDraft, setRestoredDraft] = useState<StoredDraft | null>(null);
   const [editorKey, setEditorKey] = useState(0);
+  // Bumped by Retry after the editor chunk failed to load
+  const [editorAttempt, setEditorAttempt] = useState(0);
   const loadedNoteId = note?.id;
   const draftCheckedRef = useRef<string | null>(note?.id ?? null);
   useEffect(() => {
@@ -97,6 +106,10 @@ export function NoteViewer({
   const deleteNote = useDeleteNote();
   const restoreNote = useRestoreNote();
   const toggleTask = useTaskToggle(note?.id);
+  // Fetch the editor chunk while the note is read, so Edit opens without a wait (and works offline)
+  useEffect(() => {
+    if (loadedNoteId) void loadNoteEditor().catch(() => undefined);
+  }, [loadedNoteId]);
 
   if (isLoading) {
     return (
@@ -233,6 +246,23 @@ export function NoteViewer({
     // Remount an open editor so it starts from the draft
     setEditorKey((k) => k + 1);
     setIsEditing(true);
+  };
+
+  const retryEditor = () => {
+    // Failing again after a fresh import usually means the chunk is gone (new deployment): reload
+    if (editorAttempt > 0) {
+      window.location.reload();
+      return;
+    }
+    NoteEditor = lazyNoteEditor();
+    setEditorAttempt((n) => n + 1);
+  };
+
+  const closeBrokenEditor = () => {
+    // A restored draft is still stored on this device; offer it again
+    if (restoredDraft) setRestorable(restoredDraft);
+    setRestoredDraft(null);
+    setIsEditing(false);
   };
 
   const handleDiscardDraft = () => {
@@ -420,16 +450,37 @@ export function NoteViewer({
       )}
 
       {editing ? (
-        <NoteEditor
-          key={editorKey}
-          note={note}
-          focusTitle={startInEdit && !note.title}
-          initialDraft={restoredDraft}
-          onDone={() => {
-            setRestoredDraft(null);
-            setIsEditing(false);
-          }}
-        />
+        <ErrorBoundary
+          key={editorAttempt}
+          fallback={() => (
+            <div role="alert" className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+              <AlertCircle className="h-6 w-6 text-destructive" aria-hidden="true" />
+              <p className="text-sm font-medium text-foreground">Editor could not be loaded</p>
+              <p className="max-w-xs text-xs text-muted-foreground">Check your connection and try again.</p>
+              <div className="flex gap-2">
+                <Button size="sm" onClick={retryEditor}>
+                  Retry
+                </Button>
+                <Button size="sm" variant="ghost" onClick={closeBrokenEditor}>
+                  Back to reading
+                </Button>
+              </div>
+            </div>
+          )}
+        >
+          <Suspense fallback={<div className="flex-1" aria-busy="true" />}>
+            <NoteEditor
+              key={editorKey}
+              note={note}
+              focusTitle={startInEdit && !note.title}
+              initialDraft={restoredDraft}
+              onDone={() => {
+                setRestoredDraft(null);
+                setIsEditing(false);
+              }}
+            />
+          </Suspense>
+        </ErrorBoundary>
       ) : (
         <ScrollArea className="flex-1 px-6 sm:px-10 lg:px-12 py-8">
           <div className="max-w-4xl mx-auto space-y-6 pb-20">
@@ -518,8 +569,7 @@ const TASK_SAVE_DELAY_MS = 600;
  */
 function useTaskToggle(noteId: string | undefined) {
   const queryClient = useQueryClient();
-  const baseUpdatedTimeRef = useRef<number | null>(null);
-  const savingRef = useRef(false);
+  const saver = useNoteSaver(noteId);
   const timerRef = useRef<number | null>(null);
 
   // Flush a pending save when the note is closed instead of dropping it
@@ -536,44 +586,40 @@ function useTaskToggle(noteId: string | undefined) {
 
   const save = async () => {
     timerRef.current = null;
-    if (!noteId) return;
-    if (savingRef.current) {
+    if (!noteId || !saver) return;
+    if (saver.inflight) {
       timerRef.current = window.setTimeout(() => void save(), TASK_SAVE_DELAY_MS);
       return;
     }
     const cached = queryClient.getQueryData<Note>(["note", noteId]);
     if (!cached) return;
 
-    savingRef.current = true;
-    try {
-      const saved = await updateNoteRequest(noteId, {
-        body: cached.body,
-        baseUpdatedTime: baseUpdatedTimeRef.current ?? cached.updatedTime,
-      });
-      baseUpdatedTimeRef.current = saved.updatedTime;
-      // Keep any newer optimistic body (more clicks while saving); its save is already scheduled
-      const latest = queryClient.getQueryData<Note>(["note", noteId]);
-      queryClient.setQueryData<Note>(["note", noteId], { ...saved, body: latest?.body ?? saved.body });
-      invalidateLists(queryClient);
-    } catch (err) {
-      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-      timerRef.current = null;
-      baseUpdatedTimeRef.current = null;
-      const current = getConflictNote(err);
-      if (current) {
-        queryClient.setQueryData(["note", noteId], current);
-        toast.error("This note was changed elsewhere", {
-          description: "Your checkbox change was not saved. The latest version is shown now.",
-        });
-      } else {
-        queryClient.invalidateQueries({ queryKey: ["note", noteId] });
-        toast.error("Could not update checkbox", {
-          description: err instanceof Error ? err.message : undefined,
-        });
+    // The new body is built from the cached note, so that is the version it is based on. The cache
+    // also holds what the editor saved, so a save there never makes this one a false conflict.
+    saver.baseUpdatedTime = cached.updatedTime;
+    await saver.send(
+      { body: cached.body },
+      {
+        // Keep any newer optimistic body (more clicks while saving); its save is already scheduled
+        toCache: (saved) => ({ ...saved, body: queryClient.getQueryData<Note>(["note", noteId])?.body ?? saved.body }),
+        onError: (err) => {
+          if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+          timerRef.current = null;
+          const current = getConflictNote(err);
+          if (current) {
+            queryClient.setQueryData(["note", noteId], current);
+            toast.error("This note was changed elsewhere", {
+              description: "Your checkbox change was not saved. The latest version is shown now.",
+            });
+          } else {
+            queryClient.invalidateQueries({ queryKey: ["note", noteId] });
+            toast.error("Could not update checkbox", {
+              description: err instanceof Error ? err.message : undefined,
+            });
+          }
+        },
       }
-    } finally {
-      savingRef.current = false;
-    }
+    );
   };
 
   saveRef.current = save;

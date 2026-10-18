@@ -5,7 +5,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Search, FileText, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { formatRelativeTime } from "@/components/notes/NoteListItem";
+import { formatRelativeTime } from "@/lib/format";
 import { QueryError } from "@/components/common/QueryError";
 
 interface SearchResultsProps {
