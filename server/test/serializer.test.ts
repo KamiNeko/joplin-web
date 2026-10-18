@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { deserialize, serialize, stripMarkdown } from '../src/services/serializer.js';
+import { deserialize, markupLanguageOf, notePreview, serialize, stripHtml, stripMarkdown } from '../src/services/serializer.js';
 import { JoplinItemType } from '../src/types/index.js';
 
 /**
@@ -553,5 +553,38 @@ describe('stripMarkdown', () => {
   test('truncates mid-word when there is no late word boundary', () => {
     assert.equal(stripMarkdown('a'.repeat(200), 10), `${'a'.repeat(10)}...`);
     assert.equal(stripMarkdown(`ab ${'c'.repeat(100)}`, 10), `ab ${'c'.repeat(7)}...`);
+  });
+});
+
+describe('HTML notes', () => {
+  const html = '<div class="clip">\n  <p>Intro</p>\n\n    <p>After blank line, *indented*</p>\n</div>';
+
+  test('round-trips an HTML note body and markup_language unchanged', () => {
+    const parsed = roundTrip({ type_: JoplinItemType.Note, title: 'Clip', body: html, properties: { ...baseProps, markup_language: '2' } });
+    assert.equal(parsed.body, html);
+    assert.equal(parsed.properties.markup_language, '2');
+    assert.equal(markupLanguageOf(parsed.properties), 2);
+  });
+
+  test('treats missing or unknown markup_language as Markdown', () => {
+    assert.equal(markupLanguageOf({}), 1);
+    assert.equal(markupLanguageOf(undefined), 1);
+    assert.equal(markupLanguageOf({ markup_language: '1' }), 1);
+    assert.equal(markupLanguageOf({ markup_language: '7' }), 1);
+  });
+
+  test('stripHtml drops tags, comments, scripts and styles and decodes entities', () => {
+    assert.equal(stripHtml(html), 'Intro After blank line, *indented*');
+    assert.equal(
+      stripHtml('<head><title>T</title><style>p{color:red}</style></head><!-- c --><p>A &amp; B&nbsp;&#8211; <b>bo</b>ld</p><script>alert(1)</script><br>end'),
+      'A & B – bold end'
+    );
+    assert.equal(stripHtml('text <a href="x"'), 'text', 'a tag cut off at the end of a snippet');
+    assert.equal(stripHtml(''), '');
+  });
+
+  test('notePreview picks the stripper by markup language', () => {
+    assert.equal(notePreview('<p>*a*</p>', 2), '*a*');
+    assert.equal(notePreview('<p>*a*</p>', 1), 'a');
   });
 });

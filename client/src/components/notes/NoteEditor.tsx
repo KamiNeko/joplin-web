@@ -1,8 +1,8 @@
 import { useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, Check, Circle, Columns2, Eye, Loader2, Paperclip, PencilLine } from "lucide-react";
-import { Note } from "@/lib/types";
+import { AlertTriangle, Check, Circle, Columns2, Eye, FileCode, Loader2, Paperclip, PencilLine } from "lucide-react";
+import { MARKUP_HTML, Note } from "@/lib/types";
 import { ApiError, getConflictNote } from "@/lib/api";
 import { invalidateLists } from "@/hooks/use-mutations";
 import { useNoteSaver } from "@/hooks/use-note-saver";
@@ -103,6 +103,8 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
   const conflictRef = useRef(false);
 
   const deferredBody = useDeferredValue(draft.body);
+  // HTML notes (Web Clipper) are edited as raw HTML, like in Joplin desktop; saving keeps markup_language
+  const isHtml = note.markupLanguage === MARKUP_HTML;
 
   const clearTimer = () => {
     if (timerRef.current !== null) {
@@ -521,6 +523,19 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
         </div>
       )}
 
+      {isHtml && (
+        <div
+          role="note"
+          className="mx-4 sm:mx-6 mt-3 flex items-start gap-2 rounded-lg border border-border/60 bg-muted/50 px-3 py-2 text-xs text-muted-foreground"
+        >
+          <FileCode className="h-3.5 w-3.5 mt-px shrink-0" aria-hidden="true" />
+          <span>
+            This is an HTML note (for example a page saved with the Joplin Web Clipper). You are editing its raw
+            HTML; Markdown formatting does not apply here.
+          </span>
+        </div>
+      )}
+
       {/* Title */}
       <div className="px-4 sm:px-10 lg:px-12 pt-6 pb-2">
         <input
@@ -566,6 +581,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
                 ref={editorRef}
                 key={editorKey}
                 onUploadsChange={handleUploadsChange}
+                html={isHtml}
                 value={draft.body}
                 onChange={(body) => updateDraft({ body })}
                 autoFocus={!focusTitle}
@@ -585,6 +601,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
               {deferredBody.trim() ? (
                 <MarkdownRenderer
                   content={deferredBody}
+                  html={isHtml}
                   onToggleTask={(location, checked) => {
                     // The location refers to the rendered text; ignore clicks on a preview that
                     // hasn't caught up with the latest typing yet

@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Note, Notebook } from "@/lib/types";
+import { MARKUP_HTML, Note, Notebook } from "@/lib/types";
 import { flattenNotebooks } from "@/lib/notebooks";
 import { setTaskChecked, type TaskLocation } from "@/lib/tasks";
 import { getConflictNote } from "@/lib/api";
@@ -28,6 +28,7 @@ import {
   CheckCircle2,
   Circle,
   AlertCircle,
+  FileCode,
   FileText,
   GitCompareArrows,
   History,
@@ -556,6 +557,13 @@ export function NoteViewer({
                   </div>
                 )}
 
+                {note.markupLanguage === MARKUP_HTML && (
+                  <div className="flex items-center gap-1.5" title="This note is stored as HTML, e.g. saved with the Joplin Web Clipper">
+                    <FileCode className="h-3.5 w-3.5" />
+                    <span>HTML note</span>
+                  </div>
+                )}
+
                 <TagEditor
                   noteId={note.id}
                   tags={note.tags ?? []}
@@ -568,7 +576,11 @@ export function NoteViewer({
 
             <div className="pt-2">
               {note.body.trim() ? (
-                <MarkdownRenderer content={note.body} onToggleTask={isTrashed ? undefined : toggleTask} />
+                <MarkdownRenderer
+                  content={note.body}
+                  html={note.markupLanguage === MARKUP_HTML}
+                  onToggleTask={isTrashed ? undefined : toggleTask}
+                />
               ) : (
                 <button
                   type="button"

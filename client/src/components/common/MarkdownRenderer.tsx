@@ -18,6 +18,11 @@ interface MarkdownRendererProps {
   content: string;
   className?: string;
   /**
+   * Renders `content` as HTML instead of Markdown, for notes with `markup_language: 2` (e.g. pages
+   * saved with the Joplin Web Clipper). Same sanitizing and `:/id` handling, no Markdown parsing.
+   */
+  html?: boolean;
+  /**
    * Makes task-list checkboxes clickable. `location` is where the task item starts in `content`
    * (see `setTaskChecked` in lib/tasks).
    */
@@ -67,6 +72,17 @@ function remarkTaskItems() {
 }
 
 /**
+ * Remark plugin for HTML notes: replaces whatever remark parsed with one raw HTML node holding the
+ * whole note, so rehype-raw parses it as HTML. Markdown rules never apply (an HTML block ending at
+ * a blank line, indented code, `*emphasis*`), but sanitizing and the components stay the same.
+ */
+function remarkWholeHtml() {
+  return (tree: MdastNode & { children: unknown[] }, file: { value: unknown }) => {
+    tree.children = [{ type: "html", value: String(file.value) }];
+  };
+}
+
+/**
  * Rehype plugin that stores the source line/column of each task item on its checkbox
  * (data-task-line, data-task-column), so a click toggles exactly the "[ ]" the parser rendered.
  * Runs after sanitizing; checkboxes in raw HTML get no location and stay read-only.
@@ -107,6 +123,8 @@ const ALLOWED_CONTENT_CLASS = /^(?:language-|hljs)[\w-]*$/;
 // Custom sanitize schema allowing highlight classes and common markdown elements
 const sanitizeSchema = {
   ...defaultSchema,
+  // Drop these elements with their contents (CSS or a page title would otherwise show up as text)
+  strip: [...(defaultSchema.strip ?? []), "style", "title"],
   attributes: {
     ...defaultSchema.attributes,
     code: [...(defaultSchema.attributes?.code || []), ["className", ALLOWED_CONTENT_CLASS]],
@@ -150,19 +168,31 @@ function preprocessJoplinMarkdown(raw: string): string {
     (_, alt, lead, id, title = "", trail) => `![${alt}](${lead}${getResourceUrl(id)}${title}${trail})`
   );
 
-  // Replace HTML image src: <img src=":/id" ...> -> <img src="/api/resources/id" ...>
-  transformed = transformed.replace(
-    /<img([^>]{1,500}?)src=["']:\/?([a-zA-Z0-9_-]+)["']([^>]*)>/gi,
-    (_, before, id, after) => `<img${before}src="${getResourceUrl(id)}"${after}>`
-  );
-
-  // Replace links to notes/attachments: [text](:/id) and <a href=":/id"> -> /joplin-item/id, keeping
-  // a "#heading" fragment. A ":/" href would be dropped by the sanitizer as an unknown protocol.
+  // Replace links to notes/attachments: [text](:/id) -> /joplin-item/id, keeping a "#heading"
+  // fragment. A ":/" href would be dropped by the sanitizer as an unknown protocol.
   transformed = transformed.replace(
     /(^|[^!])\[([^\]]*)\]\((\s*):\/?([0-9a-fA-F]{32})(#[^\s()"'<>]*)?(\s+"[^"]*")?(\s*)\)/g,
     (_, before, text, lead, id, fragment = "", title = "", trail) =>
       `${before}[${text}](${lead}${JOPLIN_ITEM_PATH}${id.toLowerCase()}${fragment}${title}${trail})`
   );
+
+  return preprocessJoplinHtml(transformed);
+}
+
+/**
+ * Translates `:/<id>` references in HTML (`<img src>`, `<a href>`) into web-compatible URLs.
+ * Used for HTML notes and for the HTML inside Markdown notes.
+ */
+function preprocessJoplinHtml(raw: string): string {
+  if (!raw) return "";
+
+  // Replace HTML image src: <img src=":/id" ...> -> <img src="/api/resources/id" ...>
+  let transformed = raw.replace(
+    /<img([^>]{1,500}?)src=["']:\/?([a-zA-Z0-9_-]+)["']([^>]*)>/gi,
+    (_, before, id, after) => `<img${before}src="${getResourceUrl(id)}"${after}>`
+  );
+
+  // Replace links to notes/attachments: <a href=":/id"> -> /joplin-item/id, keeping a "#heading" fragment
   transformed = transformed.replace(
     /<a([^>]{1,500}?)href=(["']):\/?([0-9a-fA-F]{32})(#[^\s"'<>]*)?\2/gi,
     (_, before, _quote, id, fragment = "") => `<a${before}href="${JOPLIN_ITEM_PATH}${id.toLowerCase()}${fragment}"`
@@ -257,7 +287,7 @@ function CodeBlock({ inline, className, children, ...props }: CodeBlockProps) {
  * Reusable Markdown renderer for Joplin notes with code highlighting,
  * resource resolving, and beautiful typography.
  */
-export function MarkdownRenderer({ content, className, onToggleTask }: MarkdownRendererProps) {
+export function MarkdownRenderer({ content, className, html = false, onToggleTask }: MarkdownRendererProps) {
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
@@ -281,7 +311,7 @@ export function MarkdownRenderer({ content, className, onToggleTask }: MarkdownR
       }
     }
   };
-  const processedContent = preprocessJoplinMarkdown(content);
+  const processedContent = html ? preprocessJoplinHtml(content) : preprocessJoplinMarkdown(content);
 
   // A link to a heading ("/notes/<id>#<slug>") scrolls to it once per navigation, not on every
   // re-render (the editor preview re-renders while typing)
@@ -302,7 +332,7 @@ export function MarkdownRenderer({ content, className, onToggleTask }: MarkdownR
   return (
     <div ref={containerRef} className={`prose-content text-foreground leading-relaxed ${className ?? ""}`}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkTaskItems]}
+        remarkPlugins={html ? [remarkWholeHtml] : [remarkGfm, remarkTaskItems]}
         rehypePlugins={[
           rehypeRaw,
           [rehypeSanitize, sanitizeSchema],

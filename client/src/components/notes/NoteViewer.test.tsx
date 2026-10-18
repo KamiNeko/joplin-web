@@ -65,3 +65,24 @@ describe("NoteViewer restore offer", () => {
     expect((screen.getByRole("button", { name: "Edit" }) as HTMLButtonElement).disabled).toBe(false);
   });
 });
+
+// Regression tests for #104
+describe("NoteViewer with an HTML note", () => {
+  const htmlNote: Note = {
+    ...note,
+    markupLanguage: 2,
+    body: '<div class="clip">\n  <p>Intro</p>\n\n    <p>After blank line, indented</p>\n</div>',
+  };
+
+  it("renders the body as HTML and marks it as an HTML note", () => {
+    const { container } = renderViewer({ note: htmlNote });
+    expect(screen.getByText("HTML note")).toBeTruthy();
+    expect(screen.getByText("After blank line, indented").tagName).toBe("P");
+    expect(container.querySelector("pre")).toBeNull();
+  });
+
+  it("shows no HTML marker for Markdown notes", () => {
+    renderViewer();
+    expect(screen.queryByText("HTML note")).toBeNull();
+  });
+});

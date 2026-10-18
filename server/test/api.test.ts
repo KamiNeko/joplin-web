@@ -93,6 +93,32 @@ describe('reading', () => {
     assert.equal(res.data.notebookTitle, 'Projects');
   });
 
+  test('returns the markup language and plaintext previews of HTML notes', async () => {
+    const html = await api(`/api/notes/${demoId('note-clipped-article')}`);
+    assert.equal(html.status, 200);
+    assert.equal(html.data.markupLanguage, 2);
+    assert.match(html.data.body, /^<div class="clip">/);
+    assert.equal((await api(`/api/notes/${demoId('note-roadmap')}`)).data.markupLanguage, 1);
+
+    const list = await api(`/api/notes?notebook_id=${demoId('nb-reading')}`);
+    const clipped = list.data.find((n: any) => n.id === demoId('note-clipped-article'));
+    assert.ok(clipped.preview.startsWith('The Case for Slow Travel Saved with the Joplin Web Clipper from example.com'));
+    assert.ok(!/[<>]/.test(clipped.preview), 'no raw tags in the preview');
+    assert.ok(clipped.preview.includes('*regional*'), 'HTML text is not stripped as Markdown');
+  });
+
+  test('keeps markup_language when an HTML note is edited', async () => {
+    const id = demoId('note-clipped-article');
+    const before = await api(`/api/notes/${id}`);
+    const res = await api(`/api/notes/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ body: `${before.data.body}\n<p>Added</p>`, baseUpdatedTime: before.data.updatedTime }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.data.markupLanguage, 2);
+    assert.match(mock.items.get(`${id}.md`)!.content.toString('utf8'), /^markup_language: 2$/m);
+  });
+
   test('searches titles and bodies', async () => {
     const res = await api('/api/search?q=miso');
     assert.equal(res.status, 200);

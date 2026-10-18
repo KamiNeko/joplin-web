@@ -65,7 +65,12 @@ export interface Note {
   isConflict?: boolean;
   /** Id of the note the conflict copy was made from, empty when unknown */
   conflictOriginalId?: string;
+  /** Joplin's `markup_language`: 1 = Markdown, 2 = HTML (see `MARKUP_HTML`) */
+  markupLanguage?: number;
 }
+
+/** `markupLanguage` of HTML notes, e.g. pages saved with the Joplin Web Clipper */
+export const MARKUP_HTML = 2;
 
 /**
  * Tag model associated with notes.
