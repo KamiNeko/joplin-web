@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import rehypeHighlight from "rehype-highlight";
@@ -13,6 +14,9 @@ import { cn } from "@/lib/utils";
 import type { TaskLocation } from "@/lib/tasks";
 import { useLocation, useNavigate } from "react-router-dom";
 import { findHeading, fragmentSlug, headingSlug } from "@/lib/heading-slug";
+import { remarkJoplinMarkup, remarkJoplinMath } from "@/lib/markdown-extensions";
+import { MathFormula } from "./MathFormula";
+import { MermaidDiagram } from "./MermaidDiagram";
 
 interface MarkdownRendererProps {
   content: string;
@@ -39,6 +43,19 @@ interface HastNode {
   properties?: Record<string, unknown>;
   children?: HastNode[];
   position?: SourcePosition;
+}
+
+/** Concatenated text of a hast subtree */
+function hastText(node: HastNode | undefined): string {
+  if (!node) return "";
+  if (node.type === "text") return (node as { value?: string }).value ?? "";
+  return (node.children ?? []).map(hastText).join("");
+}
+
+/** Class names of a hast element as a list */
+function hastClasses(node: HastNode | undefined): string[] {
+  const value = node?.properties?.className;
+  return Array.isArray(value) ? value.map(String) : typeof value === "string" ? value.split(/\s+/) : [];
 }
 
 interface MdastNode {
@@ -118,16 +135,22 @@ function rehypeTaskLocation() {
 
 // Classes note content may set. Anything else (e.g. Tailwind's "fixed inset-0") could let a note
 // restyle or overlay the app UI. rehype-highlight runs after sanitizing and adds its own classes.
-const ALLOWED_CONTENT_CLASS = /^(?:language-|hljs)[\w-]*$/;
+// "math-inline"/"math-display" mark remark-math's formulas, which MathFormula renders with KaTeX.
+const ALLOWED_CONTENT_CLASS = /^(?:(?:language-|hljs)[\w-]*|math-inline|math-display)$/;
 
 // Custom sanitize schema allowing highlight classes and common markdown elements
 const sanitizeSchema = {
   ...defaultSchema,
   // Drop these elements with their contents (CSS or a page title would otherwise show up as text)
   strip: [...(defaultSchema.strip ?? []), "style", "title"],
+  tagNames: [...(defaultSchema.tagNames ?? []), "mark"],
   attributes: {
     ...defaultSchema.attributes,
-    code: [...(defaultSchema.attributes?.code || []), ["className", ALLOWED_CONTENT_CLASS]],
+    // Replaces the default className rule (only "language-*"): the first rule for a property wins
+    code: [
+      ...(defaultSchema.attributes?.code || []).filter((rule) => !Array.isArray(rule) || rule[0] !== "className"),
+      ["className", ALLOWED_CONTENT_CLASS],
+    ],
     span: [...(defaultSchema.attributes?.span || []), ["className", ALLOWED_CONTENT_CLASS]],
     div: [...(defaultSchema.attributes?.div || []), ["className", ALLOWED_CONTENT_CLASS]],
     img: [
@@ -224,6 +247,11 @@ interface CodeBlockProps extends React.HTMLAttributes<HTMLElement> {
 
 function CodeBlock({ inline, className, children, ...props }: CodeBlockProps) {
   const [copied, setCopied] = useState(false);
+  const classes = className?.split(/\s+/) ?? [];
+  if (classes.includes("math-inline") || classes.includes("math-display")) {
+    return <MathFormula tex={textContent(children)} display={classes.includes("math-display")} />;
+  }
+
   const match = /language-(\w+)/.exec(className || "");
   const language = match ? match[1] : "";
   const codeString = String(children).replace(/\n$/, "");
@@ -332,7 +360,18 @@ export function MarkdownRenderer({ content, className, html = false, onToggleTas
   return (
     <div ref={containerRef} className={`prose-content text-foreground leading-relaxed ${className ?? ""}`}>
       <ReactMarkdown
-        remarkPlugins={html ? [remarkWholeHtml] : [remarkGfm, remarkTaskItems]}
+        remarkPlugins={
+          html
+            ? [remarkWholeHtml]
+            : [
+                // Joplin uses a single "~" for subscript, only "~~" is strikethrough
+                [remarkGfm, { singleTilde: false }],
+                remarkMath,
+                remarkJoplinMath,
+                remarkJoplinMarkup,
+                remarkTaskItems,
+              ]
+        }
         rehypePlugins={[
           rehypeRaw,
           [rehypeSanitize, sanitizeSchema],
@@ -341,6 +380,21 @@ export function MarkdownRenderer({ content, className, html = false, onToggleTas
         ]}
         components={{
           code: CodeBlock,
+          pre: ({ node, children, ...props }) => {
+            const code = (node as HastNode | undefined)?.children?.find((child) => child.type === "element");
+            const classes = hastClasses(code);
+            if (code?.tagName === "code" && classes.includes("language-mermaid")) {
+              return <MermaidDiagram code={hastText(code).replace(/\n$/, "")} />;
+            }
+            // Display math renders as a block of its own (see CodeBlock)
+            if (code?.tagName === "code" && classes.includes("math-display")) return <>{children}</>;
+            return <pre {...props}>{children}</pre>;
+          },
+          mark: ({ children, ...props }) => (
+            <mark {...props} className="rounded-sm bg-warning/30 px-0.5 text-foreground">
+              {children}
+            </mark>
+          ),
           a: ({ href, children, ...props }) => {
             if (!href) return <a {...props}>{children}</a>;
 
