@@ -65,7 +65,7 @@ await mkdir(OUT_DIR, { recursive: true });
 
   await open(page, noteUrl("projects", "api-notes"), "Pagination");
   await page.getByRole("button", { name: "Edit", exact: true }).click();
-  await page.getByRole("tab", { name: "Split" }).click();
+  await page.getByRole("button", { name: "Split", exact: true }).click();
   await page.waitForTimeout(500);
   await shot(page, "editor-split.png");
   await context.close();

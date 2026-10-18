@@ -4,45 +4,59 @@ Notable changes to Joplin Web. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
-### Added
+## [1.0.0] – 2026-10-18
 
-- Release workflow: `vX.Y.Z` tags publish multi-arch images (amd64, arm64) to GHCR with OCI labels, plus a GitHub release.
-- Dependabot updates for npm (server, client), GitHub Actions and the Docker base image.
-- `GET /api/health` reports the running `version` and `commit`. Both are set at build time (`APP_VERSION` and `GIT_SHA` build args) and are also available to the client.
-- `HOST_PORT` chooses the host port in Docker Compose.
-- Connection status at the bottom of the sidebar (updated, refreshing, saving, server error, offline, session expired). Its popover shows the Joplin Server host, the account, the last update and error, a *Refresh* button and the app version. `GET /api/auth/check` now returns `serverHost`.
-- Lists and the open note refresh when you return to the tab or come back online (at most every 30 s). Notes with unsaved edits are never refetched. A newer version of the note open in the editor is loaded directly when you haven't typed anything; with unsaved edits a banner lets you load it or keep yours.
-- *About Joplin Web* in the user menu, with version, commit and project links.
-- Offline banner, automatic retry of failed saves (with backoff, up to 6 times, and right away when the browser is back online; retries stop when the editor closes), and a local draft of unsaved editor text that is offered for restore when the note is opened again. Editing waits until you restore or discard it. Drafts belong to the account and Joplin Server they were written for, expire after 7 days, and are removed after saving, on sign-out and when another account signs in.
-- A "Session expired" prompt on any 401 that signs you in again (email pre-filled) and returns to the same note, instead of a hard redirect that lost unsaved text. *Sign out and discard* deletes the unsaved changes kept on the device.
-- A "Couldn't refresh" hint when earlier data stays on screen after a failed refetch.
+First stable release. Joplin Web now reads **and writes** notes on your Joplin Server; the earlier `v1.0-readonly` snapshot could only read them.
 
-### Changed
+### Upgrade notes
 
-- Node.js 24 LTS in the Docker image and CI (Node.js 20 is end-of-life). `.nvmrc` and `engines` declare the supported version (22 or newer).
-- Docker Compose passes every variable from `.env` to the container. `CACHE_TTL_MS` and `AUTH_CACHE_TTL_MS` were ignored before.
-- The container always listens on port 3001. Docker Compose (version 2.24 or newer) treats `.env` as optional and reports a missing `JOPLIN_SERVER_URL` at `docker compose up`.
-- `.env.example` now holds production values only. For local development, copy `server/.env.example` instead.
-- Without `CORS_ORIGIN`, production builds no longer allow cross-origin API calls (previously `http://localhost:5173`). Set `CORS_ORIGIN` if the UI is served from another origin.
-- A failed refetch of the open note no longer replaces it (or an open editor) with an error.
-- To-do toggles in the note list are exposed as checkboxes (`role="checkbox"`, `aria-checked`).
-- Queries are no longer retried after a 4xx response.
-- The editor toolbar fits next to the note list on tablet widths; split view needs a desktop-wide window and otherwise behaves like Edit.
-- Smaller, stricter image: lockfile-exact installs, production dependencies from a separate stage, no `chown` layer, app files read-only for the runtime user, no npm/yarn in the runtime image, healthcheck through `node` instead of `curl`.
+- **Host port:** set `HOST_PORT` instead of `PORT` in `.env` to change the published port in Docker Compose. The container always listens on 3001. `PORT` still works as the host port for this release cycle and will be removed later.
+- **Sign in again:** sessions now live in an httpOnly cookie instead of the browser's local storage, so everyone has to sign in once after the update.
+- **`CORS_ORIGIN`:** production builds no longer allow cross-origin API calls by default (previously `http://localhost:5173`). Set `CORS_ORIGIN` only if the UI is served from another origin than the API.
+- **Reverse proxy:** behind a proxy, set `PUBLIC_URL` (the address you open Joplin Web at) and `TRUST_PROXY`. Writes from other origins are rejected, and an `https://` `PUBLIC_URL` turns on the `Secure` cookie flag.
 
-### Deprecated
+### Features
 
-- `PORT` as the published host port in Docker Compose. It still works for this release cycle; rename it to `HOST_PORT` in `.env`. The fallback will be removed in a later release.
+- Create, edit and delete notes in a CodeMirror Markdown editor with *Edit*, *Split* and *Preview* modes, autosave and `Ctrl+S`.
+- Notebooks: create, rename, move (into another notebook or to the top level) and delete.
+- To-dos, clickable task-list checkboxes in the preview, and to-do toggles in the note list.
+- Tags: add, remove, rename and delete.
+- Images and attachments: Joplin resources are shown inline; drop, paste or attach files to upload them. Links to notes and attachments work.
+- Trash: deleted notes and notebooks can be restored or deleted permanently.
+- Conflict detection: if a note changed elsewhere while you edited it, you choose which version to keep.
+- Search from the header field (`Ctrl+K`).
+- Connection status at the bottom of the sidebar (updated, refreshing, saving, server error, offline, session expired). Its popover shows the Joplin Server host, the account, the last update and error, a *Refresh* button and the app version.
+- Lists and the open note refresh when you return to the tab or come back online. A newer version of the open note loads directly if you haven't typed anything; with unsaved edits a banner lets you choose.
+- No lost typing: an offline banner, automatic retries of failed saves, and a local draft of unsaved text that is offered for restore. Drafts belong to one account and server, expire after 7 days and are removed on sign-out.
+- A "Session expired" prompt signs you in again and returns to the same note instead of losing unsaved text.
+- *About Joplin Web* in the user menu, and `GET /api/health` with the running `version` and `commit`.
+- Error states with a Retry button instead of empty lists; a "Couldn't refresh" hint when older data stays on screen.
+- Accessibility: keyboard-operable sidebar, screen-reader announcements, WCAG AA contrast in light and dark mode, themed toasts.
+
+### Security
+
+- httpOnly `SameSite=Strict` session cookie (`Secure` `__Host-` cookie over HTTPS); the token is no longer stored in the browser or echoed by `/api/auth/check`.
+- Origin check on every write as CSRF protection; requests with conflicting session cookies are rejected.
+- Logout ends the session on Joplin Server and clears the server-side cache.
+- Content Security Policy; remote images are blocked unless `ALLOW_REMOTE_IMAGES` is set. SVG attachments are shown safely.
+- Rate limits on the API, validated item ids before any Joplin path is built, and error responses that don't leak internals. Login logs no email address.
+
+### Data safety
+
+- Updates start from the item's original properties and change only the edited fields; unknown properties, property order and CRLF line endings are preserved.
+- Writes are refused when the account uses end-to-end encryption, and for encrypted or trashed targets.
+- Permanent deletion only removes notes that are actually in the trash; restoring a notebook brings back only what was trashed with it.
+- Task checkboxes toggle exactly the task you clicked; editor saves are serialized so closing the editor cannot race autosave.
+- Items deleted on another device are dropped from the cache.
+
+### Deployment
+
+- Multi-arch images (amd64, arm64) at `ghcr.io/kamineko/joplin-web` for every release tag, with OCI labels and a GitHub release.
+- One container serves the API and the web app on port 3001. Node.js 24 LTS, lockfile-exact installs, read-only app files, no npm in the runtime image, healthcheck through `node`.
+- Docker Compose passes every variable from `.env` to the container (`CACHE_TTL_MS` and `AUTH_CACHE_TTL_MS` were ignored before) and reports a missing `JOPLIN_SERVER_URL` at `docker compose up`.
+- `.env.example` holds production values only; use `server/.env.example` for development.
+- Dependabot updates for npm, GitHub Actions and the Docker base image.
 
 ### Removed
 
 - `timestamp` from the `GET /api/health` response.
-- The hard-coded "v1.0 • Synced" label in the sidebar.
-
-### Fixed
-
-- Failed loads of notebooks, tags, notes, search results or a note show an error with a Retry button instead of looking like empty data.
-- Accessibility: notebook rows work with the keyboard, row menus are visible on touch screens, the selected item is announced, the mobile menu has a single labelled close button, and editor save problems are announced to screen readers.
-- Text and buttons meet WCAG AA contrast in light and dark mode. Toasts follow the app theme instead of the OS setting.
-- Note list: the filter resets when you switch notebook, tag or trash (the sort choice stays), each list has its own empty-state text, and title sorting reads A–Z/Z–A.
-- On phones the editor highlights Edit when the stored layout is split, and Ctrl+K focuses the search field in the menu.

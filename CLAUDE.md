@@ -70,5 +70,6 @@ Agents that edit code must still meet the definition of done. Agents report prob
 
 ## Known gaps
 
-- Client tests cover only `lib/tasks`, `lib/version` and `NoteListItem` so far; TanStack Query hooks (query keys, invalidation), the 409 conflict UI, auth redirects and Markdown link rewriting are still untested. No e2e tests yet (Playwright is already a dev dependency for screenshots).
-- E2EE items are not supported; changes made by Joplin Web are not yet verified end-to-end with desktop/mobile sync.
+- Client tests cover `lib/` helpers, `useNoteSaver`, `NoteListItem` and parts of `NoteViewer`; query keys/invalidation, the 409 conflict UI and Markdown link rewriting are still untested. No e2e tests yet (Playwright is already a dev dependency for screenshots).
+- E2EE is not supported (writes are refused while it is enabled); changes made by Joplin Web are not yet verified end-to-end with desktop/mobile sync.
+- `res.sendFile` in the SPA fallback fails when the checkout path contains a dot directory (#90), so in `.claude/worktrees` point screenshots and previews at the Vite dev server.
