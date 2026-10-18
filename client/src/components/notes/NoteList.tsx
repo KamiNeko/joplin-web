@@ -9,17 +9,29 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
+import { QueryError } from "@/components/common/QueryError";
 
 interface NoteListProps {
   notes?: NoteListItemType[];
   isLoading?: boolean;
+  /** Set when the list failed to load; shows an error with Retry instead of an empty list */
+  error?: Error | null;
+  onRetry?: () => void;
+  isRetrying?: boolean;
   selectedNoteId?: string | null;
   onSelectNote: (id: string) => void;
   title?: string;
   subtitle?: string;
+  /** Empty-state text for this list (e.g. "Trash is empty") */
+  emptyTitle?: string;
+  emptyDescription?: string;
   /** Shows the "New" menu when provided */
   onCreateNote?: (isTodo: boolean) => void;
   isCreating?: boolean;
@@ -29,13 +41,34 @@ interface NoteListProps {
 type SortField = "updated" | "created" | "title";
 type SortOrder = "asc" | "desc";
 
+const SORT_FIELD_LABELS: Record<SortField, string> = {
+  updated: "Updated date",
+  created: "Created date",
+  title: "Title",
+};
+
+/** Direction labels that fit the field: A-Z for titles, newest/oldest for dates */
+function orderLabel(field: SortField, order: SortOrder): string {
+  if (field === "title") return order === "asc" ? "A–Z" : "Z–A";
+  return order === "desc" ? "Newest first" : "Oldest first";
+}
+
+/**
+ * Middle column: the notes of the selected notebook, tag, trash or all notes, with a local
+ * filter and sort. Remount it (via `key`) when the list changes so the filter doesn't carry over.
+ */
 export function NoteList({
   notes = [],
   isLoading = false,
+  error = null,
+  onRetry,
+  isRetrying = false,
   selectedNoteId,
   onSelectNote,
   title = "Notes",
   subtitle,
+  emptyTitle = "No notes yet",
+  emptyDescription,
   onCreateNote,
   isCreating = false,
   onToggleTodo,
@@ -69,20 +102,15 @@ export function NoteList({
     return result;
   }, [notes, filterText, sortField, sortOrder]);
 
-  const toggleSort = (field: SortField) => {
-    if (sortField === field) {
-      setSortOrder((prev) => (prev === "asc" ? "desc" : "asc"));
-    } else {
-      setSortField(field);
-      setSortOrder("desc");
-    }
+  const changeSortField = (field: SortField) => {
+    if (field === sortField) return;
+    setSortField(field);
+    // Titles read naturally A-Z, dates newest first
+    setSortOrder(field === "title" ? "asc" : "desc");
   };
 
-  const sortLabel = useMemo(() => {
-    if (sortField === "updated") return "Updated Date";
-    if (sortField === "created") return "Created Date";
-    return "Title";
-  }, [sortField]);
+  const sortDescription = `${SORT_FIELD_LABELS[sortField]}, ${orderLabel(sortField, sortOrder)}`;
+  const isFiltering = filterText.trim().length > 0;
 
   return (
     <div className="flex flex-col h-full bg-background border-r border-border/50">
@@ -97,9 +125,11 @@ export function NoteList({
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0">
-            <span className="text-xs text-muted-foreground font-mono">
-              {filteredAndSortedNotes.length} {filteredAndSortedNotes.length === 1 ? "note" : "notes"}
-            </span>
+            {!isLoading && !error && (
+              <span className="text-xs text-muted-foreground font-mono">
+                {filteredAndSortedNotes.length} {filteredAndSortedNotes.length === 1 ? "note" : "notes"}
+              </span>
+            )}
 
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -107,22 +137,29 @@ export function NoteList({
                   variant="ghost"
                   size="icon"
                   className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                  aria-label={`Sort notes (currently by ${sortLabel})`}
-                  title={`Sorted by ${sortLabel} (${sortOrder === "desc" ? "newest first" : "oldest first"})`}
+                  aria-label={`Sort notes (${sortDescription})`}
+                  title={`Sorted by ${sortDescription}`}
                 >
                   <ArrowDownUp className="h-3.5 w-3.5" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-40 text-xs">
-                <DropdownMenuItem onClick={() => toggleSort("updated")}>
-                  Updated Date {sortField === "updated" && (sortOrder === "desc" ? "↓" : "↑")}
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => toggleSort("created")}>
-                  Created Date {sortField === "created" && (sortOrder === "desc" ? "↓" : "↑")}
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => toggleSort("title")}>
-                  Title {sortField === "title" && (sortOrder === "desc" ? "↓" : "↑")}
-                </DropdownMenuItem>
+              <DropdownMenuContent align="end" className="w-44 text-xs">
+                <DropdownMenuLabel className="text-xs text-muted-foreground font-medium">Sort by</DropdownMenuLabel>
+                <DropdownMenuRadioGroup value={sortField} onValueChange={(v) => changeSortField(v as SortField)}>
+                  {(Object.keys(SORT_FIELD_LABELS) as SortField[]).map((field) => (
+                    <DropdownMenuRadioItem key={field} value={field}>
+                      {SORT_FIELD_LABELS[field]}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+                <DropdownMenuSeparator />
+                <DropdownMenuRadioGroup value={sortOrder} onValueChange={(v) => setSortOrder(v as SortOrder)}>
+                  {(sortField === "title" ? (["asc", "desc"] as const) : (["desc", "asc"] as const)).map((order) => (
+                    <DropdownMenuRadioItem key={order} value={order}>
+                      {orderLabel(sortField, order)}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
               </DropdownMenuContent>
             </DropdownMenu>
 
@@ -149,13 +186,20 @@ export function NoteList({
           </div>
         </div>
 
-        {/* Filter input */}
+        {/* Filter input (only narrows this list; the header search covers all notes) */}
         <div className="relative">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
           <Input
-            placeholder="Filter notes..."
+            placeholder="Filter this list..."
+            aria-label="Filter this list"
             value={filterText}
             onChange={(e) => setFilterText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && filterText) {
+                e.stopPropagation();
+                setFilterText("");
+              }
+            }}
             className="h-8 pl-8 text-xs bg-muted/40 border-border/40 focus-visible:ring-primary/70"
           />
         </div>
@@ -179,17 +223,31 @@ export function NoteList({
               </div>
             ))}
           </div>
+        ) : error ? (
+          <QueryError message="Couldn't load notes" error={error} onRetry={onRetry} isRetrying={isRetrying} />
         ) : filteredAndSortedNotes.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 text-center px-4">
             <div className="h-12 w-12 rounded-full bg-muted/50 flex items-center justify-center text-muted-foreground mb-3">
-              <FileQuestion className="h-6 w-6 opacity-60" />
+              <FileQuestion className="h-6 w-6" />
             </div>
-            <h4 className="text-sm font-semibold text-foreground">No notes found</h4>
-            <p className="text-xs text-muted-foreground mt-1 max-w-[200px]">
-              {filterText
-                ? "No notes matched your search keyword."
-                : "This notebook or tag has no notes yet."}
-            </p>
+            <h4 className="text-sm font-semibold text-foreground">{isFiltering ? "No matches" : emptyTitle}</h4>
+            {(isFiltering || emptyDescription) && (
+              <p className="text-xs text-muted-foreground mt-1 max-w-[220px] break-words">
+                {isFiltering ? `No notes in this list match "${filterText.trim()}".` : emptyDescription}
+              </p>
+            )}
+            {isFiltering ? (
+              <Button variant="outline" size="sm" className="h-8 mt-3" onClick={() => setFilterText("")}>
+                Clear filter
+              </Button>
+            ) : (
+              onCreateNote && (
+                <Button size="sm" className="h-8 mt-3 gap-1" onClick={() => onCreateNote(false)} disabled={isCreating}>
+                  {isCreating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                  New note
+                </Button>
+              )
+            )}
           </div>
         ) : (
           <div className="space-y-2 pb-6">

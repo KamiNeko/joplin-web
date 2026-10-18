@@ -10,6 +10,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
+import { ROW_ACTION_VISIBILITY } from "@/lib/ui-constants";
 
 interface TagListItemProps {
   tag: Tag;
@@ -20,7 +21,7 @@ interface TagListItemProps {
 }
 
 /**
- * Sidebar row for a tag with a hover actions menu (rename, delete).
+ * Sidebar row for a tag with an actions menu (rename, delete).
  */
 export function TagListItem({ tag, isSelected, onSelect, onRename, onDelete }: TagListItemProps) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -29,8 +30,10 @@ export function TagListItem({ tag, isSelected, onSelect, onRename, onDelete }: T
     <div
       role="button"
       tabIndex={0}
+      aria-current={isSelected ? "page" : undefined}
       onClick={onSelect}
       onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           onSelect();
@@ -57,7 +60,7 @@ export function TagListItem({ tag, isSelected, onSelect, onRename, onDelete }: T
               aria-label={`Actions for tag ${tag.title}`}
               className={cn(
                 "p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted",
-                menuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                menuOpen ? "opacity-100" : ROW_ACTION_VISIBILITY
               )}
             >
               <MoreHorizontal className="h-3.5 w-3.5" />
@@ -80,7 +83,7 @@ export function TagListItem({ tag, isSelected, onSelect, onRename, onDelete }: T
           variant="secondary"
           className={cn(
             "px-1.5 py-0 text-[10px] font-mono h-4 min-w-[18px] flex items-center justify-center",
-            isSelected ? "bg-primary/20 text-primary border-primary/30" : "bg-muted text-muted-foreground"
+            isSelected ? "bg-primary/15 text-foreground border-primary/30" : "bg-muted text-muted-foreground"
           )}
         >
           {tag.noteCount}

@@ -1,7 +1,7 @@
 import { useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, Check, Columns2, Eye, Loader2, Paperclip, PencilLine } from "lucide-react";
+import { AlertTriangle, Check, Circle, Columns2, Eye, Loader2, Paperclip, PencilLine } from "lucide-react";
 import { Note } from "@/lib/types";
 import { ApiError, getConflictNote, updateNote } from "@/lib/api";
 import { invalidateLists } from "@/hooks/use-mutations";
@@ -19,6 +19,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { useIsMobile } from "@/hooks/use-mobile";
 
 const AUTOSAVE_DELAY_MS = 1500;
 const MODE_STORAGE_KEY = "joplin-editor-mode";
@@ -58,6 +59,7 @@ interface NoteEditorProps {
  */
 export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps) {
   const queryClient = useQueryClient();
+  const isMobile = useIsMobile();
   const [draft, setDraft] = useState<Draft>({ title: note.title, body: note.body });
   // Preview-only would leave nothing to type into for an empty note, so start in split view then
   const [mode, setMode] = useState<EditorMode>(() => {
@@ -135,8 +137,12 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
             setConflict(getConflictNote(err));
             setStatus("conflict");
           } else {
+            const message = err instanceof Error ? err.message : "Save failed";
             setStatus("error");
-            setErrorMessage(err instanceof Error ? err.message : "Save failed");
+            setErrorMessage(message);
+            // The indicator only shows "Save failed"; the toast carries the reason (one per note,
+            // so repeated autosave failures replace it instead of stacking)
+            toast.error("Could not save note", { id: `save-error-${note.id}`, description: message });
           }
           return false;
         } finally {
@@ -296,14 +302,16 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
     invalidateLists(queryClient);
   };
 
-  const showEditor = mode === "edit" || mode === "split";
-  const showPreview = mode === "preview" || mode === "split";
+  // Phones have no room for split view (its tab is hidden there), so it behaves like Edit
+  const effectiveMode: EditorMode = isMobile && mode === "split" ? "edit" : mode;
+  const showEditor = effectiveMode === "edit" || effectiveMode === "split";
+  const showPreview = effectiveMode === "preview" || effectiveMode === "split";
 
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Editor toolbar */}
       <div className="flex items-center justify-between gap-2 px-4 sm:px-6 py-2 border-b border-border/40">
-        <div className="flex items-center rounded-lg bg-muted p-0.5" role="tablist" aria-label="Editor layout">
+        <div className="flex items-center rounded-lg bg-muted p-0.5" role="group" aria-label="Editor layout">
           {(
             [
               { id: "edit", label: "Edit", icon: PencilLine },
@@ -314,13 +322,12 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
             <button
               key={id}
               type="button"
-              role="tab"
-              aria-selected={mode === id}
+              aria-pressed={effectiveMode === id}
               onClick={() => changeMode(id)}
               className={cn(
-                "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+                "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring",
                 id === "split" && "hidden md:flex",
-                mode === id
+                effectiveMode === id
                   ? "bg-background text-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground"
               )}
@@ -331,7 +338,7 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
           ))}
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
           {showEditor && (
             <>
               <Button
@@ -339,6 +346,7 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
                 size="sm"
                 className="h-8 text-muted-foreground hover:text-foreground"
                 onClick={() => fileInputRef.current?.click()}
+                aria-label="Attach files"
                 title="Attach images or files (or drop / paste them into the text)"
               >
                 <Paperclip className="h-3.5 w-3.5" />
@@ -357,14 +365,19 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
               />
             </>
           )}
-          {uploadCount > 0 ? (
-            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Uploading {uploadCount} {uploadCount === 1 ? "file" : "files"}…
-            </span>
-          ) : (
-            <SaveIndicator status={status} errorMessage={errorMessage} onRetry={() => void save()} />
-          )}
+          {/* Announced to screen readers; below sm only the icon is visible to keep Done in view */}
+          <div role="status" aria-live="polite" className="flex items-center">
+            {uploadCount > 0 ? (
+              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                <span className="sr-only sm:not-sr-only">
+                  Uploading {uploadCount} {uploadCount === 1 ? "file" : "files"}…
+                </span>
+              </span>
+            ) : (
+              <SaveIndicator status={status} errorMessage={errorMessage} onRetry={() => void save()} />
+            )}
+          </div>
           <Button
             size="sm"
             className="h-8"
@@ -393,11 +406,11 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
           placeholder="Untitled"
           aria-label="Note title"
           className={cn(
-            "w-full block bg-transparent text-2xl sm:text-3xl font-bold tracking-tight text-foreground placeholder:text-muted-foreground/50 outline-none",
-            mode !== "split" && "max-w-4xl mx-auto"
+            "w-full block bg-transparent text-2xl sm:text-3xl font-bold tracking-tight text-foreground placeholder:text-muted-foreground outline-none",
+            effectiveMode !== "split" && "max-w-4xl mx-auto"
           )}
         />
-        <div className={cn("pt-2 text-xs text-muted-foreground", mode !== "split" && "max-w-4xl mx-auto")}>
+        <div className={cn("pt-2 text-xs text-muted-foreground", effectiveMode !== "split" && "max-w-4xl mx-auto")}>
           <TagEditor noteId={note.id} tags={note.tags ?? []} />
         </div>
       </div>
@@ -406,17 +419,17 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
       <div
         className={cn(
           "flex-1 min-h-0 grid",
-          mode === "split" ? "grid-cols-1 md:grid-cols-2" : "grid-cols-1"
+          effectiveMode === "split" ? "grid-cols-1 md:grid-cols-2" : "grid-cols-1"
         )}
       >
         {showEditor && (
           <div
             className={cn(
               "min-h-0 overflow-hidden px-4 sm:px-10 lg:px-12 pt-2",
-              mode === "split" && "md:border-r border-border/40 md:pr-6 lg:pr-8"
+              effectiveMode === "split" && "md:border-r border-border/40 md:pr-6 lg:pr-8"
             )}
           >
-            <div className={cn("h-full", mode === "edit" && "max-w-4xl mx-auto")}>
+            <div className={cn("h-full", effectiveMode === "edit" && "max-w-4xl mx-auto")}>
               <MarkdownEditor
                 ref={editorRef}
                 key={editorKey}
@@ -433,7 +446,7 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
           <div
             className={cn(
               "min-h-0 overflow-y-auto px-4 sm:px-10 lg:px-12 pt-2 pb-20",
-              mode === "split" && "hidden md:block md:pl-6 lg:pl-8"
+              effectiveMode === "split" && "hidden md:block md:pl-6 lg:pl-8"
             )}
           >
             <div className="max-w-4xl mx-auto">
@@ -497,15 +510,21 @@ function SaveIndicator({
   errorMessage: string | null;
   onRetry: () => void;
 }) {
+  // Below sm only the icon is visible; the text stays available to screen readers
+  const label = (text: string) => <span className="sr-only sm:not-sr-only">{text}</span>;
   if (status === "saving") {
     return (
       <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-        <Loader2 className="h-3.5 w-3.5 animate-spin" /> Saving…
+        <Loader2 className="h-3.5 w-3.5 animate-spin" /> {label("Saving…")}
       </span>
     );
   }
   if (status === "dirty") {
-    return <span className="text-xs text-muted-foreground">Unsaved changes</span>;
+    return (
+      <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Circle className="h-2.5 w-2.5 fill-current" /> {label("Unsaved changes")}
+      </span>
+    );
   }
   if (status === "error") {
     return (
@@ -513,22 +532,22 @@ function SaveIndicator({
         type="button"
         onClick={onRetry}
         title={errorMessage ?? undefined}
-        className="flex items-center gap-1.5 text-xs text-destructive hover:underline"
+        className="flex items-center gap-1.5 rounded text-xs text-destructive hover:underline outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
-        <AlertTriangle className="h-3.5 w-3.5" /> Save failed, retry
+        <AlertTriangle className="h-3.5 w-3.5" /> {label("Save failed, retry")}
       </button>
     );
   }
   if (status === "conflict") {
     return (
       <span className="flex items-center gap-1.5 text-xs text-primary">
-        <AlertTriangle className="h-3.5 w-3.5" /> Conflict
+        <AlertTriangle className="h-3.5 w-3.5" /> {label("Conflict")}
       </span>
     );
   }
   return (
     <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-      <Check className="h-3.5 w-3.5" /> Saved
+      <Check className="h-3.5 w-3.5" /> {label("Saved")}
     </span>
   );
 }

@@ -6,11 +6,16 @@ import { Search, FileText, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { formatRelativeTime } from "@/components/notes/NoteListItem";
+import { QueryError } from "@/components/common/QueryError";
 
 interface SearchResultsProps {
   query: string;
   results: SearchResult[];
   isLoading?: boolean;
+  /** Set when the search failed; shows an error with Retry instead of "No matches" */
+  error?: Error | null;
+  onRetry?: () => void;
+  isRetrying?: boolean;
   selectedNoteId?: string | null;
   onSelectNote: (id: string) => void;
   onClearQuery?: () => void;
@@ -45,7 +50,7 @@ function HighlightedText({
         regex.test(part) ? (
           <mark
             key={i}
-            className="bg-primary/25 text-primary font-semibold rounded-sm px-0.5"
+            className="bg-primary/20 text-foreground font-semibold rounded-sm px-0.5"
           >
             {part}
           </mark>
@@ -61,6 +66,9 @@ export function SearchResults({
   query,
   results,
   isLoading = false,
+  error = null,
+  onRetry,
+  isRetrying = false,
   selectedNoteId,
   onSelectNote,
   onClearQuery,
@@ -81,7 +89,7 @@ export function SearchResults({
 
         <div className="flex items-center gap-1">
           <span className="text-xs text-muted-foreground font-mono">
-            {results.length} found
+            {!isLoading && !error && `${results.length} found`}
           </span>
           {onClearQuery && (
             <Button
@@ -112,6 +120,8 @@ export function SearchResults({
               </div>
             ))}
           </div>
+        ) : error ? (
+          <QueryError message="Search failed" error={error} onRetry={onRetry} isRetrying={isRetrying} />
         ) : results.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 text-center px-4">
             <div className="h-12 w-12 rounded-full bg-muted/40 flex items-center justify-center text-muted-foreground mb-3">
