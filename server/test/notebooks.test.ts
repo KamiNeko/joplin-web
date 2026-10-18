@@ -387,6 +387,79 @@ describe('DELETE /api/notebooks/:id', () => {
   });
 });
 
+describe('trashed notebooks: list and restore', () => {
+  let root: string;
+  let child: string;
+  let rootNote: string;
+  let childNote: string;
+  let earlierTrashedNote: string;
+
+  before(async () => {
+    root = await createNotebook('Restore me');
+    child = await createNotebook('Restore child', root);
+    rootNote = await createNote('Restore root note', root);
+    childNote = await createNote('Restore child note', child);
+    earlierTrashedNote = await createNote('Trashed before the notebook', child);
+    assert.equal((await api(`/api/notes/${earlierTrashedNote}`, { method: 'DELETE' })).status, 204);
+    assert.equal((await api(`/api/notebooks/${root}`, { method: 'DELETE' })).status, 200);
+  });
+
+  test('lists only the top of each trashed subtree, with contents counts', async () => {
+    const res = await api('/api/notebooks/trash');
+    assert.equal(res.status, 200);
+    const listed = res.data.find((nb: any) => nb.id === root);
+    assert.ok(listed, 'trashed notebook listed');
+    assert.equal(listed.title, 'Restore me');
+    assert.equal(listed.parentId, '');
+    assert.ok(listed.deletedTime > 0);
+    assert.equal(listed.noteCount, 3);
+    assert.equal(listed.notebookCount, 1);
+    assert.ok(!res.data.some((nb: any) => nb.id === child), 'sub-notebooks are not listed separately');
+    assert.ok(!res.data.some((nb: any) => nb.id === demoId('nb-work')), 'active notebooks are not listed');
+  });
+
+  test('refuses to restore a notebook that is not in the trash', async () => {
+    const work = demoId('nb-work');
+    const before = mock.items.get(`${work}.md`)!.updatedTime;
+    assert.equal((await api(`/api/notebooks/${work}/restore`, { method: 'POST' })).status, 409);
+    assert.equal(mock.items.get(`${work}.md`)!.updatedTime, before);
+  });
+
+  test('restores the notebook with its sub-notebooks and all trashed notes', async () => {
+    const res = await api(`/api/notebooks/${root}/restore`, { method: 'POST' });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.data, { notebooks: 2, notes: 3 });
+    for (const id of [root, child, rootNote, childNote, earlierTrashedNote]) {
+      assert.equal(mockItem(mock, id)!.deletedTime, 0, `${mockItem(mock, id)!.title} restored`);
+    }
+    assert.equal(mockItem(mock, child)!.parentId, root, 'structure kept');
+
+    const ids = (await notebookTree()).map((nb) => nb.id);
+    assert.ok(ids.includes(root) && ids.includes(child), 'back in the tree');
+    assert.ok(!(await api('/api/notebooks/trash')).data.some((nb: any) => nb.id === root), 'gone from the trash');
+    const trashNotes = (await api('/api/notes?is_trash=true')).data.map((n: any) => n.id);
+    assert.ok(!trashNotes.includes(childNote));
+  });
+
+  test('restores trashed parent notebooks of a restored notebook', async () => {
+    const parent = await createNotebook('Trashed parent');
+    const nested = await createNotebook('Nested', parent);
+    assert.equal((await api(`/api/notebooks/${parent}`, { method: 'DELETE' })).status, 200);
+    const res = await api(`/api/notebooks/${nested}/restore`, { method: 'POST' });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.data, { notebooks: 2, notes: 0 });
+    assert.equal(mockItem(mock, parent)!.deletedTime, 0);
+    assert.equal(mockItem(mock, nested)!.deletedTime, 0);
+  });
+
+  test('validates the notebook id and refuses encrypted notebooks', async () => {
+    assert.equal((await api('/api/notebooks/..%2Fevil/restore', { method: 'POST' })).status, 400);
+    assert.equal((await api(`/api/notebooks/${UNKNOWN_ID}/restore`, { method: 'POST' })).status, 404);
+    assert.equal((await api(`/api/notebooks/${demoId('note-roadmap')}/restore`, { method: 'POST' })).status, 404);
+    assert.equal((await api(`/api/notebooks/${ENCRYPTED_ID}/restore`, { method: 'POST' })).status, 422);
+  });
+});
+
 describe('POST /api/notebooks/refresh', () => {
   test('picks up notebooks created and deleted by another Joplin client', async () => {
     const external = demoId('nb-external');

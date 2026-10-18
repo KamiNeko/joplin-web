@@ -55,6 +55,20 @@ export interface Notebook {
 }
 
 /**
+ * A notebook at the top of a trashed subtree, as listed in the trash
+ */
+export interface TrashedNotebook {
+  id: string;
+  title: string;
+  parentId: string;
+  deletedTime: number;
+  /** Notes anywhere in the notebook, including its sub-notebooks */
+  noteCount: number;
+  /** Sub-notebooks at any depth */
+  notebookCount: number;
+}
+
+/**
  * Lightweight note item for lists and queries
  */
 export interface NoteListItem {

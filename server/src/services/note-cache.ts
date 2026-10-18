@@ -11,6 +11,7 @@ import {
   ResourceMetadata,
   SearchResult,
   TagItem,
+  TrashedNotebook,
 } from '../types/index.js';
 
 /**
@@ -375,6 +376,52 @@ export class NoteCacheService {
 
     sortNodes(rootNodes);
     return rootNodes;
+  }
+
+  /**
+   * Lists the trashed notebooks a user can restore or purge: those whose parent is not trashed
+   * (sub-notebooks of a trashed notebook come back with it). Newest deletion first.
+   */
+  public async getTrashedNotebooks(sessionId: string): Promise<TrashedNotebook[]> {
+    const entry = await this.ensureFresh(sessionId);
+    const isTrashed = (id: string) => (entry.notebooks.get(id)?.deletedTime ?? 0) > 0;
+
+    const childrenOf = new Map<string, RawJoplinItem[]>();
+    for (const nb of entry.notebooks.values()) {
+      const siblings = childrenOf.get(nb.parentId) ?? [];
+      siblings.push(nb);
+      childrenOf.set(nb.parentId, siblings);
+    }
+    const notesPerFolder = new Map<string, number>();
+    for (const note of entry.notes.values()) {
+      notesPerFolder.set(note.parentId, (notesPerFolder.get(note.parentId) ?? 0) + 1);
+    }
+
+    const roots = [...entry.notebooks.values()].filter((nb) => nb.deletedTime > 0 && !isTrashed(nb.parentId));
+    return roots
+      .map((root) => {
+        let noteCount = 0;
+        let notebookCount = 0;
+        const visited = new Set<string>();
+        const stack = [root];
+        while (stack.length > 0) {
+          const folder = stack.pop()!;
+          if (visited.has(folder.id)) continue;
+          visited.add(folder.id);
+          if (folder !== root) notebookCount++;
+          noteCount += notesPerFolder.get(folder.id) ?? 0;
+          stack.push(...(childrenOf.get(folder.id) ?? []));
+        }
+        return {
+          id: root.id,
+          title: root.title || 'Untitled Notebook',
+          parentId: root.parentId || '',
+          deletedTime: root.deletedTime,
+          noteCount,
+          notebookCount,
+        };
+      })
+      .sort((a, b) => b.deletedTime - a.deletedTime);
   }
 
   /**

@@ -559,6 +559,45 @@ export class NoteWriterService {
     return { notebooks: folders.length, notes: notes.length };
   }
 
+  /**
+   * Restores a trashed notebook with everything in it, like Joplin desktop: its sub-notebooks
+   * and all of their trashed notes come back, plus any trashed parent notebooks so it is visible
+   * again. Every item is read fresh and checked before the first write.
+   */
+  public async restoreNotebook(sessionId: string, id: string): Promise<{ notebooks: number; notes: number }> {
+    assertValidId(id, 'notebook id');
+    await this.assertWritable(sessionId);
+    const root = await this.fetchFreshOfType(sessionId, id, JoplinItemType.Folder);
+    if (!(root.deletedTime > 0)) {
+      throw new WriteValidationError('Only notebooks in the trash can be restored', 409);
+    }
+
+    const trashedAncestors: RawJoplinItem[] = [];
+    for (const folder of await this.freshAncestors(sessionId, root.parentId)) {
+      if (folder.deletedTime > 0) {
+        assertNotEncrypted(folder);
+        trashedAncestors.push(folder);
+      }
+    }
+    // Pick up items trashed or moved by another client since the last refresh
+    await noteCache.refreshCache(sessionId);
+    const { folders, notes } = await this.freshSubtree(sessionId, root);
+
+    const restore = async (item: RawJoplinItem) => {
+      const props = { ...item.properties, deleted_time: '0' };
+      touch(props);
+      await this.write(sessionId, { type_: item.type_, title: item.title, body: item.body, properties: props });
+    };
+
+    // Notebooks top-down first, so restored notes never sit in a notebook that is still trashed
+    const trashedFolders = [...trashedAncestors.reverse(), ...folders].filter((folder) => folder.deletedTime > 0);
+    const trashedNotes = notes.filter((note) => note.deletedTime > 0);
+    for (const folder of trashedFolders) await restore(folder);
+    for (const note of trashedNotes) await restore(note);
+
+    return { notebooks: trashedFolders.length, notes: trashedNotes.length };
+  }
+
   // ---------------------------------------------------------------------------
   // Resources (attachments)
   // ---------------------------------------------------------------------------
