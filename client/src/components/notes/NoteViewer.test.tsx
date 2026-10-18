@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { Note } from "@/lib/types";
@@ -119,5 +119,18 @@ describe("NoteViewer read-only", () => {
     expect(screen.queryByText(/This note is empty/)).toBeNull();
     expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
     expect(screen.queryByRole("button", { name: "More note actions" })).toBeNull();
+  });
+});
+
+describe("NoteViewer loading", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("shows the skeleton only when the note takes a while to load", () => {
+    vi.useFakeTimers();
+    const { container } = renderViewer({ note: undefined, isLoading: true });
+    expect(container.querySelector("[aria-busy='true']")).not.toBeNull();
+    expect(container.querySelector(".animate-pulse")).toBeNull();
+    act(() => vi.advanceTimersByTime(300));
+    expect(container.querySelector(".animate-pulse")).not.toBeNull();
   });
 });
