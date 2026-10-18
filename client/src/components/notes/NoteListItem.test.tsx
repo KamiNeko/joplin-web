@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { NoteListItem, formatRelativeTime } from "./NoteListItem";
+import { NoteListItem } from "./NoteListItem";
+import { formatRelativeTime } from "@/lib/format";
 
 const NOW = new Date("2026-06-15T12:00:00Z").getTime();
 

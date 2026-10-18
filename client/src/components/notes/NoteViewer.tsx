@@ -36,7 +36,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { formatRelativeTime } from "./NoteListItem";
+import { formatRelativeTime } from "@/lib/format";
 import { NoteEditor } from "./NoteEditor";
 import { TagEditor } from "@/components/tags/TagEditor";
 import { Button } from "@/components/ui/button";
