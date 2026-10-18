@@ -14,6 +14,8 @@ interface MarkdownEditorProps {
   className?: string;
   /** Called with the number of uploads in progress whenever it changes */
   onUploadsChange?: (pending: number) => void;
+  /** The text is HTML (an HTML note): uploaded files are inserted as `<img>` / `<a>` instead of Markdown */
+  html?: boolean;
 }
 
 export interface MarkdownEditorHandle {
@@ -26,6 +28,21 @@ export const UPLOAD_PLACEHOLDER = /!?\[Uploading [^\]\n]*\]\(uploading-[a-z0-9]+
 
 function escapeLinkText(text: string) {
   return text.replace(/[[\]]/g, (c) => (c === "[" ? "(" : ")"));
+}
+
+const HTML_ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" };
+
+function escapeHtml(text: string) {
+  return text.replace(/[&<>"]/g, (c) => HTML_ESCAPES[c]);
+}
+
+/** Link to an uploaded resource in the note's markup (Markdown, or HTML for HTML notes) */
+function resourceLink(resource: { id: string; title: string }, isImage: boolean, html: boolean) {
+  if (html) {
+    const title = escapeHtml(resource.title);
+    return isImage ? `<img src=":/${resource.id}" alt="${title}">` : `<a href=":/${resource.id}">${title}</a>`;
+  }
+  return `${isImage ? "!" : ""}[${escapeLinkText(resource.title)}](:/${resource.id})`;
 }
 
 /**
@@ -93,13 +110,15 @@ const markdownHighlight = HighlightStyle.define([
  * Files dropped or pasted into it are uploaded as Joplin resources and linked at that position.
  */
 export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorProps>(function MarkdownEditor(
-  { value, onChange, autoFocus, className, onUploadsChange },
+  { value, onChange, autoFocus, className, onUploadsChange, html = false },
   ref
 ) {
   const viewRef = useRef<EditorView | null>(null);
   const pendingRef = useRef(0);
   const onUploadsChangeRef = useRef(onUploadsChange);
   onUploadsChangeRef.current = onUploadsChange;
+  const htmlRef = useRef(html);
+  htmlRef.current = html;
 
   const uploadFiles = useCallback((files: File[], at?: number) => {
     const view = viewRef.current;
@@ -119,8 +138,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
 
       uploadResource(file)
         .then((resource) => {
-          const link = `${isImage ? "!" : ""}[${escapeLinkText(resource.title)}](:/${resource.id})`;
-          replaceToken(token, link);
+          replaceToken(token, resourceLink(resource, isImage, htmlRef.current));
         })
         .catch((err) => {
           replaceToken(token, "");

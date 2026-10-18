@@ -112,6 +112,8 @@ export interface NoteDetail {
   isConflict: boolean;
   /** Id of the note the conflict copy was made from (`conflict_original_id`), '' if unknown */
   conflictOriginalId: string;
+  /** Joplin's `markup_language`: 1 = Markdown, 2 = HTML (e.g. pages saved with the Web Clipper) */
+  markupLanguage: number;
   properties: Record<string, string>;
 }
 

@@ -63,6 +63,8 @@ interface DemoNote {
   deleted?: boolean;
   /** Key of the note this is a conflict copy of (`is_conflict: 1`), as Joplin creates on a sync conflict */
   conflictOf?: string;
+  /** Body is HTML (`markup_language: 2`), like a page saved with the Joplin Web Clipper */
+  html?: boolean;
 }
 
 const notebooks: Array<{ key: string; title: string; parent?: string }> = [
@@ -239,6 +241,28 @@ Return \`application/problem+json\` with a stable \`type\` URL for every error.`
 4. *The Pragmatic Programmer*`,
   },
   {
+    // Clipped pages are HTML notes: indentation after a blank line and *…* must stay plain HTML
+    key: 'clipped-article',
+    notebook: 'reading',
+    title: 'Clipped: The Case for Slow Travel',
+    hoursAgo: 150,
+    tags: ['travel', 'books'],
+    html: true,
+    body: `<div class="clip">
+  <h2>The Case for Slow Travel</h2>
+  <p><em>Saved with the Joplin Web Clipper</em> from <a href="https://example.com/slow-travel">example.com</a></p>
+
+    <p>Stay longer in fewer places. Take the *regional* train, not the _express_.</p>
+
+  <img src=":/${demoId('res-tram')}" alt="Tram 28 in Alfama">
+  <ul>
+    <li>Rent a flat instead of a hotel room</li>
+    <li>Pick one neighbourhood &amp; learn its bakeries</li>
+  </ul>
+  <p>Related: <a href=":/${demoId('note-lisbon')}">Lisbon Long Weekend</a></p>
+</div>`,
+  },
+  {
     key: 'todo-passport',
     notebook: 'personal',
     title: 'Renew passport',
@@ -335,7 +359,7 @@ export function buildDemoItems(now = Date.now()): Map<string, MockItem> {
         todoCompleted: note.completed ? updated : 0,
         properties: {
           deleted_time: note.deleted ? String(now - 4 * HOUR) : '0',
-          markup_language: '1',
+          markup_language: note.html ? '2' : '1',
           encryption_applied: '0',
           source: 'joplin-web-demo',
           ...(note.conflictOf

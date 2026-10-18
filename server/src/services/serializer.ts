@@ -286,6 +286,65 @@ export function stripMarkdown(markdown?: string, maxChars = 150): string {
     .replace(/\s+/g, ' ')
     .trim();
 
+  return truncatePreview(text, maxChars);
+}
+
+/** Joplin's `markup_language` value for HTML notes (Markdown is 1) */
+export const MARKUP_HTML = 2;
+
+/**
+ * Reads an item's `markup_language` property: 1 = Markdown (also when missing or unknown), 2 = HTML.
+ *
+ * @param properties Item properties as parsed by `deserialize`
+ * @returns 1 or 2
+ */
+export function markupLanguageOf(properties: Record<string, string> | undefined): number {
+  return properties?.markup_language === String(MARKUP_HTML) ? MARKUP_HTML : 1;
+}
+
+const HTML_ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+
+/**
+ * Strips HTML (e.g. a note saved with the Web Clipper) to a plaintext preview snippet: drops tags,
+ * comments and the contents of script/style/head elements, decodes common entities.
+ *
+ * @param html Input HTML
+ * @param maxChars Maximum character length of preview
+ * @returns Clean plaintext snippet
+ */
+export function stripHtml(html?: string, maxChars = 150): string {
+  if (!html) return '';
+  const text = html
+    .replace(/<!--[\s\S]*?(?:-->|$)/g, ' ')
+    .replace(/<(script|style|head|title|noscript)\b[\s\S]*?(?:<\/\1\s*>|$)/gi, ' ')
+    // Block-level tags separate words, inline ones (<b>, <a>, <span>…) don't
+    .replace(/<\/?(?:address|article|aside|blockquote|br|dd|div|dl|dt|figcaption|figure|footer|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|td|th|tr|ul)\b[^>]*>?/gi, ' ')
+    .replace(/<\/?[a-zA-Z][^>]*>?/g, '')
+    .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (entity, name: string) => {
+      if (name[0] === '#') {
+        const code = name[1] === 'x' || name[1] === 'X' ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
+        return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : entity;
+      }
+      return HTML_ENTITIES[name.toLowerCase()] ?? entity;
+    })
+    .replace(/\s+/g, ' ')
+    .trim();
+  return truncatePreview(text, maxChars);
+}
+
+/**
+ * Plaintext preview of a note body in its markup language (see `markupLanguageOf`).
+ *
+ * @param body Note body
+ * @param markupLanguage 1 = Markdown, 2 = HTML
+ * @param maxChars Maximum character length of preview
+ */
+export function notePreview(body: string | undefined, markupLanguage: number, maxChars = 150): string {
+  return markupLanguage === MARKUP_HTML ? stripHtml(body, maxChars) : stripMarkdown(body, maxChars);
+}
+
+/** Cuts a preview to maxChars, at a word boundary when possible, and appends an ellipsis */
+function truncatePreview(text: string, maxChars: number): string {
   if (text.length <= maxChars) {
     return text;
   }

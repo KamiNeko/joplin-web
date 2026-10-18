@@ -15,12 +15,12 @@ function OpenedNote() {
   return <p>Opened note {useParams().id}</p>;
 }
 
-function renderMarkdown(content: string) {
+function renderMarkdown(content: string, html = false) {
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <MemoryRouter>
         <Routes>
-          <Route path="/" element={<MarkdownRenderer content={content} />} />
+          <Route path="/" element={<MarkdownRenderer content={content} html={html} />} />
           <Route path="/notes/:id" element={<OpenedNote />} />
         </Routes>
       </MemoryRouter>
@@ -172,5 +172,58 @@ describe("XSS guard", () => {
     const container = renderMarkdown('<a id="location" name="fetch" href="https://example.com">x</a>');
     const a = container.querySelector("a");
     expect(a?.id === "location" || a?.getAttribute("name") === "fetch").toBe(false);
+  });
+});
+
+// Regression tests for #104: notes with markup_language: 2 (Web Clipper) are HTML, not Markdown
+describe("HTML notes", () => {
+  const CLIP = '<div class="clip">\n  <p>Intro</p>\n\n    <p>After blank line, indented</p>\n</div>';
+
+  it("renders indented HTML after a blank line as HTML, not as a code block", () => {
+    const container = renderMarkdown(CLIP, true);
+    expect(container.querySelector("pre, code")).toBeNull();
+    expect(screen.getByText("After blank line, indented").tagName).toBe("P");
+    expect(container.textContent).not.toContain("<p>");
+  });
+
+  it("shows the same HTML as a code block when it is Markdown", () => {
+    const container = renderMarkdown(CLIP);
+    expect(container.querySelector("code")?.textContent).toContain("<p>After blank line, indented</p>");
+  });
+
+  it("does not apply Markdown syntax inside HTML", () => {
+    const container = renderMarkdown("<p>Take the *regional* train, not the _express_. # Not a heading</p>\n\n- not a list", true);
+    expect(container.querySelector("em, h1, ul")).toBeNull();
+    expect(container.textContent).toContain("*regional*");
+    expect(container.textContent).toContain("- not a list");
+  });
+
+  it("loads :/id images through the API and opens :/id links", async () => {
+    renderMarkdown(`<img src=":/${RES_ID}" alt="Cat">\n\n  <a href=":/${NOTE_ID}">Other note</a>`, true);
+    // Loaded through ResourceImage, like images in Markdown notes
+    await waitFor(() => expect(calls.map((c) => c.path)).toContain(`/api/resources/${RES_ID}`));
+    fireEvent.click(screen.getByRole("button", { name: "Other note" }));
+    expect(await screen.findByText(`Opened note ${NOTE_ID}`)).toBeTruthy();
+  });
+
+  it("leaves Markdown-style :/id links as text", () => {
+    renderMarkdown(`<p>[Other note](:/${NOTE_ID})</p>`, true);
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.getByText(`[Other note](:/${NOTE_ID})`)).toBeTruthy();
+  });
+
+  it("sanitizes like Markdown notes: no scripts, handlers, javascript: URLs, styles or app classes", () => {
+    const container = renderMarkdown(
+      '<html><head><title>Page</title><style>body{display:none}</style><script>window.pwned = true</script></head>' +
+        '<body><img src="x" alt="x" onerror="window.pwned = true"><p onclick="window.pwned = true" style="position:fixed" class="fixed inset-0">Hi</p>' +
+        '<a href="javascript:alert(1)">Click</a><iframe src="https://evil.example"></iframe><input type="checkbox" checked></body></html>',
+      true
+    );
+    expect(container.querySelector("script, style, iframe, [style], [onclick], [onerror]")).toBeNull();
+    expect(container.innerHTML).not.toMatch(/pwned|javascript:|display:none/i);
+    expect(screen.getByText("Hi").className).toBe("");
+    expect(container.textContent).not.toContain("Page");
+    expect((container.querySelector("input") as HTMLInputElement).disabled).toBe(true);
+    expect((window as { pwned?: boolean }).pwned).toBeUndefined();
   });
 });

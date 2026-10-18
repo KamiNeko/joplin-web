@@ -1,6 +1,6 @@
 import { config } from '../config.js';
 import { joplinApi } from './joplin-api.js';
-import { deserialize, stripMarkdown } from './serializer.js';
+import { deserialize, markupLanguageOf, notePreview } from './serializer.js';
 import { trashedTogether } from './trash.js';
 import {
   JoplinItemType,
@@ -560,7 +560,7 @@ export class NoteCacheService {
       createdTime: n.createdTime,
       updatedTime: n.updatedTime,
       deletedTime: n.deletedTime || 0,
-      preview: stripMarkdown(n.body, 150),
+      preview: notePreview(n.body, markupLanguageOf(n.properties), 150),
       isTodo: n.isTodo,
       todoCompleted: Boolean(n.todoCompleted),
       todoDue: n.todoDue,
@@ -625,6 +625,7 @@ export class NoteCacheService {
       todoDue: note.todoDue,
       isConflict,
       conflictOriginalId: isConflict ? note.properties.conflict_original_id || '' : '',
+      markupLanguage: markupLanguageOf(note.properties),
       properties: note.properties,
     };
   }
@@ -718,7 +719,7 @@ export class NoteCacheService {
           const start = Math.max(0, matchIdx - 60);
           const end = Math.min(body.length, matchIdx + trimmed.length + 60);
           const rawSnippet = body.substring(start, end);
-          snippet = `${start > 0 ? '...' : ''}${stripMarkdown(rawSnippet, 150)}${
+          snippet = `${start > 0 ? '...' : ''}${notePreview(rawSnippet, markupLanguageOf(note.properties), 150)}${
             end < body.length ? '...' : ''
           }`;
         }
@@ -733,7 +734,7 @@ export class NoteCacheService {
           createdTime: note.createdTime,
           updatedTime: note.updatedTime,
           deletedTime: note.deletedTime || 0,
-          preview: stripMarkdown(note.body, 150),
+          preview: notePreview(note.body, markupLanguageOf(note.properties), 150),
           isTodo: note.isTodo,
           todoCompleted: Boolean(note.todoCompleted),
           todoDue: note.todoDue,
