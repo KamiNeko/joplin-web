@@ -66,16 +66,27 @@ You already run Joplin Server to sync your notes. Joplin's desktop and mobile ap
 
 ## Getting started
 
-You need a running **Joplin Server** and **Docker** with Docker Compose.
+You need a running **Joplin Server** and **Docker** with Docker Compose (2.24 or newer). Prebuilt images for amd64 and arm64 are published at `ghcr.io/kamineko/joplin-web` (`1.0.0`, `1.0`, `1` and `latest`).
 
-```bash
-git clone https://github.com/KamiNeko/joplin-web.git
-cd joplin-web
-cp .env.example .env    # then set JOPLIN_SERVER_URL in .env
-docker compose up -d --build
+Create a `docker-compose.yml`:
+
+```yaml
+services:
+  joplin-web:
+    image: ghcr.io/kamineko/joplin-web:1.0.0
+    container_name: joplin-web
+    environment:
+      JOPLIN_SERVER_URL: https://notes.example.com   # your Joplin Server
+    ports:
+      - "3001:3001"   # change only the left side to use another host port
+    restart: unless-stopped
 ```
 
-Open `http://localhost:3001` (or the `HOST_PORT` you set) and sign in with your Joplin Server account.
+```bash
+docker compose up -d
+```
+
+Open `http://localhost:3001` and sign in with your Joplin Server account. Add further settings from the [configuration](#configuration) table under `environment:`, or put them in a `.env` file and load it with `env_file: .env`.
 
 > [!IMPORTANT]
 > Your Joplin password passes through Joplin Web on its way to your Joplin Server. Put Joplin Web behind a reverse proxy with **HTTPS** (Caddy, Traefik, nginx, …) before you use it outside your home network. Behind a proxy, also set `PUBLIC_URL` and `TRUST_PROXY` (see below).
@@ -87,19 +98,32 @@ Open `http://localhost:3001` (or the `HOST_PORT` you set) and sign in with your 
 <summary>Without Docker Compose</summary>
 
 ```bash
-docker build -t joplin-web -f docker/Dockerfile .
 docker run -d --name joplin-web -p 3001:3001 \
   -e JOPLIN_SERVER_URL=https://notes.example.com \
-  --restart unless-stopped joplin-web
+  --restart unless-stopped ghcr.io/kamineko/joplin-web:1.0.0
 ```
 
 To publish on another host port, change only the left side of the mapping, e.g. `-p 8080:3001`.
 
 </details>
 
+<details>
+<summary>Build from source</summary>
+
+```bash
+git clone https://github.com/KamiNeko/joplin-web.git
+cd joplin-web
+cp .env.example .env    # then set JOPLIN_SERVER_URL in .env
+docker compose up -d --build
+```
+
+The repository's `docker-compose.yml` reads `.env` and publishes `HOST_PORT` (default 3001).
+
+</details>
+
 ### Configuration
 
-Docker Compose (2.24 or newer) passes every variable in `.env` to the container. [`.env.example`](.env.example) lists them all.
+Set these as environment variables of the container. The repository's `docker-compose.yml` passes every variable in `.env` to it; [`.env.example`](.env.example) lists them all.
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
@@ -108,7 +132,7 @@ Docker Compose (2.24 or newer) passes every variable in `.env` to the container.
 | `TRUST_PROXY` | `false` | Set when Joplin Web runs behind a reverse proxy, so rate limits and logs see the real client address: `1` (number of proxies in front), or a comma-separated list of proxy addresses/subnets (e.g. `loopback, 172.16.0.0/12`). Leave it off when Joplin Web is reachable directly, otherwise clients can fake their address. |
 | `ALLOW_REMOTE_IMAGES` | `false` | Let notes load images from any `https://` URL (e.g. web clippings). Off by default because each remote image tells its host who opened the note and when. |
 | `COOKIE_SECURE` | `auto` | `Secure` flag of the session cookie. `auto` sets it when the request came in over HTTPS (directly, via a trusted proxy, or with an `https://` `PUBLIC_URL`). |
-| `HOST_PORT` | `3001` | Docker Compose only: the port published on the host. The container itself always listens on 3001. (`PORT` still works here but is deprecated.) |
+| `HOST_PORT` | `3001` | Only for the repository's `docker-compose.yml`: the port published on the host. The container itself always listens on 3001. (`PORT` still works here but is deprecated.) |
 | `CORS_ORIGIN` | *(none)* | Allowed origins for API calls (comma-separated). Only needed when the UI is served from another origin than the API; the single-container setup doesn't need it. Without Docker in development mode the default is `http://localhost:5173`. |
 | `CACHE_TTL_MS` | `30000` | How long the note cache is used before it is re-synced with Joplin Server, in milliseconds. |
 | `AUTH_CACHE_TTL_MS` | `300000` | How long a validated session is trusted before it is checked again, in milliseconds. |
@@ -116,15 +140,11 @@ Docker Compose (2.24 or newer) passes every variable in `.env` to the container.
 
 ### Updating and versions
 
-Each release is tagged `vX.Y.Z` and described in [CHANGELOG.md](CHANGELOG.md) and on the [releases page](https://github.com/KamiNeko/joplin-web/releases). To update a source build, or to go back to an earlier release (replace `v1.2.3` with a real release):
+Each release is tagged `vX.Y.Z`, published as `ghcr.io/kamineko/joplin-web:X.Y.Z` and described in [CHANGELOG.md](CHANGELOG.md) (read its upgrade notes first) and on the [releases page](https://github.com/KamiNeko/joplin-web/releases).
 
-```bash
-git fetch --tags
-git checkout v1.2.3          # the release you want; `git checkout main` follows the latest code
-docker compose up -d --build
-```
+To update, set the new version in `image:` and run `docker compose pull && docker compose up -d`. Pin an exact version so that you choose when to update, and roll back by setting the previous version again. `latest` always points to the newest release.
 
-Tagged releases are also published as multi-arch images (amd64, arm64) at `ghcr.io/kamineko/joplin-web`. To use one, replace `build:` in `docker-compose.yml` with `image: ghcr.io/kamineko/joplin-web:1.2.3`, then run `docker compose pull && docker compose up -d`. Pin an exact version so that you choose when to update, and roll back by setting the previous version again.
+For a source build, check out the release tag instead (`git fetch --tags && git checkout v1.0.0`) and run `docker compose up -d --build`.
 
 To see which version is running, open *About Joplin Web* in the user menu, or `http://localhost:3001/api/health`. The endpoint returns the version and commit (and nothing about your configuration). Please include them in bug reports.
 
@@ -142,10 +162,9 @@ Open `http://localhost:5173` and sign in with `demo@joplin-web.test` / `demo`. E
 
 ### Current limitations
 
-- **End-to-end encrypted (E2EE) notes are not supported.** Encrypted items can't be read or edited.
+- **End-to-end encryption (E2EE) is not supported.** Encrypted items can't be read, and Joplin Web refuses all changes while E2EE is enabled for the account.
 - Joplin Web is built and tested against self-hosted Joplin Server. Joplin Cloud is untested.
 - Note history (revisions) and plugins are not available.
-- Prebuilt images are published from the first `vX.Y.Z` release on. Until then, build from source as shown above.
 
 ## How it works
 
@@ -157,7 +176,7 @@ flowchart LR
     Backend -- "Joplin sync protocol<br/>/api/sessions, /api/items/*" --> Joplin["🗄️ Your Joplin Server"]
 ```
 
-1. **Sign-in.** The backend opens a session on your Joplin Server with your credentials and returns the session token to the browser. Passwords are never stored.
+1. **Sign-in.** The backend opens a session on your Joplin Server with your credentials and keeps the session token in an httpOnly cookie, out of reach of scripts. Passwords are never stored.
 2. **Reading.** The backend lists all items on Joplin Server, parses notes, notebooks, tags and attachments, and keeps them in a short-lived in-memory cache per session. Only changed items are fetched again.
 3. **Writing.** Edits are serialized back into Joplin's format, keeping every property Joplin desktop expects, and uploaded. Your other Joplin apps pick them up on their next sync.
 
@@ -192,7 +211,7 @@ No test server at hand? Use `npm --prefix server run demo` instead of `run dev`.
 
 ```bash
 npm --prefix server run typecheck && npm --prefix server test
-npm --prefix client run lint && npm --prefix client run build
+npm --prefix client run lint && npm --prefix client test && npm --prefix client run build
 ```
 
 CI runs the same checks and also builds the Docker image. If your change affects the UI, refresh the screenshots with `npm --prefix client run screenshots` while the demo is running.
