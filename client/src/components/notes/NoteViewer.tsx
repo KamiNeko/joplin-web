@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Note, Notebook } from "@/lib/types";
@@ -37,7 +37,6 @@ import {
   X,
 } from "lucide-react";
 import { formatRelativeTime } from "@/lib/format";
-import { NoteEditor } from "./NoteEditor";
 import { TagEditor } from "@/components/tags/TagEditor";
 import { Button } from "@/components/ui/button";
 import { useDeleteNote, useRestoreNote, useUpdateNote } from "@/hooks/use-mutations";
@@ -45,6 +44,10 @@ import { useNoteSaver } from "@/hooks/use-note-saver";
 import { cn } from "@/lib/utils";
 import { QueryError, StaleDataHint } from "@/components/common/QueryError";
 import { clearDraft, findRestorableDraft, restoreStoredDraft, StoredDraft } from "@/lib/drafts";
+
+// The editor brings CodeMirror and its language data, so it is a separate chunk
+const loadNoteEditor = () => import("./NoteEditor");
+const NoteEditor = lazy(() => loadNoteEditor().then((m) => ({ default: m.NoteEditor })));
 
 interface NoteViewerProps {
   note?: Note | null;
@@ -98,6 +101,10 @@ export function NoteViewer({
   const deleteNote = useDeleteNote();
   const restoreNote = useRestoreNote();
   const toggleTask = useTaskToggle(note?.id);
+  // Fetch the editor chunk while the note is read, so Edit opens without a wait (and works offline)
+  useEffect(() => {
+    if (loadedNoteId) void loadNoteEditor().catch(() => undefined);
+  }, [loadedNoteId]);
 
   if (isLoading) {
     return (
@@ -421,16 +428,18 @@ export function NoteViewer({
       )}
 
       {editing ? (
-        <NoteEditor
-          key={editorKey}
-          note={note}
-          focusTitle={startInEdit && !note.title}
-          initialDraft={restoredDraft}
-          onDone={() => {
-            setRestoredDraft(null);
-            setIsEditing(false);
-          }}
-        />
+        <Suspense fallback={<div className="flex-1" aria-busy="true" />}>
+          <NoteEditor
+            key={editorKey}
+            note={note}
+            focusTitle={startInEdit && !note.title}
+            initialDraft={restoredDraft}
+            onDone={() => {
+              setRestoredDraft(null);
+              setIsEditing(false);
+            }}
+          />
+        </Suspense>
       ) : (
         <ScrollArea className="flex-1 px-6 sm:px-10 lg:px-12 py-8">
           <div className="max-w-4xl mx-auto space-y-6 pb-20">
