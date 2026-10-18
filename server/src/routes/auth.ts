@@ -6,7 +6,9 @@ import {
   cacheSessionValidation,
   getSessionToken,
   invalidateSessionValidation,
+  isWellFormedToken,
   requireAuth,
+  SECURE_SESSION_COOKIE,
   SESSION_COOKIE,
 } from '../middleware/auth.js';
 
@@ -15,15 +17,28 @@ import {
  * keeps it off cross-site requests. It is a browser-session cookie (no Max-Age): closing the browser
  * ends it, and Joplin Server expires the session on its own anyway.
  */
-export function sessionCookieOptions(
+export function sessionCookie(
   config: Pick<AppConfig, 'cookieSecure' | 'publicUrl'>,
   req: Request
-): CookieOptions {
+): { name: string; options: CookieOptions } {
   const secure =
     config.cookieSecure === 'auto'
       ? req.secure || Boolean(config.publicUrl?.startsWith('https:'))
       : config.cookieSecure;
-  return { httpOnly: true, sameSite: 'strict', secure, path: '/api' };
+  // __Host- requires Secure and Path=/; without HTTPS the cookie is limited to /api instead
+  return secure
+    ? { name: SECURE_SESSION_COOKIE, options: { httpOnly: true, sameSite: 'strict', secure: true, path: '/' } }
+    : { name: SESSION_COOKIE, options: { httpOnly: true, sameSite: 'strict', secure: false, path: '/api' } };
+}
+
+/** Clears both cookie variants (the deployment may have switched between HTTP and HTTPS) */
+function clearSessionCookies(res: Response, keep?: string): void {
+  if (keep !== SESSION_COOKIE) {
+    res.clearCookie(SESSION_COOKIE, { httpOnly: true, sameSite: 'strict', path: '/api' });
+  }
+  if (keep !== SECURE_SESSION_COOKIE) {
+    res.clearCookie(SECURE_SESSION_COOKIE, { httpOnly: true, sameSite: 'strict', secure: true, path: '/' });
+  }
 }
 
 /**
@@ -53,7 +68,9 @@ export function createAuthRouter(config: Pick<AppConfig, 'cookieSecure' | 'publi
       cacheSessionValidation(session.sessionId, true);
       console.log(`[AuthRoute] Login succeeded, session ${session.sessionId.substring(0, 8)}...`);
 
-      res.cookie(SESSION_COOKIE, session.sessionId, sessionCookieOptions(config, req));
+      const cookie = sessionCookie(config, req);
+      clearSessionCookies(res, cookie.name);
+      res.cookie(cookie.name, session.sessionId, cookie.options);
       res.status(200).json({
         userId: session.userId,
         ...(req.headers.origin === undefined ? { sessionId: session.sessionId } : {}),
@@ -74,10 +91,12 @@ export function createAuthRouter(config: Pick<AppConfig, 'cookieSecure' | 'publi
    * Succeeds even if Joplin Server can't be reached; the session is then still rejected locally.
    */
   router.post('/logout', async (req: Request, res: Response): Promise<void> => {
-    const sessionId = getSessionToken(req);
-    res.clearCookie(SESSION_COOKIE, sessionCookieOptions(config, req));
+    // With duplicate cookies there is no trustworthy token to end; just clear them
+    const { token: sessionId } = getSessionToken(req);
+    clearSessionCookies(res);
 
-    if (sessionId) {
+    // Malformed tokens are never cached or sent upstream (unauthenticated callers could flood both)
+    if (sessionId && isWellFormedToken(sessionId)) {
       console.log(`[AuthRoute] Logging out session: ${sessionId.substring(0, 8)}...`);
       invalidateSessionValidation(sessionId);
       noteCache.clearCache(sessionId);

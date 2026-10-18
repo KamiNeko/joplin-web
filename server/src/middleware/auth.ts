@@ -27,10 +27,9 @@ function pruneSessionValidationCache(now: number): void {
  * Caches session validity status
  */
 export function cacheSessionValidation(sessionId: string, isValid: boolean): void {
-  sessionValidationCache.set(sessionId, {
-    isValid,
-    validatedAt: Date.now(),
-  });
+  const now = Date.now();
+  pruneSessionValidationCache(now);
+  sessionValidationCache.set(sessionId, { isValid, validatedAt: now });
 }
 
 /**
@@ -41,28 +40,46 @@ export function invalidateSessionValidation(sessionId: string): void {
   cacheSessionValidation(sessionId, false);
 }
 
-/** httpOnly cookie that carries the session for the browser client */
+/** httpOnly cookie that carries the session for the browser client over plain HTTP */
 export const SESSION_COOKIE = 'joplin_web_session';
+/**
+ * Name used when the cookie is Secure. The __Host- prefix makes browsers refuse versions of it set
+ * with a Domain or another Path, so sibling hosts and other apps on this host can't plant one.
+ */
+export const SECURE_SESSION_COOKIE = '__Host-joplin_web_session';
 
 /** Joplin Server session ids are short ASCII tokens; anything else is rejected before use */
 const TOKEN_PATTERN = /^[\x21-\x7e]{1,256}$/;
 
 /**
- * Reads a cookie from the request's Cookie header (no cookie-parser dependency needed for one value)
+ * Whether a token looks like a Joplin Server session id (before it is cached or sent upstream)
  */
-export function readCookie(req: Request, name: string): string | undefined {
+export function isWellFormedToken(token: string): boolean {
+  return TOKEN_PATTERN.test(token);
+}
+
+/**
+ * Returns the values of all session cookies (either name) in the request's Cookie header. More than
+ * one means another app on this host planted a cookie (e.g. with a longer Path) to ride on.
+ */
+export function readSessionCookies(req: Request): string[] {
   const header = req.headers.cookie;
-  if (!header) return undefined;
+  if (!header) return [];
+  const values: string[] = [];
   for (const part of header.split(';')) {
     const eq = part.indexOf('=');
-    if (eq === -1 || part.slice(0, eq).trim() !== name) continue;
+    if (eq === -1) continue;
+    const name = part.slice(0, eq).trim();
+    if (name !== SESSION_COOKIE && name !== SECURE_SESSION_COOKIE) continue;
+    let value: string;
     try {
-      return decodeURIComponent(part.slice(eq + 1).trim());
+      value = decodeURIComponent(part.slice(eq + 1).trim());
     } catch {
-      return undefined;
+      value = '';
     }
+    values.push(value);
   }
-  return undefined;
+  return values;
 }
 
 /**
@@ -87,8 +104,12 @@ export function getHeaderSessionToken(req: Request): string | undefined {
  * Tokens in the query string (e.g. ?auth=) are deliberately not accepted: URLs end up in access
  * logs, browser history and Referer headers.
  */
-export function getSessionToken(req: Request): string | undefined {
-  return getHeaderSessionToken(req) ?? (readCookie(req, SESSION_COOKIE) || undefined);
+export function getSessionToken(req: Request): { token: string | undefined; duplicateCookies: boolean } {
+  const headerToken = getHeaderSessionToken(req);
+  if (headerToken) return { token: headerToken, duplicateCookies: false };
+  const cookies = readSessionCookies(req);
+  if (cookies.length > 1) return { token: undefined, duplicateCookies: true };
+  return { token: cookies[0] || undefined, duplicateCookies: false };
 }
 
 /**
@@ -101,14 +122,19 @@ export async function requireAuth(
   next: NextFunction
 ): Promise<void> {
   try {
-    const sessionId = getSessionToken(req);
+    const { token: sessionId, duplicateCookies } = getSessionToken(req);
+
+    if (duplicateCookies) {
+      res.status(401).json({ error: 'Unauthorized: Conflicting session cookies. Please sign in again.' });
+      return;
+    }
 
     if (!sessionId) {
       res.status(401).json({ error: 'Unauthorized: Missing session. Please sign in.' });
       return;
     }
 
-    if (!TOKEN_PATTERN.test(sessionId)) {
+    if (!isWellFormedToken(sessionId)) {
       res.status(401).json({ error: 'Unauthorized: Session has expired or is invalid' });
       return;
     }

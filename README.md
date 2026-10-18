@@ -78,6 +78,9 @@ Open `http://localhost:3001` (or the `HOST_PORT` you set) and sign in with your 
 > [!IMPORTANT]
 > Your Joplin password passes through Joplin Web on its way to your Joplin Server. Put Joplin Web behind a reverse proxy with **HTTPS** (Caddy, Traefik, nginx, …) before you use it outside your home network. Behind a proxy, also set `PUBLIC_URL` and `TRUST_PROXY` (see below).
 
+> [!NOTE]
+> Browsers scope cookies to the host name, not the port. Over plain HTTP, every other web app on the same host name or IP address (e.g. `http://192.168.1.10:8080`) also receives Joplin Web's session cookie on its `/api/...` paths and could log it. Give Joplin Web its own host name, ideally with HTTPS: the cookie then becomes a `Secure` `__Host-` cookie that other apps can't overwrite, and Joplin Web rejects requests that carry conflicting session cookies.
+
 <details>
 <summary>Without Docker Compose</summary>
 

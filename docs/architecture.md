@@ -41,7 +41,7 @@ In production the backend also serves the compiled client (`client/dist`) on the
 | :--- | :--- |
 | `GET /api/ping` | Health check |
 | `POST /api/sessions` `{ email, password }` | Login, returns `{ id, user_id }` |
-| `POST /logout` (`X-API-AUTH` + `sessionId` cookie) | Ends the session (Joplin Server's web logout; there is no API route for it). Answers with a redirect. |
+| `POST /logout` (`X-API-AUTH` + `sessionId` cookie) | Ends the session (Joplin Server's web logout; there is no API route for it). Its CSRF check skips `/logout`. Success is a redirect to `<baseUrl>/login`; anything else is treated as failure. |
 | `GET /api/items/root:/:/children?cursor=` | Paginated listing of all items (`{ items, has_more, cursor }`) |
 | `GET /api/items/root:/<id>.md:/content` | Raw item text |
 | `GET /api/items/root:/.resource/<id>:/content` | Attachment binary |
@@ -93,7 +93,7 @@ All routes except `/api/health` and `/api/auth/login` require a session.
 | Method | Path | Description |
 | :--- | :--- | :--- |
 | `GET` | `/api/health` | Health check: `{ status, version, commit }` (build metadata only, no configuration) |
-| `POST` | `/api/auth/login` | `{ email, password }` → `{ userId }` and the session cookie (`HttpOnly; SameSite=Strict; Path=/api`, `Secure` over HTTPS). Only requests without an `Origin` header (non-browser API clients) also get `sessionId` in the body. |
+| `POST` | `/api/auth/login` | `{ email, password }` → `{ userId }` and the session cookie: `joplin_web_session` (`HttpOnly; SameSite=Strict; Path=/api`) over HTTP, `__Host-joplin_web_session` (`Secure; Path=/`) over HTTPS. Requests carrying more than one session cookie get 401. Only requests without an `Origin` header (non-browser API clients) also get `sessionId` in the body. |
 | `POST` | `/api/auth/logout` | Ends the session on Joplin Server, drops cached session state and the note cache, clears the cookie |
 | `GET` | `/api/auth/check` | Validates the session → `{ valid: true }` |
 | `GET` | `/api/notebooks` | Nested notebook tree with note counts |

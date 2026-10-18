@@ -1,6 +1,6 @@
 import { NextFunction, Request, Response } from 'express';
 import type { AppConfig } from '../config.js';
-import { getHeaderSessionToken, readCookie, SESSION_COOKIE } from './auth.js';
+import { getHeaderSessionToken, readSessionCookies } from './auth.js';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
@@ -46,7 +46,7 @@ export function createOriginCheck(config: Pick<AppConfig, 'corsOrigin' | 'public
 
     const origin = req.headers.origin;
     if (origin === undefined) {
-      if (getHeaderSessionToken(req) || !readCookie(req, SESSION_COOKIE)) return next();
+      if (getHeaderSessionToken(req) || readSessionCookies(req).length === 0) return next();
     } else if (isAllowed(origin, req)) {
       return next();
     }

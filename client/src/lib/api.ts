@@ -413,10 +413,14 @@ export function getResourceObjectUrl(resourceId: string): Promise<string> {
   if (!pending) {
     pending = (async () => {
       const blob = await fetchResourceBlob(resourceId);
-      if (blob.type.split(";")[0].trim().toLowerCase() === "image/svg+xml") {
+      const type = blob.type.split(";")[0].trim().toLowerCase();
+      if (type === "image/svg+xml") {
         return readAsDataUrl(blob);
       }
-      return URL.createObjectURL(blob);
+      // Only images keep their type; anything else can't become a renderable document
+      return URL.createObjectURL(
+        type.startsWith("image/") ? blob : new Blob([blob], { type: "application/octet-stream" })
+      );
     })();
     // Allow a retry later if this attempt failed
     pending.catch(() => resourceObjectUrls.delete(resourceId));

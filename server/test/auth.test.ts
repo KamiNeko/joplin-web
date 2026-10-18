@@ -70,9 +70,15 @@ async function browserLogin(baseUrl: string): Promise<{ cookie: string; setCooki
     json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
   });
   assert.equal(res.status, 200);
-  const setCookie = res.headers.getSetCookie().find((c) => c.startsWith('joplin_web_session='));
-  assert.ok(setCookie, 'session cookie is set');
+  const setCookie = sessionSetCookie(res.headers);
   return { cookie: setCookie.split(';')[0], setCookie, data: res.data };
+}
+
+/** The Set-Cookie header that sets (not clears) a session cookie */
+function sessionSetCookie(headers: Headers): string {
+  const setCookie = headers.getSetCookie().find((c) => /^(__Host-)?joplin_web_session=[^;]+/.test(c));
+  assert.ok(setCookie, 'session cookie is set');
+  return setCookie;
 }
 
 describe('session cookie', () => {
@@ -81,6 +87,7 @@ describe('session cookie', () => {
     const { cookie, setCookie, data } = await browserLogin(baseUrl);
     assert.match(setCookie, /HttpOnly/i);
     assert.match(setCookie, /SameSite=Strict/i);
+    assert.match(setCookie, /^joplin_web_session=/);
     assert.match(setCookie, /Path=\/api/i);
     assert.doesNotMatch(setCookie, /Secure/i, 'no Secure flag over plain HTTP');
     assert.equal(data.sessionId, undefined);
@@ -118,9 +125,14 @@ describe('session cookie', () => {
     assert.equal(res.status, 400);
   });
 
-  test('sets Secure when configured or when a trusted proxy reports HTTPS', async () => {
+  test('uses a Secure __Host- cookie when configured or when a trusted proxy reports HTTPS', async () => {
     const forced = await startApp({ cookieSecure: true });
-    assert.match((await browserLogin(forced)).setCookie, /;\s*Secure/i);
+    const { setCookie, cookie } = await browserLogin(forced);
+    assert.match(setCookie, /^__Host-joplin_web_session=/);
+    assert.match(setCookie, /;\s*Secure/i);
+    assert.match(setCookie, /Path=\/;/i);
+    assert.doesNotMatch(setCookie, /Domain=/i);
+    assert.equal((await call(forced, '/api/auth/check', { headers: { Cookie: cookie } })).status, 200);
 
     const proxied = await startApp({ trustProxy: 1 });
     const res = await call(proxied, '/api/auth/login', {
@@ -128,7 +140,7 @@ describe('session cookie', () => {
       headers: { Origin: proxied, 'X-Forwarded-Proto': 'https' },
       json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
     });
-    assert.match(res.headers.getSetCookie()[0], /;\s*Secure/i);
+    assert.match(sessionSetCookie(res.headers), /^__Host-.*;\s*Secure/i);
 
     // Without TRUST_PROXY, a forwarded protocol header is ignored
     const direct = await startApp();
@@ -137,7 +149,18 @@ describe('session cookie', () => {
       headers: { Origin: direct, 'X-Forwarded-Proto': 'https' },
       json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
     });
-    assert.doesNotMatch(directRes.headers.getSetCookie()[0], /Secure/i);
+    assert.doesNotMatch(sessionSetCookie(directRes.headers), /Secure/i);
+  });
+
+  test('rejects requests with more than one session cookie', async () => {
+    const baseUrl = await startApp();
+    const { cookie } = await browserLogin(baseUrl);
+    // Another app on the same host planted a cookie with a longer path, which the browser sends first
+    const planted = `joplin_web_session=attackersession; ${cookie}`;
+    assert.equal((await call(baseUrl, '/api/auth/check', { headers: { Cookie: planted } })).status, 401);
+    const mixed = `__Host-joplin_web_session=attackersession; ${cookie}`;
+    assert.equal((await call(baseUrl, '/api/notebooks', { headers: { Cookie: mixed } })).status, 401);
+    assert.equal((await call(baseUrl, '/api/auth/check', { headers: { Cookie: cookie } })).status, 200);
   });
 });
 
@@ -199,7 +222,7 @@ describe('logout', () => {
 
     const res = await call(baseUrl, '/api/auth/logout', { method: 'POST', headers: { Cookie: cookie, Origin: baseUrl } });
     assert.equal(res.status, 200);
-    const cleared = res.headers.getSetCookie().find((c) => c.startsWith('joplin_web_session='));
+    const cleared = res.headers.getSetCookie().find((c) => c.startsWith('joplin_web_session=;'));
     assert.ok(cleared, 'cookie is cleared');
     assert.match(cleared, /Expires=Thu, 01 Jan 1970/i);
 
@@ -229,6 +252,34 @@ describe('logout', () => {
     // Unknown sessions are ignored by Joplin Server; logout must not fail
     const res = await call(baseUrl, '/api/auth/logout', { method: 'POST', headers: { Authorization: 'Bearer not-a-session' } });
     assert.equal(res.status, 200);
+    // Malformed tokens are neither cached nor sent upstream, but logout still answers normally
+    const long = await call(baseUrl, '/api/auth/logout', { method: 'POST', headers: { Authorization: `Bearer ${'x'.repeat(5000)}` } });
+    assert.equal(long.status, 200);
+  });
+
+  test('only a redirect to /login counts as an ended Joplin Server session', async () => {
+    const { JoplinApiService } = await import('../src/services/joplin-api.js');
+    const express = (await import('express')).default;
+    let reply: (res: import('express').Response) => void = () => undefined;
+    const stub = express();
+    const stubServer: Server = await new Promise((resolve) => {
+      const s = stub.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    servers.push(stubServer);
+    const api = new JoplinApiService(`http://127.0.0.1:${(stubServer.address() as AddressInfo).port}/joplin`);
+    stub.post('/joplin/logout', (_req, res) => reply(res));
+
+    reply = (res) => res.redirect(302, '/joplin/login');
+    await api.deleteSession('token');
+    reply = (res) => res.redirect(302, 'https://notes.example.com/joplin/login');
+    await api.deleteSession('token');
+
+    reply = (res) => res.status(200).send('<html>ok?</html>');
+    await assert.rejects(api.deleteSession('token'), /Unexpected logout response/);
+    reply = (res) => res.redirect(301, 'https://127.0.0.1/joplin/logout');
+    await assert.rejects(api.deleteSession('token'), /Unexpected logout response/);
+    reply = (res) => res.status(403).send('<html>Forbidden</html>');
+    await assert.rejects(api.deleteSession('token'));
   });
 });
 
