@@ -7,6 +7,8 @@ import {
   createNotebook,
   updateNotebook,
   deleteNotebook,
+  restoreNotebook,
+  purgeNotebook,
   addTagToNote,
   removeTagFromNote,
   renameTag,
@@ -104,6 +106,30 @@ export function useDeleteNotebook() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => deleteNotebook(id),
+    onSuccess: () => {
+      invalidateLists(queryClient);
+      queryClient.invalidateQueries({ queryKey: ["note"] });
+    },
+  });
+}
+
+/** Restores a trashed notebook with its contents */
+export function useRestoreNotebook() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => restoreNotebook(id),
+    onSuccess: () => {
+      invalidateLists(queryClient);
+      queryClient.invalidateQueries({ queryKey: ["note"] });
+    },
+  });
+}
+
+/** Permanently deletes a trashed notebook with its contents */
+export function usePurgeNotebook() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => purgeNotebook(id),
     onSuccess: () => {
       invalidateLists(queryClient);
       queryClient.invalidateQueries({ queryKey: ["note"] });

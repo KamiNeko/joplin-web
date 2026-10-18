@@ -10,6 +10,20 @@ export interface Notebook {
 }
 
 /**
+ * A trashed notebook as listed in the trash (only the top of a trashed subtree).
+ */
+export interface TrashedNotebook {
+  id: string;
+  title: string;
+  parentId: string;
+  deletedTime: number;
+  /** Notes anywhere inside, including sub-notebooks */
+  noteCount: number;
+  /** Sub-notebooks at any depth */
+  notebookCount: number;
+}
+
+/**
  * Note summary for lists and search results.
  */
 export interface NoteListItem {

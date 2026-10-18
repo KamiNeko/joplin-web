@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Notebook } from "@/lib/types";
-import { ChevronRight, Folder, FolderOpen, FolderPlus, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import { ChevronRight, Folder, FolderInput, FolderOpen, FolderPlus, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -12,7 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { ROW_ACTION_VISIBILITY } from "@/lib/ui-constants";
 
-export type NotebookAction = "create-child" | "rename" | "delete";
+export type NotebookAction = "create-child" | "rename" | "move" | "delete";
 
 interface NotebookTreeProps {
   notebooks: Notebook[];
@@ -143,6 +143,10 @@ function NotebookItem({
               <DropdownMenuItem onClick={() => onNotebookAction("rename", notebook)}>
                 <Pencil className="h-4 w-4" />
                 Rename
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => onNotebookAction("move", notebook)}>
+                <FolderInput className="h-4 w-4" />
+                Move to…
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem
