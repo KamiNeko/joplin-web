@@ -163,12 +163,12 @@ describe('reading', () => {
     ]);
     assert.deepEqual(
       await searchTitles('notebook:personal -notebook:recipes'),
-      ['Book train tickets to Porto', 'Lisbon Long Weekend', 'Renew passport'],
+      ['Book train tickets to Porto', 'Lisbon Long Weekend', 'Pay the electricity bill', 'Renew passport'],
       'sub-notebooks are included and can be excluded'
     );
-    assert.deepEqual(await searchTitles('type:todo'), ['Book train tickets to Porto', 'Renew passport']);
+    assert.deepEqual(await searchTitles('type:todo'), ['Book train tickets to Porto', 'Pay the electricity bill', 'Renew passport']);
     assert.deepEqual(await searchTitles('iscompleted:1'), ['Book train tickets to Porto']);
-    assert.deepEqual(await searchTitles('iscompleted:0'), ['Renew passport']);
+    assert.deepEqual(await searchTitles('iscompleted:0'), ['Pay the electricity bill', 'Renew passport']);
     assert.ok(!(await searchTitles('type:note')).includes('Renew passport'));
     assert.deepEqual(await searchTitles('tag:nosuchtag'), []);
   });
