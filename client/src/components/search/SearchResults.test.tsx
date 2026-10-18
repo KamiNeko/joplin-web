@@ -1,47 +1,83 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { SearchResult } from "@/lib/types";
-import { SearchResults } from "./SearchResults";
-
-const result = (id: string, title: string, extra: Partial<SearchResult> = {}): SearchResult => ({
-  id: id.repeat(32),
-  title,
-  preview: "",
-  createdTime: Date.now() - 60_000,
-  updatedTime: Date.now() - 60_000,
-  ...extra,
-});
-
-const results = [
-  result("a", "Website Relaunch Roadmap", { matches: { inTitle: true, inBody: true, snippet: "…the roadmap for Q3…" } }),
-  result("b", "Weekly Sync", { preview: "Discussed the road ahead" }),
-];
+import { HighlightedText, SearchResults } from "./SearchResults";
+import type { SearchResult } from "@/lib/types";
 
 afterEach(cleanup);
 
+const marks = (container: HTMLElement) => Array.from(container.querySelectorAll("mark")).map((m) => m.textContent);
+
+const result = (overrides: Partial<SearchResult> = {}): SearchResult => ({
+  id: "0123456789abcdef0123456789abcdef",
+  title: "List for shopping",
+  preview: "Milk, eggs and bread",
+  createdTime: 0,
+  updatedTime: 0,
+  ...overrides,
+});
+
+describe("HighlightedText", () => {
+  it("highlights every term, case-insensitively, wherever it occurs", () => {
+    const { container } = render(<HighlightedText text="List for Shopping lists" terms={["shopping", "list"]} />);
+    expect(marks(container)).toEqual(["List", "Shopping", "list"]);
+    expect(container.textContent).toBe("List for Shopping lists");
+  });
+
+  it("prefers a phrase over a word it contains and escapes regex characters", () => {
+    const { container } = render(<HighlightedText text="a shopping list (c++)" terms={["list", "shopping list", "c++"]} />);
+    expect(marks(container)).toEqual(["shopping list", "c++"]);
+  });
+
+  it("renders plain text without terms", () => {
+    const { container } = render(<HighlightedText text="Plain" terms={[]} />);
+    expect(marks(container)).toEqual([]);
+    expect(container.textContent).toBe("Plain");
+  });
+});
+
 describe("SearchResults", () => {
-  it("lists the matches with a count and highlights the query in titles and snippets", () => {
-    const { container } = render(<SearchResults query="road" results={results} onSelectNote={() => {}} />);
+  it("highlights the matched terms in title and snippet, not the raw query", () => {
+    const note = result({
+      matches: { inTitle: true, inBody: true, snippet: "...need milk from the shopping trip", terms: ["shopping", "list"] },
+    });
+    const { container } = render(
+      <SearchResults query='shopping list tag:home' results={[note]} onSelectNote={vi.fn()} />
+    );
+    expect(marks(container)).toEqual(["List", "shopping", "shopping"]);
+  });
+
+  it("shows the preview without highlight for filter-only queries", () => {
+    const note = result({ matches: { inTitle: false, inBody: false, snippet: "", terms: [] } });
+    const { container } = render(<SearchResults query="tag:home" results={[note]} onSelectNote={vi.fn()} />);
+    expect(screen.getByText("Milk, eggs and bread")).toBeTruthy();
+    expect(marks(container)).toEqual([]);
+  });
+
+  it("explains the search syntax when nothing matches", () => {
+    render(<SearchResults query="nothing" results={[]} onSelectNote={vi.fn()} />);
+    expect(screen.getByText(/No matches found/)).toBeTruthy();
+    expect(screen.getByText("0 found")).toBeTruthy();
+    expect(screen.getByText(/tag:name, notebook:name/)).toBeTruthy();
+  });
+
+  const listed = [
+    result({ id: "a".repeat(32), title: "Website Relaunch Roadmap", matches: { inTitle: true, inBody: true, snippet: "…the roadmap for Q3…", terms: ["road"] } }),
+    result({ id: "b".repeat(32), title: "Weekly Sync", preview: "Discussed the road ahead" }),
+  ];
+
+  it("lists the matches with a count; the snippet wins over the preview", () => {
+    const { container } = render(<SearchResults query="road" results={listed} onSelectNote={() => {}} />);
 
     expect(screen.getByText("2 found")).toBeTruthy();
     expect(screen.getByRole("button", { name: /Website Relaunch Roadmap/ })).toBeTruthy();
-    // The snippet from the API wins over the preview; the preview is the fallback
     const snippets = Array.from(container.querySelectorAll("p.line-clamp-2")).map((p) => p.textContent);
     expect(snippets).toEqual(["…the roadmap for Q3…", "Discussed the road ahead"]);
-    const marks = Array.from(container.querySelectorAll("mark")).map((m) => m.textContent);
-    expect(marks).toEqual(["Road", "road", "road"]);
-  });
-
-  it("treats regex characters in the query literally", () => {
-    const { container } = render(
-      <SearchResults query="c++ (" results={[result("c", "Notes on C++ (draft)")]} onSelectNote={() => {}} />
-    );
-    expect(Array.from(container.querySelectorAll("mark")).map((m) => m.textContent)).toEqual(["C++ ("]);
+    expect(marks(container)).toEqual(["Road", "road"]);
   });
 
   it("opens a result on click and with Enter or Space", () => {
     const onSelectNote = vi.fn();
-    render(<SearchResults query="road" results={results} onSelectNote={onSelectNote} />);
+    render(<SearchResults query="road" results={listed} onSelectNote={onSelectNote} />);
     const [first, second] = screen.getAllByRole("button").filter((b) => b.hasAttribute("tabindex"));
 
     fireEvent.click(first);
@@ -49,13 +85,7 @@ describe("SearchResults", () => {
     fireEvent.keyDown(second, { key: " " });
     fireEvent.keyDown(second, { key: "a" });
 
-    expect(onSelectNote.mock.calls).toEqual([[results[0].id], [results[1].id], [results[1].id]]);
-  });
-
-  it("explains an empty result", () => {
-    render(<SearchResults query="zzz" results={[]} onSelectNote={() => {}} />);
-    expect(screen.getByText("No matches found")).toBeTruthy();
-    expect(screen.getByText("0 found")).toBeTruthy();
+    expect(onSelectNote.mock.calls).toEqual([[listed[0].id], [listed[1].id], [listed[1].id]]);
   });
 
   it("shows a failed search with Retry instead of “No matches”", () => {

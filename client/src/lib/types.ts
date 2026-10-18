@@ -105,7 +105,13 @@ export interface WriteState {
  * Search result with matched highlighted snippet fields.
  */
 export interface SearchResult extends NoteListItem {
-  matches?: { inTitle: boolean; inBody: boolean; snippet?: string };
+  matches?: {
+    inTitle: boolean;
+    inBody: boolean;
+    snippet?: string;
+    /** Lower-cased words and phrases the note matched (empty for filter-only queries) */
+    terms?: string[];
+  };
 }
 
 /**

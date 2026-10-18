@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/format";
 import { QueryError } from "@/components/common/QueryError";
+import { SEARCH_SYNTAX_HINT } from "@/lib/ui-constants";
 
 interface SearchResultsProps {
   query: string;
@@ -22,32 +23,34 @@ interface SearchResultsProps {
 }
 
 /**
- * Helper to highlight matched query characters or substrings.
+ * Highlights every occurrence of the matched search terms (words or phrases, case-insensitive).
  */
-function HighlightedText({
+export function HighlightedText({
   text,
-  query,
+  terms,
   className,
 }: {
   text: string;
-  query: string;
+  terms: string[];
   className?: string;
 }) {
   if (!text) return null;
-  if (!query || query.trim().length < 2) {
+  const usable = terms.filter((term) => term.length > 0);
+  if (usable.length === 0) {
     return <span className={className}>{text}</span>;
   }
 
-  const trimmed = query.trim();
-  // Safe regex escaping
-  const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const regex = new RegExp(`(${escaped})`, "gi");
-  const parts = text.split(regex);
+  // Longest first, so a phrase wins over a word it contains
+  const escaped = [...usable]
+    .sort((a, b) => b.length - a.length)
+    .map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const parts = text.split(new RegExp(`(${escaped.join("|")})`, "i"));
+  const lowerTerms = new Set(usable.map((term) => term.toLowerCase()));
 
   return (
     <span className={className}>
       {parts.map((part, i) =>
-        regex.test(part) ? (
+        lowerTerms.has(part.toLowerCase()) ? (
           <mark
             key={i}
             className="bg-primary/20 text-foreground font-semibold rounded-sm px-0.5"
@@ -131,6 +134,9 @@ export function SearchResults({
             <p className="text-xs text-muted-foreground mt-1 max-w-[220px]">
               We couldn&apos;t find any notes matching &ldquo;{query}&rdquo;. Try another term.
             </p>
+            <p className="text-[11px] text-muted-foreground/80 mt-3 max-w-[260px] leading-relaxed">
+              {SEARCH_SYNTAX_HINT}
+            </p>
           </div>
         ) : (
           <div className="space-y-2 pb-6">
@@ -141,6 +147,7 @@ export function SearchResults({
               // Use snippet matches if available from API
               const snippetMatch = note.matches?.snippet;
               const displaySnippet = snippetMatch || note.preview;
+              const terms = note.matches?.terms ?? [];
 
               return (
                 <div
@@ -176,7 +183,7 @@ export function SearchResults({
                       <h4 className="font-semibold text-sm leading-snug truncate">
                         <HighlightedText
                           text={note.title || "Untitled Note"}
-                          query={query}
+                          terms={terms}
                           className={isActive ? "text-foreground font-bold" : "text-foreground/90"}
                         />
                       </h4>
@@ -191,7 +198,7 @@ export function SearchResults({
 
                   {displaySnippet && (
                     <p className="text-xs text-muted-foreground line-clamp-2 leading-relaxed">
-                      <HighlightedText text={displaySnippet} query={query} />
+                      <HighlightedText text={displaySnippet} terms={terms} />
                     </p>
                   )}
                 </div>
