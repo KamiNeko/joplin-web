@@ -11,16 +11,17 @@ interface ResourceImageProps extends Omit<React.ImgHTMLAttributes<HTMLImageEleme
  * Image stored as a Joplin resource, loaded through the authenticated API.
  */
 export function ResourceImage({ resourceId, alt, className, ...props }: ResourceImageProps) {
-  const [url, setUrl] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
+  // Load result for one resource; a result for another id counts as still loading
+  const [loaded, setLoaded] = useState<{ resourceId: string; url: string | null; failed: boolean } | null>(null);
+  const current = loaded?.resourceId === resourceId ? loaded : null;
+  const url = current?.url ?? null;
+  const failed = current?.failed ?? false;
 
   useEffect(() => {
     let cancelled = false;
-    setUrl(null);
-    setFailed(false);
     getResourceObjectUrl(resourceId)
-      .then((objectUrl) => !cancelled && setUrl(objectUrl))
-      .catch(() => !cancelled && setFailed(true));
+      .then((objectUrl) => !cancelled && setLoaded({ resourceId, url: objectUrl, failed: false }))
+      .catch(() => !cancelled && setLoaded({ resourceId, url: null, failed: true }));
     return () => {
       cancelled = true;
     };

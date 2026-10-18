@@ -279,7 +279,7 @@ export function NoteList({
             </div>
             <h4 className="text-sm font-semibold text-foreground">{isFiltering ? "No matches" : emptyTitle}</h4>
             {(isFiltering || emptyDescription) && (
-              <p className="text-xs text-muted-foreground mt-1 max-w-[220px] break-words">
+              <p className="text-xs text-muted-foreground mt-1 max-w-[220px] wrap-break-word">
                 {isFiltering ? `No notes in this list match "${filterText.trim()}".` : emptyDescription}
               </p>
             )}

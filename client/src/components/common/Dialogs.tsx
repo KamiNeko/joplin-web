@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -89,9 +89,12 @@ export function PromptDialog({
 }: PromptDialogProps) {
   const [value, setValue] = useState(initialValue);
 
-  useEffect(() => {
+  // Reset to initialValue whenever the dialog opens or it changes (adjusted while rendering)
+  const [synced, setSynced] = useState({ open, initialValue });
+  if (synced.open !== open || synced.initialValue !== initialValue) {
+    setSynced({ open, initialValue });
     if (open) setValue(initialValue);
-  }, [open, initialValue]);
+  }
 
   const trimmed = value.trim();
 
@@ -162,7 +165,7 @@ export function AboutDialog({ open, onOpenChange }: { open: boolean; onOpenChang
               href={link.href}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-primary underline-offset-4 hover:underline rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="text-primary underline-offset-4 hover:underline rounded-sm outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
             >
               {link.label}
             </a>

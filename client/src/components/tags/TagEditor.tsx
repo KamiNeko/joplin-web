@@ -136,7 +136,7 @@ export function TagEditor({ noteId, tags, readOnly = false, onTagClick }: TagEdi
               }}
               placeholder="Add tag…"
               aria-label="Add tag"
-              className="h-6 w-36 rounded-full border border-primary/50 bg-background px-2.5 text-[11px] text-foreground outline-none focus:ring-1 focus:ring-primary/40"
+              className="h-6 w-36 rounded-full border border-primary/50 bg-background px-2.5 text-[11px] text-foreground outline-hidden focus:ring-1 focus:ring-primary/40"
             />
             {addTag.isPending && (
               <Loader2 className="absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 animate-spin text-muted-foreground" />

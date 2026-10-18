@@ -32,9 +32,9 @@ export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteList
         }
       }}
       className={cn(
-        "group relative flex flex-col gap-1.5 p-3.5 rounded-xl border text-left transition-all duration-150 cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-primary",
+        "group relative flex flex-col gap-1.5 p-3.5 rounded-xl border text-left transition-all duration-150 cursor-pointer outline-hidden focus-visible:ring-2 focus-visible:ring-primary",
         isActive
-          ? "bg-card border-primary/40 shadow-sm"
+          ? "bg-card border-primary/40 shadow-xs"
           : "bg-transparent border-transparent hover:bg-muted/60"
       )}
     >
@@ -58,7 +58,7 @@ export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteList
               role="checkbox"
               aria-checked={Boolean(note.todoCompleted)}
               aria-label={`Done: ${note.title || "Untitled Note"}`}
-              className="shrink-0 mt-0.5 rounded-sm enabled:hover:scale-110 transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+              className="shrink-0 mt-0.5 rounded-sm enabled:hover:scale-110 transition-transform focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary"
             >
               {note.todoCompleted ? (
                 <CheckSquare className="h-4 w-4 text-success" />

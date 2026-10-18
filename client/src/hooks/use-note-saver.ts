@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useState } from "react";
 import { QueryClient, useQueryClient } from "@tanstack/react-query";
 import { NoteUpdate, updateNote } from "@/lib/api";
 import { Note } from "@/lib/types";
@@ -20,7 +20,9 @@ export interface NoteSaveHandlers {
 export interface NoteSaver {
   readonly noteId: string;
   /** updatedTime of the version the next save is based on (sent as baseUpdatedTime; null sends none) */
-  baseUpdatedTime: number | null;
+  readonly baseUpdatedTime: number | null;
+  /** Makes `updatedTime` the base of the next save (for a version adopted or loaded outside the saver) */
+  rebase(updatedTime: number): void;
   /** The save currently talking to the server, until its handlers have run */
   readonly inflight: Promise<boolean> | null;
   /**
@@ -38,18 +40,24 @@ export function createNoteSaver(
   noteId: string,
   baseUpdatedTime: number | null = null
 ): NoteSaver {
+  let base = baseUpdatedTime;
   let inflight: Promise<boolean> | null = null;
-  const saver: NoteSaver = {
+  return {
     noteId,
-    baseUpdatedTime,
+    get baseUpdatedTime() {
+      return base;
+    },
+    rebase(updatedTime) {
+      base = updatedTime;
+    },
     get inflight() {
       return inflight;
     },
     send(changes, { toCache, onSaved, onError } = {}) {
       const run = (async () => {
         try {
-          const saved = await updateNote(noteId, { ...changes, baseUpdatedTime: saver.baseUpdatedTime ?? undefined });
-          saver.baseUpdatedTime = saved.updatedTime;
+          const saved = await updateNote(noteId, { ...changes, baseUpdatedTime: base ?? undefined });
+          base = saved.updatedTime;
           queryClient.setQueryData(["note", noteId], toCache ? toCache(saved) : saved);
           invalidateLists(queryClient);
           onSaved?.(saved);
@@ -65,7 +73,6 @@ export function createNoteSaver(
       return run;
     },
   };
-  return saver;
 }
 
 /**
@@ -74,9 +81,12 @@ export function createNoteSaver(
  */
 export function useNoteSaver(noteId: string | undefined, baseUpdatedTime: number | null = null): NoteSaver | null {
   const queryClient = useQueryClient();
-  const saverRef = useRef<NoteSaver | null>(null);
-  if (noteId && saverRef.current?.noteId !== noteId) {
-    saverRef.current = createNoteSaver(queryClient, noteId, baseUpdatedTime);
+  const [saver, setSaver] = useState(() => (noteId ? createNoteSaver(queryClient, noteId, baseUpdatedTime) : null));
+  if (noteId && saver?.noteId !== noteId) {
+    // Another note: adjust the state while rendering, React re-renders right away with the new saver
+    const next = createNoteSaver(queryClient, noteId, baseUpdatedTime);
+    setSaver(next);
+    return next;
   }
-  return noteId ? saverRef.current : null;
+  return noteId ? saver : null;
 }

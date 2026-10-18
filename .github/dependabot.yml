@@ -16,9 +16,6 @@ updates:
       # Runtime is Node 24 (.nvmrc, docker/Dockerfile): keep @types/node on 24.x
       - dependency-name: "@types/node"
         versions: [">=25.0.0"]
-      # Majors needing migration, tracked in #73; remove when upgrading
-      - dependency-name: typescript
-        update-types: [version-update:semver-major]
 
   - package-ecosystem: npm
     directory: /client
@@ -32,13 +29,8 @@ updates:
       client-minor-patch:
         update-types: [minor, patch]
     ignore:
-      # Majors needing migration, tracked in #73; remove when upgrading
-      - dependency-name: tailwindcss
-        update-types: [version-update:semver-major]
-      - dependency-name: "@vitejs/plugin-react"
-        update-types: [version-update:semver-major]
-      - dependency-name: eslint-plugin-react-hooks
-        update-types: [version-update:semver-major]
+      # TypeScript 7 has no JS compiler API, which typescript-eslint needs (peer typescript <6.1.0).
+      # Move the client to TS 7 once typescript-eslint supports it; the server is already on 7.
       - dependency-name: typescript
         update-types: [version-update:semver-major]
 

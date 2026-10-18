@@ -95,7 +95,7 @@ function NotebookItem({
             handleSelect();
           }}
           aria-current={isSelected ? "page" : undefined}
-          className="row-label flex items-center gap-1.5 min-w-0 flex-1 mr-2 text-left outline-none"
+          className="row-label flex items-center gap-1.5 min-w-0 flex-1 mr-2 text-left outline-hidden"
         >
           {isOpen && hasChildren ? (
             <FolderOpen

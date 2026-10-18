@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { AlertCircle, Loader2, RefreshCw, WifiOff } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { useConnectionState, useConnectionStatus, useRefresh } from "@/hooks/use-connection";
@@ -38,17 +38,16 @@ export function ConnectionStatus() {
   const isProblem = status.state === "error" || status.state === "expired" || status.state === "offline";
 
   // Screen readers hear problems and the recovery, not every routine "Refreshing…"
+  // (adjusted while rendering, React re-renders right away with the new state)
   const [announcement, setAnnouncement] = useState("");
-  const hadProblemRef = useRef(false);
-  useEffect(() => {
-    if (isProblem) {
-      hadProblemRef.current = true;
-      setAnnouncement(status.label);
-    } else if (hadProblemRef.current && (status.state === "updated" || status.state === "connected")) {
-      hadProblemRef.current = false;
-      setAnnouncement("Connection restored");
-    }
-  }, [isProblem, status.label, status.state]);
+  const [hadProblem, setHadProblem] = useState(false);
+  if (isProblem) {
+    if (!hadProblem) setHadProblem(true);
+    if (announcement !== status.label) setAnnouncement(status.label);
+  } else if (hadProblem && (status.state === "updated" || status.state === "connected")) {
+    setHadProblem(false);
+    setAnnouncement("Connection restored");
+  }
 
   return (
     <div className="border-t border-border/40 px-3 py-2">
@@ -60,7 +59,7 @@ export function ConnectionStatus() {
           <button
             type="button"
             className={cn(
-              "w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-left transition-colors hover:bg-sidebar-accent/60 outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              "w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-left transition-colors hover:bg-sidebar-accent/60 outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
               isProblem ? "text-foreground" : "text-muted-foreground"
             )}
             title={lastUpdatedAt ? `Last updated ${formatTime(lastUpdatedAt)}` : undefined}
@@ -89,7 +88,7 @@ export function ConnectionStatus() {
             {lastError && (
               <>
                 <dt className="text-muted-foreground">Last error</dt>
-                <dd className="text-destructive break-words">
+                <dd className="text-destructive wrap-break-word">
                   {lastError.message}
                   <span className="block text-muted-foreground">{formatTime(lastError.at)}</span>
                 </dd>

@@ -133,7 +133,7 @@ export function Header({
             }}
             placeholder="Search notes..."
             aria-label="Search notes"
-            className="h-8 w-56 lg:w-72 rounded-lg border border-border/40 bg-muted/30 pl-8 pr-14 text-xs text-foreground placeholder:text-muted-foreground outline-none transition-colors hover:bg-muted/50 focus:bg-background focus:border-primary/50 focus:ring-1 focus:ring-primary/40 [&::-webkit-search-cancel-button]:hidden"
+            className="h-8 w-56 lg:w-72 rounded-lg border border-border/40 bg-muted/30 pl-8 pr-14 text-xs text-foreground placeholder:text-muted-foreground outline-hidden transition-colors hover:bg-muted/50 focus:bg-background focus:border-primary/50 focus:ring-1 focus:ring-primary/40 [&::-webkit-search-cancel-button]:hidden"
           />
           {searchQuery ? (
             <button

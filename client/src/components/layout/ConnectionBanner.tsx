@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { CheckCircle2, WifiOff } from "lucide-react";
 import { useOnline } from "@/hooks/use-connection";
 
@@ -11,20 +11,18 @@ const BACK_ONLINE_MS = 3000;
 export function ConnectionBanner() {
   const online = useOnline();
   const [showBackOnline, setShowBackOnline] = useState(false);
-  const wasOffline = useRef(!online);
+  // Going online shows "Back online", going offline hides it (adjusted while rendering)
+  const [prevOnline, setPrevOnline] = useState(online);
+  if (online !== prevOnline) {
+    setPrevOnline(online);
+    setShowBackOnline(online);
+  }
 
   useEffect(() => {
-    if (!online) {
-      wasOffline.current = true;
-      setShowBackOnline(false);
-      return;
-    }
-    if (!wasOffline.current) return;
-    wasOffline.current = false;
-    setShowBackOnline(true);
+    if (!showBackOnline) return;
     const id = window.setTimeout(() => setShowBackOnline(false), BACK_ONLINE_MS);
     return () => window.clearTimeout(id);
-  }, [online]);
+  }, [showBackOnline]);
 
   return (
     <div role="status" aria-live="polite">

@@ -159,7 +159,7 @@ export function NoteViewer({
   if (!note) {
     return (
       <div className="flex flex-col items-center justify-center h-full p-6 text-center select-none bg-background">
-        <div className="h-16 w-16 rounded-2xl bg-muted/40 border border-border/50 flex items-center justify-center text-muted-foreground mb-4 shadow-sm">
+        <div className="h-16 w-16 rounded-2xl bg-muted/40 border border-border/50 flex items-center justify-center text-muted-foreground mb-4 shadow-xs">
           <FileText className="h-8 w-8 opacity-40" />
         </div>
         <h3 className="text-lg font-semibold text-foreground">No note selected</h3>
@@ -284,7 +284,7 @@ export function NoteViewer({
   return (
     <div className="flex flex-col h-full bg-background relative overflow-hidden">
       {/* Header bar */}
-      <div className="px-4 sm:px-6 py-3 border-b border-border/40 flex items-center justify-between gap-3 bg-background/80 backdrop-blur-sm z-10">
+      <div className="px-4 sm:px-6 py-3 border-b border-border/40 flex items-center justify-between gap-3 bg-background/80 backdrop-blur-xs z-10">
         <div className="flex flex-wrap items-center gap-2 min-w-0">
           {note.notebookTitle && (
             <button
@@ -433,7 +433,7 @@ export function NoteViewer({
           className="mx-4 sm:mx-6 mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 text-xs text-foreground"
         >
           <History className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
-          <span className="flex-1 min-w-[12rem]">
+          <span className="flex-1 min-w-48">
             Unsaved changes from{" "}
             {new Date(restorable.savedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })} are
             stored on this device.
@@ -495,7 +495,7 @@ export function NoteViewer({
 
             <div className="space-y-3">
               <h1
-                className="text-2xl sm:text-3xl lg:text-4xl font-bold tracking-tight text-foreground leading-tight"
+                className="text-2xl/tight sm:text-3xl/9 lg:text-4xl/10 font-bold tracking-tight text-foreground"
                 onDoubleClick={() => !isTrashed && setIsEditing(true)}
               >
                 {note.title || "Untitled Note"}
@@ -596,7 +596,7 @@ function useTaskToggle(noteId: string | undefined) {
 
     // The new body is built from the cached note, so that is the version it is based on. The cache
     // also holds what the editor saved, so a save there never makes this one a false conflict.
-    saver.baseUpdatedTime = cached.updatedTime;
+    saver.rebase(cached.updatedTime);
     await saver.send(
       { body: cached.body },
       {
@@ -622,7 +622,9 @@ function useTaskToggle(noteId: string | undefined) {
     );
   };
 
-  saveRef.current = save;
+  useEffect(() => {
+    saveRef.current = save;
+  });
 
   return (location: TaskLocation, checked: boolean) => {
     if (!noteId) return;

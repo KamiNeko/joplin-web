@@ -36,7 +36,7 @@ export function StaleDataHint({
           type="button"
           onClick={onRetry}
           disabled={isRetrying}
-          className="shrink-0 rounded-sm font-medium text-foreground underline-offset-2 hover:underline disabled:opacity-60 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="shrink-0 rounded-sm font-medium text-foreground underline-offset-2 hover:underline disabled:opacity-60 outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
         >
           {isRetrying ? "Retrying…" : "Retry"}
         </button>
@@ -82,7 +82,7 @@ export function QueryError({ message, error, onRetry, isRetrying = false, compac
       </div>
       <h4 className="text-sm font-semibold text-foreground">{message}</h4>
       {error?.message && (
-        <p className="text-xs text-muted-foreground mt-1 max-w-[260px] break-words">{error.message}</p>
+        <p className="text-xs text-muted-foreground mt-1 max-w-[260px] wrap-break-word">{error.message}</p>
       )}
       {retryButton}
     </div>
