@@ -4,6 +4,22 @@ Notable changes to Joplin Web. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [1.0.1] – 2026-10-18
+
+### Fixed
+
+- Links to a heading in another note (`:/id#heading`) open that note and scroll to the heading, also after a reload. They used to render as plain text (#93).
+- Rendering notes with very large HTML no longer stalls the browser: the link and image rewrite patterns are bounded.
+
+### Changed
+
+- Dependencies: React 19, Tailwind CSS 4, Vite 8, Vitest 5, ESLint 10, jsdom 30, TypeScript 7 on the server. The UI looks the same.
+- Building from source needs Node.js 22.12 or newer (24 recommended, see `.nvmrc`); Node 21 can no longer build the client. The Docker image already uses Node 24.
+
+### Internal
+
+- Client test suite extended to 150 tests (query hooks, conflict dialog, session expiry, Markdown rendering and sanitizing, connection status).
+
 ## [1.0.0] – 2026-10-18
 
 First stable release. Joplin Web now reads **and writes** notes on your Joplin Server; the earlier `v1.0-readonly` snapshot could only read them.

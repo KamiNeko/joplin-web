@@ -1,6 +1,6 @@
 {
   "name": "joplin-web-server",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Express.js REST API backend for Joplin Web",
   "type": "module",
   "main": "dist/index.js",
