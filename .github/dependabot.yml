@@ -12,6 +12,17 @@ updates:
     groups:
       server-minor-patch:
         update-types: [minor, patch]
+    ignore:
+      # Runtime is Node 24 (.nvmrc, docker/Dockerfile): keep @types/node on 24.x
+      - dependency-name: "@types/node"
+        versions: [">=25.0.0"]
+      # Majors needing migration, tracked in #73; remove when upgrading
+      - dependency-name: express
+        update-types: [version-update:semver-major]
+      - dependency-name: "@types/express"
+        update-types: [version-update:semver-major]
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
 
   - package-ecosystem: npm
     directory: /client
@@ -24,6 +35,16 @@ updates:
     groups:
       client-minor-patch:
         update-types: [minor, patch]
+    ignore:
+      # Majors needing migration, tracked in #73; remove when upgrading
+      - dependency-name: tailwindcss
+        update-types: [version-update:semver-major]
+      - dependency-name: "@vitejs/plugin-react"
+        update-types: [version-update:semver-major]
+      - dependency-name: eslint-plugin-react-hooks
+        update-types: [version-update:semver-major]
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
 
   - package-ecosystem: github-actions
     directory: /
