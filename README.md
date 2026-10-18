@@ -207,6 +207,7 @@ Contributions are welcome: bug reports, ideas and pull requests.
 
 ```text
 client/   React single-page app (Vite)
+  e2e/    End-to-end smoke tests (Playwright, against the demo)
 server/   Express backend: auth, cache, Joplin serializer, REST API
   demo/   Mock Joplin Server + sample notes (demo mode & tests)
   test/   Serializer and API tests (Node test runner)
@@ -229,6 +230,7 @@ No test server at hand? Use `npm --prefix server run demo` instead of `run dev`.
 ```bash
 npm --prefix server run typecheck && npm --prefix server test
 npm --prefix client run lint && npm --prefix client test && npm --prefix client run build
+npm --prefix client run test:e2e   # browser smoke tests against the demo (uses your installed Chrome)
 ```
 
 CI runs the same checks and also builds the Docker image. If your change affects the UI, refresh the screenshots with `npm --prefix client run screenshots` while the demo is running.
