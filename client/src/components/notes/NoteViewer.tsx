@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { Note, Notebook } from "@/lib/types";
 import { flattenNotebooks } from "@/lib/notebooks";
 import { setTaskChecked, type TaskLocation } from "@/lib/tasks";
-import { getConflictNote, updateNote as updateNoteRequest } from "@/lib/api";
+import { getConflictNote } from "@/lib/api";
 import { MarkdownRenderer } from "@/components/common/MarkdownRenderer";
 import { ConfirmDialog } from "@/components/common/Dialogs";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -40,7 +40,8 @@ import { formatRelativeTime } from "@/lib/format";
 import { NoteEditor } from "./NoteEditor";
 import { TagEditor } from "@/components/tags/TagEditor";
 import { Button } from "@/components/ui/button";
-import { invalidateLists, useDeleteNote, useRestoreNote, useUpdateNote } from "@/hooks/use-mutations";
+import { useDeleteNote, useRestoreNote, useUpdateNote } from "@/hooks/use-mutations";
+import { useNoteSaver } from "@/hooks/use-note-saver";
 import { cn } from "@/lib/utils";
 import { QueryError, StaleDataHint } from "@/components/common/QueryError";
 import { clearDraft, findRestorableDraft, restoreStoredDraft, StoredDraft } from "@/lib/drafts";
@@ -518,8 +519,8 @@ const TASK_SAVE_DELAY_MS = 600;
  */
 function useTaskToggle(noteId: string | undefined) {
   const queryClient = useQueryClient();
-  const baseUpdatedTimeRef = useRef<number | null>(null);
-  const savingRef = useRef(false);
+  // baseUpdatedTime stays null until a save returned one; until then the cached note's is used
+  const saver = useNoteSaver(noteId);
   const timerRef = useRef<number | null>(null);
 
   // Flush a pending save when the note is closed instead of dropping it
@@ -536,44 +537,39 @@ function useTaskToggle(noteId: string | undefined) {
 
   const save = async () => {
     timerRef.current = null;
-    if (!noteId) return;
-    if (savingRef.current) {
+    if (!noteId || !saver) return;
+    if (saver.inflight) {
       timerRef.current = window.setTimeout(() => void save(), TASK_SAVE_DELAY_MS);
       return;
     }
     const cached = queryClient.getQueryData<Note>(["note", noteId]);
     if (!cached) return;
 
-    savingRef.current = true;
-    try {
-      const saved = await updateNoteRequest(noteId, {
-        body: cached.body,
-        baseUpdatedTime: baseUpdatedTimeRef.current ?? cached.updatedTime,
-      });
-      baseUpdatedTimeRef.current = saved.updatedTime;
-      // Keep any newer optimistic body (more clicks while saving); its save is already scheduled
-      const latest = queryClient.getQueryData<Note>(["note", noteId]);
-      queryClient.setQueryData<Note>(["note", noteId], { ...saved, body: latest?.body ?? saved.body });
-      invalidateLists(queryClient);
-    } catch (err) {
-      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-      timerRef.current = null;
-      baseUpdatedTimeRef.current = null;
-      const current = getConflictNote(err);
-      if (current) {
-        queryClient.setQueryData(["note", noteId], current);
-        toast.error("This note was changed elsewhere", {
-          description: "Your checkbox change was not saved. The latest version is shown now.",
-        });
-      } else {
-        queryClient.invalidateQueries({ queryKey: ["note", noteId] });
-        toast.error("Could not update checkbox", {
-          description: err instanceof Error ? err.message : undefined,
-        });
+    saver.baseUpdatedTime ??= cached.updatedTime;
+    await saver.send(
+      { body: cached.body },
+      {
+        // Keep any newer optimistic body (more clicks while saving); its save is already scheduled
+        toCache: (saved) => ({ ...saved, body: queryClient.getQueryData<Note>(["note", noteId])?.body ?? saved.body }),
+        onError: (err) => {
+          if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+          timerRef.current = null;
+          saver.baseUpdatedTime = null;
+          const current = getConflictNote(err);
+          if (current) {
+            queryClient.setQueryData(["note", noteId], current);
+            toast.error("This note was changed elsewhere", {
+              description: "Your checkbox change was not saved. The latest version is shown now.",
+            });
+          } else {
+            queryClient.invalidateQueries({ queryKey: ["note", noteId] });
+            toast.error("Could not update checkbox", {
+              description: err instanceof Error ? err.message : undefined,
+            });
+          }
+        },
       }
-    } finally {
-      savingRef.current = false;
-    }
+    );
   };
 
   saveRef.current = save;

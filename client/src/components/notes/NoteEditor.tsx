@@ -3,8 +3,9 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { AlertTriangle, Check, Circle, Columns2, Eye, Loader2, Paperclip, PencilLine } from "lucide-react";
 import { Note } from "@/lib/types";
-import { ApiError, getConflictNote, updateNote } from "@/lib/api";
+import { ApiError, getConflictNote } from "@/lib/api";
 import { invalidateLists } from "@/hooks/use-mutations";
+import { useNoteSaver } from "@/hooks/use-note-saver";
 import { setTaskChecked } from "@/lib/tasks";
 import { MarkdownEditor, MarkdownEditorHandle, UPLOAD_PLACEHOLDER } from "./MarkdownEditor";
 import { TagEditor } from "@/components/tags/TagEditor";
@@ -90,15 +91,14 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
 
   const draftRef = useRef(draft);
   const savedRef = useRef<Draft>({ title: note.title, body: note.body });
-  // A restored draft keeps the base it was written against, so a newer server version conflicts
-  const baseUpdatedTimeRef = useRef(initialDraft?.baseUpdatedTime ?? note.updatedTime);
+  // Saves run one at a time; later ones chain onto the one in flight so each starts from the
+  // baseUpdatedTime the previous one returned. A restored draft keeps the base it was written
+  // against, so a newer server version conflicts.
+  const saver = useNoteSaver(note.id, initialDraft?.baseUpdatedTime ?? note.updatedTime)!;
   const restoredRef = useRef(Boolean(initialDraft));
   // Set when the editor closes: no more saves, retries or toasts from this instance
   const unmountedRef = useRef(false);
   const retryRef = useRef<RetryScheduler | null>(null);
-  // The save currently talking to the server. Saves run one at a time; later ones chain onto it
-  // so each starts from the baseUpdatedTime the previous one returned.
-  const inflightRef = useRef<Promise<boolean> | null>(null);
   const timerRef = useRef<number | null>(null);
   const conflictRef = useRef(false);
 
@@ -124,7 +124,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
         timerRef.current = window.setTimeout(() => void save(force), AUTOSAVE_DELAY_MS);
         return Promise.resolve(false);
       }
-      const inflight = inflightRef.current;
+      const inflight = saver.inflight;
       if (inflight) return inflight.then(() => save(force));
 
       const toSave = draftRef.current;
@@ -135,39 +135,33 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
 
       setStatus("saving");
       setErrorMessage(null);
-      const run = (async () => {
-        try {
-          const saved = await updateNote(note.id, {
-            title: toSave.title,
-            body: toSave.body,
-            baseUpdatedTime: baseUpdatedTimeRef.current,
-            force,
-          });
-          baseUpdatedTimeRef.current = saved.updatedTime;
-          savedRef.current = toSave;
-          conflictRef.current = false;
-          restoredRef.current = false;
-          retryRef.current?.reset();
-          queryClient.setQueryData(["note", note.id], saved);
-          invalidateLists(queryClient);
-          const upToDate = sameDraft(draftRef.current, toSave);
-          if (upToDate) clearDraft(note.id);
-          else saveDraft(note.id, { ...draftRef.current, baseUpdatedTime: saved.updatedTime });
-          setStatus(upToDate ? "saved" : "dirty");
-          // An earlier failure is resolved now
-          toast.dismiss(`save-error-${note.id}`);
-          return true;
-        } catch (err) {
-          if (err instanceof ApiError && err.status === 409) {
-            conflictRef.current = true;
-            setConflict(getConflictNote(err));
-            setStatus("conflict");
-          } else {
+      return saver.send(
+        { title: toSave.title, body: toSave.body, force },
+        {
+          onSaved: (saved) => {
+            savedRef.current = toSave;
+            conflictRef.current = false;
+            restoredRef.current = false;
+            retryRef.current?.reset();
+            const upToDate = sameDraft(draftRef.current, toSave);
+            if (upToDate) clearDraft(note.id);
+            else saveDraft(note.id, { ...draftRef.current, baseUpdatedTime: saved.updatedTime });
+            setStatus(upToDate ? "saved" : "dirty");
+            // An earlier failure is resolved now
+            toast.dismiss(`save-error-${note.id}`);
+          },
+          onError: (err) => {
+            if (err instanceof ApiError && err.status === 409) {
+              conflictRef.current = true;
+              setConflict(getConflictNote(err));
+              setStatus("conflict");
+              return;
+            }
             const message = err instanceof Error ? err.message : "Save failed";
             setStatus("error");
             setErrorMessage(message);
             // A closed editor reports through its flush; an expired session through its dialog
-            if (unmountedRef.current || isSessionExpired(err)) return false;
+            if (unmountedRef.current || isSessionExpired(err)) return;
             // The indicator only shows "Save failed"; the toast carries the reason (one per note,
             // so repeated autosave failures replace it instead of stacking)
             toast.error("Could not save note", { id: `save-error-${note.id}`, description: message });
@@ -175,16 +169,11 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
             if (err instanceof ApiError && isConnectionFailure(err.status) && navigator.onLine) {
               retryRef.current?.schedule();
             }
-          }
-          return false;
-        } finally {
-          inflightRef.current = null;
+          },
         }
-      })();
-      inflightRef.current = run;
-      return run;
+      );
     },
-    [note.id, queryClient]
+    [note.id, saver]
   );
 
   const updateDraft = (changes: Partial<Draft>) => {
@@ -193,7 +182,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
     setDraft(next);
     // Safety net until the server has the text (tab closed, connection or session lost)
     if (sameDraft(next, savedRef.current) && !restoredRef.current) clearDraft(note.id);
-    else saveDraft(note.id, { ...next, baseUpdatedTime: baseUpdatedTimeRef.current });
+    else saveDraft(note.id, { ...next, baseUpdatedTime: saver.baseUpdatedTime ?? note.updatedTime });
     if (conflictRef.current) return;
     setStatus(sameDraft(next, savedRef.current) ? "saved" : "dirty");
     clearTimer();
@@ -240,23 +229,23 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
   // another device replaces the text when there are no local edits; with local edits a banner lets
   // the user choose instead of waiting for the 409 at save time.
   useEffect(() => {
-    if (note.updatedTime <= baseUpdatedTimeRef.current || inflightRef.current || restoredRef.current) return;
+    if (note.updatedTime <= (saver.baseUpdatedTime ?? 0) || saver.inflight || restoredRef.current) return;
     const theirs = { title: note.title, body: note.body };
     if (sameDraft(theirs, savedRef.current)) {
-      baseUpdatedTimeRef.current = note.updatedTime;
+      saver.baseUpdatedTime = note.updatedTime;
     } else if (conflictRef.current) {
       return;
     } else if (sameDraft(draftRef.current, savedRef.current) && uploadsRef.current === 0) {
       draftRef.current = theirs;
       savedRef.current = theirs;
-      baseUpdatedTimeRef.current = note.updatedTime;
+      saver.baseUpdatedTime = note.updatedTime;
       setDraft(theirs);
       setEditorKey((k) => k + 1);
       setRemoteChange(null);
     } else {
       setRemoteChange(note);
     }
-  }, [note]);
+  }, [note, saver]);
 
   // Ctrl+S / Cmd+S saves immediately
   useEffect(() => {
@@ -273,14 +262,14 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
   // Warn before closing the tab with unsaved changes
   useEffect(() => {
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (inflightRef.current || uploadsRef.current > 0 || !sameDraft(draftRef.current, savedRef.current)) {
+      if (saver.inflight || uploadsRef.current > 0 || !sameDraft(draftRef.current, savedRef.current)) {
         e.preventDefault();
         e.returnValue = "";
       }
     };
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, []);
+  }, [saver]);
 
   // Flush pending changes when the editor closes (switching notes, Done, ...). The flush waits for
   // any save still in flight, so it compares against (and builds on) that save's result.
@@ -299,7 +288,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
         });
       };
       const flush = (): void => {
-        const inflight = inflightRef.current;
+        const inflight = saver.inflight;
         if (inflight) {
           void inflight.then(flush);
           return;
@@ -311,31 +300,22 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
           reportLost();
           return;
         }
-        const run = updateNote(note.id, {
-          title: pending.title,
-          body: pending.body,
-          baseUpdatedTime: baseUpdatedTimeRef.current,
-        })
-          .then((saved) => {
-            baseUpdatedTimeRef.current = saved.updatedTime;
-            savedRef.current = pending;
-            clearDraft(note.id);
-            queryClient.setQueryData(["note", note.id], saved);
-            invalidateLists(queryClient);
-            return true;
-          })
-          .catch((err: unknown) => {
-            if (!isSessionExpired(err)) reportLost();
-            return false;
-          })
-          .finally(() => {
-            inflightRef.current = null;
-          });
-        inflightRef.current = run;
+        void saver.send(
+          { title: pending.title, body: pending.body },
+          {
+            onSaved: () => {
+              savedRef.current = pending;
+              clearDraft(note.id);
+            },
+            onError: (err) => {
+              if (!isSessionExpired(err)) reportLost();
+            },
+          }
+        );
       };
       flush();
     };
-  }, [note.id, queryClient]);
+  }, [note.id, saver]);
 
   // What the live region announces: uploads, failures and conflicts, and "Saved" only once a
   // failure or conflict is resolved (routine autosaves stay silent)
@@ -402,7 +382,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
       const next = { title: theirs.title, body: theirs.body };
       draftRef.current = next;
       savedRef.current = next;
-      baseUpdatedTimeRef.current = theirs.updatedTime;
+      saver.baseUpdatedTime = theirs.updatedTime;
       setDraft(next);
       setEditorKey((k) => k + 1);
       queryClient.setQueryData(["note", note.id], theirs);
@@ -421,7 +401,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
   /** Keeps the editor text and makes it overwrite the version from the other device */
   const keepMine = () => {
     if (!remoteChange) return;
-    baseUpdatedTimeRef.current = remoteChange.updatedTime;
+    saver.baseUpdatedTime = remoteChange.updatedTime;
     savedRef.current = { title: remoteChange.title, body: remoteChange.body };
     setRemoteChange(null);
     if (!sameDraft(draftRef.current, savedRef.current)) {
