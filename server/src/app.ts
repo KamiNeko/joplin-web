@@ -4,7 +4,6 @@ import express, { Express, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import fs from 'fs';
 import helmet from 'helmet';
-import path from 'path';
 
 import type { AppConfig } from './config.js';
 import { errorHandler } from './middleware/error-handler.js';
@@ -124,7 +123,8 @@ export function createApp(config: AppConfig): Express {
     // SPA fallback for frontend client routing
     app.get('/{*splat}', (req: Request, res: Response) => {
       if (!req.path.startsWith('/api/')) {
-        res.sendFile(path.join(config.clientDistPath, 'index.html'));
+        // `root` keeps the dotfiles check to the relative name, so a build path such as .claude/worktrees/... still works
+        res.sendFile('index.html', { root: config.clientDistPath });
       } else {
         res.status(404).json({ error: `Cannot ${req.method} ${req.path}` });
       }
