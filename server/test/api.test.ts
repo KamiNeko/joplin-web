@@ -295,8 +295,47 @@ describe('security', () => {
   });
 });
 
+describe('note cache lifetime (#106)', () => {
+  /** Logs in a second session and fills its note cache */
+  async function cachedSession(): Promise<string> {
+    const res = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: DEMO_EMAIL, password: DEMO_PASSWORD }) }, false);
+    assert.equal(res.status, 200);
+    const other = res.data.sessionId as string;
+    const read = await app.api('/api/notebooks', { headers: { Authorization: `Bearer ${other}` } }, false);
+    assert.equal(read.status, 200);
+    return other;
+  }
+
+  test('drops caches of idle sessions and keeps active ones', async () => {
+    const { noteCache, IDLE_CACHE_TTL_MS } = await import('../src/services/note-cache.js');
+    const idle = await cachedSession();
+    assert.ok(noteCache.hasCache(idle));
+    assert.equal(noteCache.evictIdleCaches(Date.now() + IDLE_CACHE_TTL_MS / 2), 0, 'recently used caches stay');
+    assert.ok(noteCache.hasCache(idle));
+    assert.ok(noteCache.evictIdleCaches(Date.now() + IDLE_CACHE_TTL_MS + 1000) >= 1);
+    assert.ok(!noteCache.hasCache(idle));
+    assert.ok(!noteCache.hasCache(session));
+    // An evicted session that comes back gets a fresh listing
+    assert.equal((await api('/api/notebooks')).status, 200);
+    assert.ok(noteCache.hasCache(session));
+  });
+
+  test('frees the cache of a session that expired on Joplin Server', async () => {
+    const { noteCache } = await import('../src/services/note-cache.js');
+    const expired = await cachedSession();
+    assert.ok(noteCache.hasCache(expired));
+    await fetch(`${mock.url}/logout`, { method: 'POST', headers: { 'X-API-AUTH': expired }, redirect: 'manual' });
+    const res = await app.api('/api/notebooks', { headers: { Authorization: `Bearer ${expired}` } }, false);
+    assert.equal(res.status, 401);
+    assert.ok(!noteCache.hasCache(expired));
+    assert.ok(noteCache.hasCache(session), 'other sessions keep their cache');
+  });
+});
+
 describe('logout', () => {
   test('logs out', async () => {
+    const { noteCache } = await import('../src/services/note-cache.js');
     assert.equal((await api('/api/auth/logout', { method: 'POST' })).status, 200);
+    assert.ok(!noteCache.hasCache(session));
   });
 });
