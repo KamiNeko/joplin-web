@@ -573,7 +573,7 @@ function useTaskToggle(noteId: string | undefined) {
   const timerRef = useRef<number | null>(null);
 
   // Flush a pending save when the note is closed instead of dropping it
-  const saveRef = useRef<() => Promise<void>>();
+  const saveRef = useRef<(() => Promise<void>) | undefined>(undefined);
   useEffect(
     () => () => {
       if (timerRef.current !== null) {
