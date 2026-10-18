@@ -92,7 +92,9 @@ export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteList
                 onToggleTodo?.();
               }}
               onKeyDown={(e) => e.stopPropagation()}
-              aria-label={note.todoCompleted ? "Mark as not done" : "Mark as done"}
+              role="checkbox"
+              aria-checked={Boolean(note.todoCompleted)}
+              aria-label={`Done: ${note.title || "Untitled Note"}`}
               className="shrink-0 mt-0.5 rounded-sm enabled:hover:scale-110 transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
             >
               {note.todoCompleted ? (

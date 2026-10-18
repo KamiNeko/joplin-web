@@ -29,6 +29,7 @@ import {
   Circle,
   AlertCircle,
   FileText,
+  History,
   MoreHorizontal,
   PencilLine,
   RotateCcw,
@@ -41,12 +42,15 @@ import { TagEditor } from "@/components/tags/TagEditor";
 import { Button } from "@/components/ui/button";
 import { invalidateLists, useDeleteNote, useRestoreNote, useUpdateNote } from "@/hooks/use-mutations";
 import { cn } from "@/lib/utils";
-import { QueryError } from "@/components/common/QueryError";
+import { QueryError, StaleDataHint } from "@/components/common/QueryError";
+import { clearDraft, findRestorableDraft, saveDraft, StoredDraft } from "@/lib/drafts";
 
 interface NoteViewerProps {
   note?: Note | null;
   isLoading?: boolean;
   error?: Error | null;
+  /** A refetch failed while the note loaded earlier is still shown */
+  isStale?: boolean;
   onRetry?: () => void;
   isRetrying?: boolean;
   notebooks?: Notebook[];
@@ -63,6 +67,7 @@ export function NoteViewer({
   note,
   isLoading = false,
   error = null,
+  isStale = false,
   onRetry,
   isRetrying = false,
   notebooks,
@@ -73,6 +78,19 @@ export function NoteViewer({
   onRemoved,
 }: NoteViewerProps) {
   const [isEditing, setIsEditing] = useState(startInEdit);
+  // Unsaved text left on this device by an earlier session (failed save, closed tab, expired login)
+  const [restorable, setRestorable] = useState<StoredDraft | null>(null);
+  const [restoredDraft, setRestoredDraft] = useState<StoredDraft | null>(null);
+  const [editorKey, setEditorKey] = useState(0);
+  const loadedNoteId = note?.id;
+  const draftCheckedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!note || draftCheckedRef.current === note.id) return;
+    draftCheckedRef.current = note.id;
+    setRestorable(findRestorableDraft(note));
+    // Only once per note: later refetches must not bring back a dismissed offer
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadedNoteId]);
   const [confirmPurge, setConfirmPurge] = useState(false);
   const updateNote = useUpdateNote();
   const deleteNote = useDeleteNote();
@@ -204,6 +222,31 @@ export function NoteViewer({
         onError: (err) => toast.error("Could not delete note", { description: err.message }),
       }
     );
+  };
+
+  const handleRestoreDraft = () => {
+    if (!restorable) return;
+    setRestoredDraft(restorable);
+    setRestorable(null);
+    // Remount an open editor so it starts from the draft
+    setEditorKey((k) => k + 1);
+    setIsEditing(true);
+  };
+
+  const handleDiscardDraft = () => {
+    const draft = restorable;
+    if (!draft) return;
+    clearDraft(note.id);
+    setRestorable(null);
+    toast("Unsaved changes discarded", {
+      action: {
+        label: "Undo",
+        onClick: () => {
+          saveDraft(note.id, draft, draft.savedAt);
+          setRestorable(draft);
+        },
+      },
+    });
   };
 
   return (
@@ -343,8 +386,42 @@ export function NoteViewer({
         </div>
       </div>
 
+      {isStale && <StaleDataHint className="px-4 sm:px-6 pt-2" onRetry={onRetry} isRetrying={isRetrying} />}
+
+      {restorable && !isTrashed && (
+        <div
+          role="status"
+          className="mx-4 sm:mx-6 mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 text-xs text-foreground"
+        >
+          <History className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
+          <span className="flex-1 min-w-[12rem]">
+            Unsaved changes from{" "}
+            {new Date(restorable.savedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })} are
+            stored on this device.
+          </span>
+          <div className="flex items-center gap-1.5">
+            <Button size="sm" variant="outline" className="h-7 px-2.5 text-xs" onClick={handleRestoreDraft}>
+              Restore
+            </Button>
+            <Button size="sm" variant="ghost" className="h-7 px-2.5 text-xs" onClick={handleDiscardDraft}>
+              Discard
+            </Button>
+          </div>
+        </div>
+      )}
+
       {editing ? (
-        <NoteEditor note={note} focusTitle={startInEdit && !note.title} onDone={() => setIsEditing(false)} />
+        <NoteEditor
+          key={editorKey}
+          note={note}
+          focusTitle={startInEdit && !note.title}
+          initialDraft={restoredDraft}
+          onEdit={() => setRestorable(null)}
+          onDone={() => {
+            setRestoredDraft(null);
+            setIsEditing(false);
+          }}
+        />
       ) : (
         <ScrollArea className="flex-1 px-6 sm:px-10 lg:px-12 py-8">
           <div className="max-w-4xl mx-auto space-y-6 pb-20">

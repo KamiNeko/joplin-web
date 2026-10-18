@@ -6,6 +6,7 @@ import {
   SearchResult,
   LoginResponse,
 } from "./types";
+import { changePendingWrites, recordNetworkError, recordResponse } from "./connection";
 
 /**
  * The session token lives in an httpOnly cookie set by the backend: scripts can't read it. Only the
@@ -98,6 +99,8 @@ export async function waitForPendingWrites(timeoutMs = 10000): Promise<void> {
 interface RequestOptions extends RequestInit {
   /** Don't treat a 401 as an expired session (login and the startup session check) */
   skipAuthRedirect?: boolean;
+  /** A POST that only reads (cache refresh): not a pending write, counts as a refresh */
+  isRead?: boolean;
 }
 
 async function readErrorMessage(response: Response): Promise<{ message: string; data: unknown }> {
@@ -122,17 +125,24 @@ async function readErrorMessage(response: Response): Promise<{ message: string; 
  * Internal request wrapper handling headers, auth, and error conditions.
  */
 async function request<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
-  const { skipAuthRedirect, ...init } = options;
+  const { skipAuthRedirect, isRead: readOnly, ...init } = options;
   const method = (init.method ?? "GET").toUpperCase();
-  const pending = send<T>(endpoint, init, Boolean(skipAuthRedirect));
-  if (method !== "GET" && method !== "HEAD") {
+  const isRead = Boolean(readOnly) || method === "GET" || method === "HEAD";
+  const pending = send<T>(endpoint, init, Boolean(skipAuthRedirect), isRead);
+  if (!isRead) {
     pendingWrites.add(pending);
-    void pending.catch(() => undefined).finally(() => pendingWrites.delete(pending));
+    changePendingWrites(1);
+    void pending
+      .catch(() => undefined)
+      .finally(() => {
+        pendingWrites.delete(pending);
+        changePendingWrites(-1);
+      });
   }
   return pending;
 }
 
-async function send<T>(endpoint: string, init: RequestInit, skipAuthRedirect: boolean): Promise<T> {
+async function send<T>(endpoint: string, init: RequestInit, skipAuthRedirect: boolean, isRead: boolean): Promise<T> {
   const headers: Record<string, string> = {
     Accept: "application/json",
     ...(init.headers as Record<string, string>),
@@ -142,23 +152,31 @@ async function send<T>(endpoint: string, init: RequestInit, skipAuthRedirect: bo
     headers["Content-Type"] = "application/json";
   }
 
-  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-    ...SESSION_FETCH_OPTIONS,
-    ...init,
-    headers,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      ...SESSION_FETCH_OPTIONS,
+      ...init,
+      headers,
+    });
+  } catch {
+    // fetch only rejects when no response arrived (offline, DNS, connection refused)
+    const message = "Can't reach the server";
+    recordNetworkError(message);
+    throw new ApiError(0, message);
+  }
 
   if (!response.ok) {
     const { message, data } = await readErrorMessage(response);
+    // Login and the startup check handle their own errors and don't feed the connection status
+    if (!skipAuthRedirect) recordResponse(response.status, isRead, message);
     if (response.status === 401 && !skipAuthRedirect) {
-      clearStoredSession();
-      if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
-        window.location.href = "/login";
-      }
+      // The session-expired dialog asks the user to sign in again; unsaved drafts stay on this device
       throw new ApiError(401, "Your session has expired. Please sign in again.", data);
     }
     throw new ApiError(response.status, message, data);
   }
+  if (!skipAuthRedirect) recordResponse(response.status, isRead, "");
 
   if (response.status === 204) {
     return {} as T;
@@ -192,18 +210,30 @@ export async function logout(): Promise<void> {
   }
 }
 
+export interface SessionInfo {
+  /** Host of the Joplin Server the backend talks to, for display */
+  serverHost: string | null;
+}
+
 /**
- * Asks the server whether the session cookie is valid. Resolves false for an expired or missing
+ * Asks the server whether the session cookie is valid. Resolves null for an expired or missing
  * session; other failures (server unreachable) are thrown.
  */
-export async function checkSession(): Promise<boolean> {
+export async function checkSession(): Promise<SessionInfo | null> {
   try {
-    await request("/api/auth/check", { skipAuthRedirect: true });
-    return true;
+    const data = await request<{ serverHost?: unknown }>("/api/auth/check", { skipAuthRedirect: true });
+    return { serverHost: typeof data.serverHost === "string" ? data.serverHost : null };
   } catch (err) {
-    if (err instanceof ApiError && err.status === 401) return false;
+    if (err instanceof ApiError && err.status === 401) return null;
     throw err;
   }
+}
+
+/**
+ * Makes the backend reload everything from Joplin Server, picking up changes from other devices.
+ */
+export async function refreshServerCache(): Promise<void> {
+  await request("/api/notebooks/refresh", { method: "POST", isRead: true });
 }
 
 /**

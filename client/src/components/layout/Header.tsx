@@ -1,6 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/hooks/use-auth";
 import { ThemeToggle } from "@/components/common/ThemeToggle";
+import { AboutDialog } from "@/components/common/Dialogs";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -14,6 +15,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   ChevronRight,
   Folder,
+  Info,
   LogOut,
   Menu,
   Search,
@@ -44,6 +46,7 @@ export function Header({
 }: HeaderProps) {
   const { logout, email } = useAuth();
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const [aboutOpen, setAboutOpen] = useState(false);
 
   // Ctrl+K / Cmd+K focuses the search field (or opens the mobile menu that holds it)
   useEffect(() => {
@@ -185,6 +188,10 @@ export function Header({
               </div>
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => setAboutOpen(true)} className="cursor-pointer flex items-center gap-2">
+              <Info className="h-3.5 w-3.5" />
+              <span>About Joplin Web</span>
+            </DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => logout()}
               className="text-destructive focus:text-destructive cursor-pointer flex items-center gap-2"
@@ -194,6 +201,7 @@ export function Header({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        <AboutDialog open={aboutOpen} onOpenChange={setAboutOpen} />
       </div>
     </header>
   );

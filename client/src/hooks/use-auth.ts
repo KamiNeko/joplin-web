@@ -17,6 +17,8 @@ import {
   clearStoredSession,
   waitForPendingWrites,
 } from "@/lib/api";
+import { resetConnection } from "@/lib/connection";
+import { clearAllDrafts } from "@/lib/drafts";
 
 export interface AuthContextType {
   isAuthenticated: boolean;
@@ -24,6 +26,10 @@ export interface AuthContextType {
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  /** Host of the connected Joplin Server, for display */
+  serverHost: string | null;
+  /** Leaves an expired session for the login page; unsaved drafts are kept */
+  signInAgain: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -41,15 +47,17 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [email, setEmail] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [serverHost, setServerHost] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     checkSession()
-      .then((valid) => {
+      .then((session) => {
         if (cancelled) return;
-        if (valid) {
+        if (session) {
           setIsAuthenticated(true);
           setEmail(getStoredEmail());
+          setServerHost(session.serverHost);
         } else {
           clearStoredSession();
         }
@@ -71,15 +79,29 @@ export function AuthProvider({ children }: AuthProviderProps) {
         // Never show data cached for a previous session
         queryClient.clear();
         clearResourceCache();
+        resetConnection();
         setStoredEmail(email);
         setEmail(email);
         setIsAuthenticated(true);
+        // Only for display: not awaited, and a failure doesn't fail the login
+        void checkSession()
+          .then((session) => setServerHost(session?.serverHost ?? null))
+          .catch(() => undefined);
       } finally {
         setIsLoading(false);
       }
     },
     [queryClient]
   );
+
+  const signInAgain = useCallback(() => {
+    // Unmounting the pages closes open editors; their drafts stay in localStorage for restore
+    queryClient.clear();
+    clearResourceCache();
+    clearStoredSession();
+    setIsAuthenticated(false);
+    setEmail(null);
+  }, [queryClient]);
 
   const logout = useCallback(async () => {
     // isLoading unmounts the protected pages right away; open editors flush unsaved changes
@@ -93,8 +115,11 @@ export function AuthProvider({ children }: AuthProviderProps) {
       queryClient.clear();
       clearResourceCache();
       clearStoredSession();
+      // Drafts of unsaved text must not outlive the session on a shared device
+      clearAllDrafts();
       setIsAuthenticated(false);
       setEmail(null);
+      setServerHost(null);
       setIsLoading(false);
     }
   }, [queryClient]);
@@ -105,6 +130,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
     isLoading,
     login,
     logout,
+    serverHost,
+    signInAgain,
   };
 
   return React.createElement(AuthContext.Provider, { value }, children);

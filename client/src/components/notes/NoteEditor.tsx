@@ -20,6 +20,8 @@ import {
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { isConnectionFailure, setNoteUnsaved } from "@/lib/connection";
+import { clearDraft, saveDraft, StoredDraft } from "@/lib/drafts";
 
 const AUTOSAVE_DELAY_MS = 1500;
 const MODE_STORAGE_KEY = "joplin-editor-mode";
@@ -46,29 +48,42 @@ function loadMode(): EditorMode {
   return "split";
 }
 
+/** Retry delays for saves that failed because the server was unreachable */
+const RETRY_BASE_MS = 5000;
+const RETRY_MAX_MS = 60000;
+
 interface NoteEditorProps {
   note: Note;
   /** Focus the title instead of the body (used for freshly created notes) */
   focusTitle?: boolean;
+  /** Start from a draft restored from this device instead of the server text */
+  initialDraft?: StoredDraft | null;
+  /** Called on the first edit (the viewer hides its restore offer then) */
+  onEdit?: () => void;
   onDone: () => void;
 }
 
 /**
  * Markdown note editor with debounced autosave, Ctrl+S, and conflict detection.
  * Initialised once from `note`; later updates to the prop are ignored so typing is never reset.
+ * Unsaved text is mirrored to localStorage (see lib/drafts) until the server has it.
  */
-export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps) {
+export function NoteEditor({ note, focusTitle = false, initialDraft = null, onEdit, onDone }: NoteEditorProps) {
   const queryClient = useQueryClient();
   const isMobile = useIsMobile();
-  const [draft, setDraft] = useState<Draft>({ title: note.title, body: note.body });
+  const [draft, setDraft] = useState<Draft>(
+    initialDraft ? { title: initialDraft.title, body: initialDraft.body } : { title: note.title, body: note.body }
+  );
   // Preview-only would leave nothing to type into for an empty note, so start in split view then
   const [mode, setMode] = useState<EditorMode>(() => {
     const stored = loadMode();
     return stored === "preview" && !note.body.trim() ? "split" : stored;
   });
-  const [status, setStatus] = useState<SaveStatus>("saved");
+  const [status, setStatus] = useState<SaveStatus>(initialDraft ? "dirty" : "saved");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [conflict, setConflict] = useState<Note | null>(null);
+  // A newer version arrived through a refresh while the editor is open
+  const [remoteChange, setRemoteChange] = useState<Note | null>(null);
   const [editorKey, setEditorKey] = useState(0);
   const [uploadCount, setUploadCount] = useState(0);
   const editorRef = useRef<MarkdownEditorHandle>(null);
@@ -77,7 +92,11 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
 
   const draftRef = useRef(draft);
   const savedRef = useRef<Draft>({ title: note.title, body: note.body });
-  const baseUpdatedTimeRef = useRef(note.updatedTime);
+  // A restored draft keeps the base it was written against, so a newer server version conflicts
+  const baseUpdatedTimeRef = useRef(initialDraft?.baseUpdatedTime ?? note.updatedTime);
+  const restoredRef = useRef(Boolean(initialDraft));
+  const retryCountRef = useRef(0);
+  const editedRef = useRef(false);
   // The save currently talking to the server. Saves run one at a time; later ones chain onto it
   // so each starts from the baseUpdatedTime the previous one returned.
   const inflightRef = useRef<Promise<boolean> | null>(null);
@@ -127,9 +146,14 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
           baseUpdatedTimeRef.current = saved.updatedTime;
           savedRef.current = toSave;
           conflictRef.current = false;
+          restoredRef.current = false;
+          retryCountRef.current = 0;
           queryClient.setQueryData(["note", note.id], saved);
           invalidateLists(queryClient);
-          setStatus(sameDraft(draftRef.current, toSave) ? "saved" : "dirty");
+          const upToDate = sameDraft(draftRef.current, toSave);
+          if (upToDate) clearDraft(note.id);
+          else saveDraft(note.id, { ...draftRef.current, baseUpdatedTime: saved.updatedTime });
+          setStatus(upToDate ? "saved" : "dirty");
           // An earlier failure is resolved now
           toast.dismiss(`save-error-${note.id}`);
           return true;
@@ -145,6 +169,13 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
             // The indicator only shows "Save failed"; the toast carries the reason (one per note,
             // so repeated autosave failures replace it instead of stacking)
             toast.error("Could not save note", { id: `save-error-${note.id}`, description: message });
+            // Server unreachable: try again with backoff (and right away when the browser is back online)
+            if (err instanceof ApiError && isConnectionFailure(err.status) && navigator.onLine) {
+              const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** retryCountRef.current);
+              retryCountRef.current += 1;
+              clearTimer();
+              timerRef.current = window.setTimeout(() => void save(), delay);
+            }
           }
           return false;
         } finally {
@@ -161,23 +192,53 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
     const next = { ...draftRef.current, ...changes };
     draftRef.current = next;
     setDraft(next);
+    if (!editedRef.current) {
+      editedRef.current = true;
+      onEdit?.();
+    }
+    // Safety net until the server has the text (tab closed, connection or session lost)
+    if (sameDraft(next, savedRef.current) && !restoredRef.current) clearDraft(note.id);
+    else saveDraft(note.id, { ...next, baseUpdatedTime: baseUpdatedTimeRef.current });
     if (conflictRef.current) return;
     setStatus(sameDraft(next, savedRef.current) ? "saved" : "dirty");
     clearTimer();
     timerRef.current = window.setTimeout(() => void save(), AUTOSAVE_DELAY_MS);
   };
 
-  // Metadata-only updates (to-do toggle, move) bump updatedTime without touching the text.
-  // Adopt them as the new base so the next save isn't reported as a conflict.
+  // A restored draft is saved like any other edit (and conflicts if the note changed since)
   useEffect(() => {
-    if (
-      note.updatedTime > baseUpdatedTimeRef.current &&
-      !inflightRef.current &&
-      sameDraft({ title: note.title, body: note.body }, savedRef.current)
-    ) {
+    if (!restoredRef.current) return;
+    timerRef.current = window.setTimeout(() => void save(), AUTOSAVE_DELAY_MS);
+    return clearTimer;
+  }, [save]);
+
+  // Saves that failed while offline go out as soon as the connection is back
+  useEffect(() => {
+    const onOnline = () => {
+      retryCountRef.current = 0;
+      void save();
+    };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, [save]);
+
+  // Refreshes skip notes with unsaved edits, so typing never races a refetch
+  useEffect(() => {
+    setNoteUnsaved(note.id, status !== "saved");
+  }, [note.id, status]);
+  useEffect(() => () => setNoteUnsaved(note.id, false), [note.id]);
+
+  // Metadata-only updates (to-do toggle, move) bump updatedTime without touching the text.
+  // Adopt them as the new base so the next save isn't reported as a conflict. A newer text from
+  // another device is offered in a banner instead of waiting for the 409 at save time.
+  useEffect(() => {
+    if (note.updatedTime <= baseUpdatedTimeRef.current || inflightRef.current || restoredRef.current) return;
+    if (sameDraft({ title: note.title, body: note.body }, savedRef.current)) {
       baseUpdatedTimeRef.current = note.updatedTime;
+    } else if (!conflictRef.current) {
+      setRemoteChange(note);
     }
-  }, [note.updatedTime, note.title, note.body]);
+  }, [note]);
 
   // Ctrl+S / Cmd+S saves immediately
   useEffect(() => {
@@ -211,7 +272,7 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
       const pending = { ...draftRef.current, body: draftRef.current.body.replace(UPLOAD_PLACEHOLDER, "") };
       const reportLost = () => {
         toast.error(`Could not save "${pending.title || "Untitled"}"`, {
-          description: "Your last changes were not saved.",
+          description: "Your changes are kept on this device. Open the note again to restore them.",
           action: {
             label: "Copy text",
             onClick: () => void navigator.clipboard?.writeText(pending.body),
@@ -238,6 +299,7 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
           .then((saved) => {
             baseUpdatedTimeRef.current = saved.updatedTime;
             savedRef.current = pending;
+            clearDraft(note.id);
             queryClient.setQueryData(["note", note.id], saved);
             invalidateLists(queryClient);
             return true;
@@ -304,15 +366,18 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
     await save(true);
   };
 
-  const resolveLoadTheirs = async () => {
+  /** Replaces the editor text with the server's version; unsaved text goes to the clipboard first */
+  const loadVersion = async (theirs: Note | null) => {
     const mine = draftRef.current;
-    try {
-      await navigator.clipboard?.writeText(mine.title ? `# ${mine.title}\n\n${mine.body}` : mine.body);
-      toast.success("Your version was copied to the clipboard");
-    } catch {
-      toast.warning("Could not copy your version to the clipboard");
+    if (!sameDraft(mine, savedRef.current)) {
+      try {
+        await navigator.clipboard?.writeText(mine.title ? `# ${mine.title}\n\n${mine.body}` : mine.body);
+        toast.success("Your version was copied to the clipboard");
+      } catch {
+        toast.warning("Could not copy your version to the clipboard");
+      }
     }
-    const theirs = conflict;
+    clearTimer();
     if (theirs) {
       const next = { title: theirs.title, body: theirs.body };
       draftRef.current = next;
@@ -322,10 +387,27 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
       setEditorKey((k) => k + 1);
       queryClient.setQueryData(["note", note.id], theirs);
     }
+    clearDraft(note.id);
+    restoredRef.current = false;
     conflictRef.current = false;
     setConflict(null);
+    setRemoteChange(null);
     setStatus("saved");
     invalidateLists(queryClient);
+  };
+
+  const resolveLoadTheirs = () => loadVersion(conflict);
+
+  /** Keeps the editor text and makes it overwrite the version from the other device */
+  const keepMine = () => {
+    if (!remoteChange) return;
+    baseUpdatedTimeRef.current = remoteChange.updatedTime;
+    savedRef.current = { title: remoteChange.title, body: remoteChange.body };
+    setRemoteChange(null);
+    if (!sameDraft(draftRef.current, savedRef.current)) {
+      setStatus("dirty");
+      void save();
+    }
   };
 
   // Phones have no room for split view (its tab is hidden there), so it behaves like Edit
@@ -418,6 +500,24 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
           </Button>
         </div>
       </div>
+
+      {remoteChange && status !== "conflict" && (
+        <div
+          role="status"
+          className="mx-4 sm:mx-6 mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 text-xs text-foreground"
+        >
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
+          <span className="flex-1 min-w-[12rem]">This note was changed on another device.</span>
+          <div className="flex items-center gap-1.5">
+            <Button size="sm" variant="outline" className="h-7 px-2.5 text-xs" onClick={() => void loadVersion(remoteChange)}>
+              Load latest
+            </Button>
+            <Button size="sm" variant="ghost" className="h-7 px-2.5 text-xs" onClick={keepMine}>
+              Keep mine
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* Title */}
       <div className="px-4 sm:px-10 lg:px-12 pt-6 pb-2">

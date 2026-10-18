@@ -56,7 +56,8 @@ describe("NoteListItem", () => {
     const onClick = vi.fn();
     const onToggleTodo = vi.fn();
     render(<NoteListItem note={{ ...baseNote, isTodo: true }} onClick={onClick} onToggleTodo={onToggleTodo} />);
-    const checkbox = screen.getByRole("button", { name: "Mark as done" });
+    const checkbox = screen.getByRole("checkbox", { name: "Done: Shopping list" });
+    expect(checkbox.getAttribute("aria-checked")).toBe("false");
     fireEvent.click(checkbox);
     fireEvent.keyDown(checkbox, { key: "Enter" });
     expect(onToggleTodo).toHaveBeenCalledTimes(1);
@@ -65,7 +66,8 @@ describe("NoteListItem", () => {
 
   it("strikes through a completed to-do and disables the checkbox without a handler", () => {
     render(<NoteListItem note={{ ...baseNote, isTodo: true, todoCompleted: true }} />);
-    const checkbox = screen.getByRole("button", { name: "Mark as not done" }) as HTMLButtonElement;
+    const checkbox = screen.getByRole("checkbox", { name: "Done: Shopping list" }) as HTMLButtonElement;
+    expect(checkbox.getAttribute("aria-checked")).toBe("true");
     expect(checkbox.disabled).toBe(true);
     expect(screen.getByRole("heading").className).toContain("line-through");
   });

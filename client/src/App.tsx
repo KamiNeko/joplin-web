@@ -13,16 +13,30 @@ import { LoginPage } from "@/pages/LoginPage";
 import { NotesPage } from "@/pages/NotesPage";
 import { Toaster } from "@/components/ui/sonner";
 import { Loader2 } from "lucide-react";
+import { ApiError } from "@/lib/api";
+import { useConnectionState } from "@/hooks/use-connection";
+import { SessionExpiredDialog } from "@/components/common/Dialogs";
 
-// Initialize QueryClient with standard defaults
+// Focus refetches are handled by useAutoRefresh (throttled, skips notes with unsaved edits)
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       refetchOnWindowFocus: false,
-      retry: 1,
+      // Retry once when the server is unreachable or failing; a 4xx won't change on retry
+      retry: (failureCount, error) =>
+        failureCount < 1 && !(error instanceof ApiError && error.status >= 400 && error.status < 500),
     },
   },
 });
+
+/**
+ * Asks the user to sign in again once a request was rejected with 401.
+ */
+function SessionExpiredPrompt() {
+  const { isAuthenticated, signInAgain } = useAuth();
+  const { sessionExpired } = useConnectionState();
+  return <SessionExpiredDialog open={isAuthenticated && sessionExpired} onSignIn={signInAgain} />;
+}
 
 /**
  * Route guard that requires an authenticated session.
@@ -113,6 +127,7 @@ export function App() {
               <Route path="/" element={<Navigate to="/notes" replace />} />
               <Route path="*" element={<Navigate to="/notes" replace />} />
             </Routes>
+            <SessionExpiredPrompt />
           </BrowserRouter>
           <Toaster richColors position="bottom-right" />
         </AuthProvider>

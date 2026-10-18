@@ -15,6 +15,37 @@ interface QueryErrorProps {
 }
 
 /**
+ * Small hint for a refetch that failed while earlier data stays on screen, so stale data isn't
+ * mistaken for current data.
+ */
+export function StaleDataHint({
+  onRetry,
+  isRetrying = false,
+  className,
+}: {
+  onRetry?: () => void;
+  isRetrying?: boolean;
+  className?: string;
+}) {
+  return (
+    <div role="status" className={cn("flex items-center gap-1.5 text-[11px] text-muted-foreground", className)}>
+      <AlertCircle className="h-3 w-3 shrink-0 text-warning" aria-hidden="true" />
+      <span className="min-w-0">Couldn't refresh. Showing earlier data.</span>
+      {onRetry && (
+        <button
+          type="button"
+          onClick={onRetry}
+          disabled={isRetrying}
+          className="shrink-0 rounded-sm font-medium text-foreground underline-offset-2 hover:underline disabled:opacity-60 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {isRetrying ? "Retrying…" : "Retry"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
  * Error state for a failed query, with a Retry button. Used wherever a failed load would
  * otherwise look like an empty list.
  */

@@ -44,7 +44,11 @@ function clearSessionCookies(res: Response, keep?: string): void {
 /**
  * Builds the /api/auth router
  */
-export function createAuthRouter(config: Pick<AppConfig, 'cookieSecure' | 'publicUrl'>): Router {
+export function createAuthRouter(
+  config: Pick<AppConfig, 'cookieSecure' | 'publicUrl' | 'joplinServerUrl'>
+): Router {
+  // Shown in the client's connection status; only sent to signed-in users
+  const serverHost = new URL(config.joplinServerUrl).host;
   const router = Router();
 
   /**
@@ -115,10 +119,11 @@ export function createAuthRouter(config: Pick<AppConfig, 'cookieSecure' | 'publi
 
   /**
    * GET /api/auth/check
-   * Validates the current session. The token itself is never echoed back.
+   * Validates the current session and returns the Joplin Server host for display. The token itself
+   * is never echoed back.
    */
   router.get('/check', requireAuth, (_req: Request, res: Response): void => {
-    res.status(200).json({ valid: true });
+    res.status(200).json({ valid: true, serverHost });
   });
 
   return router;

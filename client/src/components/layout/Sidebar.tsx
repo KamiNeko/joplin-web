@@ -31,6 +31,8 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { QueryError } from "@/components/common/QueryError";
 import { MOBILE_SEARCH_INPUT_ID } from "@/lib/ui-constants";
+import { ConnectionStatus } from "./ConnectionStatus";
+import { StaleDataHint } from "@/components/common/QueryError";
 
 interface SidebarProps {
   selectedNotebookId?: string | null;
@@ -220,6 +222,16 @@ export function Sidebar({
       {/* Navigable Sidebar Items */}
       <ScrollArea className="flex-1 px-3 py-2">
         <div className="space-y-5">
+          {((notebooksQuery.isError && notebooks) || (tagsQuery.isError && tags)) && (
+            <StaleDataHint
+              className="px-2"
+              onRetry={() => {
+                if (notebooksQuery.isError) void notebooksQuery.refetch();
+                if (tagsQuery.isError) void tagsQuery.refetch();
+              }}
+              isRetrying={notebooksQuery.isFetching || tagsQuery.isFetching}
+            />
+          )}
           {/* Main Views */}
           <div className="space-y-1">
             <button
@@ -345,6 +357,8 @@ export function Sidebar({
           </div>
         </div>
       </ScrollArea>
+
+      <ConnectionStatus />
 
       <PromptDialog
         open={dialog?.kind === "create"}
