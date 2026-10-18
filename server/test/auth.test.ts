@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import type { AppConfig } from '../src/config.js';
 import { startMockJoplinServer, type MockJoplinServer } from '../demo/mock-joplin-server.js';
@@ -365,5 +368,28 @@ describe('ids', () => {
     });
     assert.equal(res.status, 201);
     assert.match(res.data.id, /^[0-9a-f]{32}$/);
+  });
+});
+
+describe('static client', () => {
+  test('caches hashed assets for a year and revalidates index.html', async () => {
+    const dist = await mkdtemp(path.join(os.tmpdir(), 'joplin-web-dist-'));
+    await mkdir(path.join(dist, 'assets'));
+    await writeFile(path.join(dist, 'index.html'), '<!doctype html><title>Joplin Web</title>');
+    await writeFile(path.join(dist, 'assets', 'index-abc123.js'), 'console.log(1)');
+    await writeFile(path.join(dist, 'favicon.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
+    try {
+      const baseUrl = await startApp({ clientDistPath: dist });
+      const asset = await fetch(`${baseUrl}/assets/index-abc123.js`);
+      assert.equal(asset.status, 200);
+      assert.equal(asset.headers.get('cache-control'), 'public, max-age=31536000, immutable');
+      for (const route of ['/', '/index.html', '/notes/abc', '/favicon.svg']) {
+        const res = await fetch(`${baseUrl}${route}`);
+        assert.equal(res.status, 200, route);
+        assert.equal(res.headers.get('cache-control'), 'no-cache', route);
+      }
+    } finally {
+      await rm(dist, { recursive: true, force: true });
+    }
   });
 });
