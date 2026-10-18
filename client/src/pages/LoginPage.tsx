@@ -27,7 +27,7 @@ export function LoginPage() {
 
       {/* Top right theme toggle */}
       <div className="absolute top-5 right-5 z-20">
-        <ThemeToggle className="bg-card/40 backdrop-blur-sm border border-border/40" />
+        <ThemeToggle className="bg-card/40 backdrop-blur-xs border border-border/40" />
       </div>
 
       <div className="relative z-10 w-full max-w-md animate-in fade-in-50 zoom-in-95 duration-300">

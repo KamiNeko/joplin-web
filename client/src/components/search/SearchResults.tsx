@@ -155,9 +155,9 @@ export function SearchResults({
                     }
                   }}
                   className={cn(
-                    "group relative flex flex-col gap-1.5 p-3.5 rounded-xl border text-left transition-all duration-150 cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-primary",
+                    "group relative flex flex-col gap-1.5 p-3.5 rounded-xl border text-left transition-all duration-150 cursor-pointer outline-hidden focus-visible:ring-2 focus-visible:ring-primary",
                     isActive
-                      ? "bg-card border-primary/40 shadow-sm"
+                      ? "bg-card border-primary/40 shadow-xs"
                       : "bg-transparent border-transparent hover:bg-muted/60"
                   )}
                 >

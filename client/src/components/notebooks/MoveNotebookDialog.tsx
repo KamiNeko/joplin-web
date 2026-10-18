@@ -72,7 +72,7 @@ export function MoveNotebookDialog({ notebook, notebooks, isPending = false, onO
           onDoubleClick={() => !isCurrent && !isPending && onMove(id)}
           style={{ paddingLeft: `${8 + depth * 14}px` }}
           className={cn(
-            "w-full flex items-center gap-2 rounded-md py-1.5 pr-2 text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            "w-full flex items-center gap-2 rounded-md py-1.5 pr-2 text-left text-sm outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
             isSelected ? "bg-primary/15 text-foreground font-medium" : "text-foreground hover:bg-muted",
             isCurrent && "opacity-50 cursor-not-allowed hover:bg-transparent"
           )}
@@ -97,7 +97,7 @@ export function MoveNotebookDialog({ notebook, notebooks, isPending = false, onO
         >
           <DialogHeader>
             <DialogTitle>Move notebook</DialogTitle>
-            <DialogDescription className="break-words">
+            <DialogDescription className="wrap-break-word">
               Choose where to move "{notebook?.title}" and everything in it.
             </DialogDescription>
           </DialogHeader>

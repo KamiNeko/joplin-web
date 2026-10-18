@@ -59,7 +59,7 @@ export function ConnectionStatus() {
           <button
             type="button"
             className={cn(
-              "w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-left transition-colors hover:bg-sidebar-accent/60 outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              "w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-left transition-colors hover:bg-sidebar-accent/60 outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
               isProblem ? "text-foreground" : "text-muted-foreground"
             )}
             title={lastUpdatedAt ? `Last updated ${formatTime(lastUpdatedAt)}` : undefined}
@@ -88,7 +88,7 @@ export function ConnectionStatus() {
             {lastError && (
               <>
                 <dt className="text-muted-foreground">Last error</dt>
-                <dd className="text-destructive break-words">
+                <dd className="text-destructive wrap-break-word">
                   {lastError.message}
                   <span className="block text-muted-foreground">{formatTime(lastError.at)}</span>
                 </dd>

@@ -45,7 +45,7 @@ export function TagListItem({ tag, isSelected, onSelect, onRename, onDelete }: T
           onSelect();
         }}
         aria-current={isSelected ? "page" : undefined}
-        className="row-label flex items-center gap-2 min-w-0 flex-1 mr-2 text-left outline-none"
+        className="row-label flex items-center gap-2 min-w-0 flex-1 mr-2 text-left outline-hidden"
       >
         <Hash className={cn("h-3.5 w-3.5 shrink-0", isSelected ? "text-primary" : "text-muted-foreground")} />
         <span className="truncate">{tag.title}</span>

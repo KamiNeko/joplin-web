@@ -434,10 +434,10 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
               title={label}
               onClick={() => changeMode(id)}
               className={cn(
-                "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
                 id === "split" && "hidden lg:flex",
                 effectiveMode === id
-                  ? "bg-background text-foreground shadow-sm"
+                  ? "bg-background text-foreground shadow-xs"
                   : "text-muted-foreground hover:text-foreground"
               )}
             >
@@ -508,7 +508,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
           className="mx-4 sm:mx-6 mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 text-xs text-foreground"
         >
           <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
-          <span className="flex-1 min-w-[12rem]">This note was changed on another device.</span>
+          <span className="flex-1 min-w-48">This note was changed on another device.</span>
           <div className="flex items-center gap-1.5">
             <Button size="sm" variant="outline" className="h-7 px-2.5 text-xs" onClick={() => void loadVersion(remoteChange)}>
               Load latest
@@ -537,7 +537,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
           placeholder="Untitled"
           aria-label="Note title"
           className={cn(
-            "w-full block bg-transparent text-2xl sm:text-3xl font-bold tracking-tight text-foreground placeholder:text-muted-foreground outline-none",
+            "w-full block bg-transparent text-2xl sm:text-3xl font-bold tracking-tight text-foreground placeholder:text-muted-foreground outline-hidden",
             effectiveMode !== "split" && "max-w-4xl mx-auto"
           )}
         />
@@ -663,7 +663,7 @@ function SaveIndicator({
         type="button"
         onClick={onRetry}
         title={errorMessage ?? undefined}
-        className="flex items-center gap-1.5 rounded text-xs text-destructive hover:underline outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="flex items-center gap-1.5 rounded text-xs text-destructive hover:underline outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
       >
         <AlertTriangle className="h-3.5 w-3.5" /> {label("Save failed, retry")}
       </button>

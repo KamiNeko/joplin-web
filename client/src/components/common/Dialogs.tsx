@@ -165,7 +165,7 @@ export function AboutDialog({ open, onOpenChange }: { open: boolean; onOpenChang
               href={link.href}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-primary underline-offset-4 hover:underline rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="text-primary underline-offset-4 hover:underline rounded-sm outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
             >
               {link.label}
             </a>

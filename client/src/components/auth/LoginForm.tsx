@@ -83,9 +83,12 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
           )}
 
           <div className="space-y-2">
-            <Label htmlFor="email" className="text-sm font-medium">
-              Email Address
-            </Label>
+            {/* Block wrapper: Tailwind v4's space-y margin has no effect on an inline label */}
+            <div>
+              <Label htmlFor="email" className="text-sm font-medium">
+                Email Address
+              </Label>
+            </div>
             <div className="relative">
               <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input

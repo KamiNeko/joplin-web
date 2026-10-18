@@ -221,7 +221,7 @@ function CodeBlock({ inline, className, children, ...props }: CodeBlockProps) {
 
   return (
     <div className="relative group my-4 rounded-xl border border-border/60 bg-[hsl(var(--code-background))] overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-2 border-b border-border/40 bg-foreground/[0.03] text-xs text-muted-foreground font-mono">
+      <div className="flex items-center justify-between px-4 py-2 border-b border-border/40 bg-foreground/3 text-xs text-muted-foreground font-mono">
         <span className="uppercase tracking-wider font-semibold text-primary/80">
           {language || "text"}
         </span>
@@ -346,7 +346,7 @@ export function MarkdownRenderer({ content, className, onToggleTask }: MarkdownR
           },
           img: ({ src, alt, title, width, height }) => {
             const imageClass =
-              "rounded-lg border border-border/40 max-w-full h-auto object-contain shadow-sm bg-muted/20";
+              "rounded-lg border border-border/40 max-w-full h-auto object-contain shadow-xs bg-muted/20";
             // Joplin resources need the session, so they are loaded through the API
             const resourceId = getResourceIdFromUrl(src);
             return (
@@ -360,7 +360,7 @@ export function MarkdownRenderer({ content, className, onToggleTask }: MarkdownR
             );
           },
           table: ({ children, ...props }) => (
-            <div className="my-6 w-full overflow-x-auto rounded-lg border border-border/50 shadow-sm">
+            <div className="my-6 w-full overflow-x-auto rounded-lg border border-border/50 shadow-xs">
               <table className="w-full text-left text-sm" {...props}>
                 {children}
               </table>
@@ -402,7 +402,7 @@ export function MarkdownRenderer({ content, className, onToggleTask }: MarkdownR
                 {...props}
                 className={cn(
                   "my-3 ml-6 list-disc space-y-1 text-foreground/90",
-                  isTaskList && "ml-0 list-none [li_&]:ml-6 [li_&]:my-1",
+                  isTaskList && "ml-0 list-none in-[li]:ml-6 in-[li]:my-1",
                   className
                 )}
               >
