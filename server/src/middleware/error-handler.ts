@@ -18,19 +18,29 @@ async function isSessionGone(err: JoplinAuthError, sessionId: string | undefined
 /**
  * Global Express error handling middleware. Details are logged, but responses only carry messages
  * meant for the client: no stack traces, internal error text or raw Joplin Server responses.
+ *
+ * Express 4 ignores promises returned by middleware, so the async work runs in `respond` and an
+ * error thrown there goes to `next` (Express's default handler) instead of becoming an unhandled
+ * rejection. A response that has already started is handed to `next` as well.
  */
-export async function errorHandler(
-  err: unknown,
-  req: Request,
-  res: Response,
-  _next: NextFunction
-): Promise<void> {
+export function errorHandler(err: unknown, req: Request, res: Response, next: NextFunction): void {
+  if (res.headersSent) {
+    next(err);
+    return;
+  }
+  respond(err, req, res).catch(next);
+}
+
+async function respond(err: unknown, req: Request, res: Response): Promise<void> {
   console.error('[ErrorHandler] Unhandled error:', err);
 
   // The session expired or was revoked after requireAuth accepted it: answer 401, so the
   // client signs in again, and stop accepting the session from the validation cache
   if (err instanceof JoplinAuthError) {
-    if (await isSessionGone(err, req.sessionId)) {
+    const gone = await isSessionGone(err, req.sessionId);
+    // The response may have been closed while the session was re-checked
+    if (res.headersSent) return;
+    if (gone) {
       if (req.sessionId) invalidateSessionValidation(req.sessionId);
       res.status(401).json({ error: 'Unauthorized: Session has expired or is invalid', status: 401 });
     } else {

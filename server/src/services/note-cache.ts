@@ -36,6 +36,11 @@ export interface CacheEntry {
   /** Ids of master key items (type 9), which exist only on accounts that used E2EE */
   masterKeyIds: Set<string>;
   /**
+   * Names of listed items whose content could not be read or parsed in the last refresh. Any of
+   * them could be a master key, so the writer's E2EE guard treats them like one.
+   */
+  unreadableItems: Set<string>;
+  /**
    * Item names written or deleted by Joplin Web, with the time of the change. A refresh that
    * started before such a change must not apply the (older) content it fetched for that item.
    */
@@ -67,6 +72,7 @@ export class NoteCacheService {
         syncInfoUpdatedTime: null,
         encryptedItemIds: new Set(),
         masterKeyIds: new Set(),
+        unreadableItems: new Set(),
         localChanges: new Map(),
       };
       this.caches.set(sessionId, entry);
@@ -132,6 +138,9 @@ export class NoteCacheService {
     }
 
     entry.syncInfoUpdatedTime = syncInfoUpdatedTime;
+    for (const name of entry.unreadableItems) {
+      if (!currentItemNames.has(name)) entry.unreadableItems.delete(name);
+    }
 
     // Remove deleted items from the local cache
     for (const [name, timestamp] of entry.itemTimestamps) {
@@ -151,6 +160,7 @@ export class NoteCacheService {
           try {
             const rawContent = await joplinApi.getItemContent(sessionId, item.name);
             const parsed = deserialize(rawContent, item.name);
+            entry.unreadableItems.delete(item.name);
 
             // Joplin Web wrote or deleted the item since this refresh started, so the fetched
             // content may predate that change: keep the local state, the next refresh re-reads it
@@ -204,6 +214,7 @@ export class NoteCacheService {
                 break;
             }
           } catch (err) {
+            entry.unreadableItems.add(item.name);
             console.error(`[NoteCache] Error parsing item ${item.name}:`, err);
           }
         })
@@ -298,6 +309,7 @@ export class NoteCacheService {
     entry.noteTags = entry.noteTags.filter((link) => link.id !== id);
     entry.encryptedItemIds.delete(id);
     entry.masterKeyIds.delete(id);
+    entry.unreadableItems.delete(`${id}.md`);
   }
 
   /** Records whether an item is encrypted or a master key, for the writer's E2EE guard */

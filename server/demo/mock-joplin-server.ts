@@ -38,7 +38,7 @@ export interface MockJoplinServer {
   items: Map<string, MockItem>;
   /**
    * Makes the next `count` requests to /api/items answer with `status`, to simulate
-   * Joplin Server failures (e.g. 500) in tests
+   * Joplin Server failures (e.g. 500) in tests. Calls queue up in order.
    */
   failNextItemRequests: (status: number, count?: number) => void;
   close: () => Promise<void>;
@@ -93,7 +93,7 @@ export async function startMockJoplinServer(
   const sessions = new Set<string>();
   let clock = Date.now();
   const tick = () => (clock = Math.max(clock + 1, Date.now()));
-  let failure: { status: number; remaining: number } | null = null;
+  const failures: number[] = [];
 
   const app = express();
 
@@ -122,9 +122,9 @@ export async function startMockJoplinServer(
   });
 
   app.use('/api/items', express.raw({ type: () => true, limit: '50mb' }), (req: Request, res: Response) => {
-    if (failure && failure.remaining > 0) {
-      failure.remaining--;
-      res.status(failure.status).json({ error: `Injected failure (HTTP ${failure.status})` });
+    const failure = failures.shift();
+    if (failure !== undefined) {
+      res.status(failure).json({ error: `Injected failure (HTTP ${failure})` });
       return;
     }
     const session = req.headers['x-api-auth'];
@@ -201,7 +201,7 @@ export async function startMockJoplinServer(
     url: `http://127.0.0.1:${boundPort}`,
     items,
     failNextItemRequests: (status, count = 1) => {
-      failure = { status, remaining: count };
+      for (let i = 0; i < count; i++) failures.push(status);
     },
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };

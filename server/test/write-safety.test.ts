@@ -9,6 +9,8 @@ import {
   type MockJoplinServer,
 } from '../demo/mock-joplin-server.js';
 import { buildDemoItems, DEMO_EMAIL, DEMO_PASSWORD, demoId } from '../demo/seed.js';
+import type { NextFunction, Request, Response } from 'express';
+import type { errorHandler as ErrorHandler } from '../src/middleware/error-handler.js';
 import type { joplinApi as JoplinApi } from '../src/services/joplin-api.js';
 import { deserialize, serialize } from '../src/services/serializer.js';
 import { JoplinItemType } from '../src/types/index.js';
@@ -36,6 +38,7 @@ let baseUrl: string;
 let session: string;
 /** The backend's Joplin Server client, patched by some tests to observe or delay requests */
 let joplinApi: typeof JoplinApi;
+let errorHandler: typeof ErrorHandler;
 
 async function api(path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
@@ -153,6 +156,7 @@ before(async () => {
   ({ server } = await import('../src/index.js'));
   // Loaded after the environment is set, like the app itself
   ({ joplinApi } = await import('../src/services/joplin-api.js'));
+  ({ errorHandler } = await import('../src/middleware/error-handler.js'));
   if (!server.listening) await new Promise((resolve) => server.once('listening', resolve));
 
   const login = await api('/api/auth/login', json('POST', { email: DEMO_EMAIL, password: DEMO_PASSWORD }));
@@ -608,6 +612,34 @@ describe('Joplin Server error mapping (#30)', () => {
     assert.equal((await api('/api/notebooks')).status, 200, 'other sessions are unaffected');
   });
 
+  test('a 403 stays 403 when re-checking the session fails', async () => {
+    const note = await createNote(demoId('nb-reading'), 'recheck fails');
+    mock.failNextItemRequests(403); // the request itself
+    mock.failNextItemRequests(500); // the session re-check
+    assert.equal((await api(`/api/notes/${note}`, json('PUT', { body: 'x' }))).status, 403);
+    assert.equal((await api('/api/notebooks')).status, 200, 'the session is not dropped on an unclear answer');
+  });
+
+  test('the error handler passes started responses and its own failures to next', async () => {
+    const err = new Error('boom');
+    const fakeReq = {} as Request;
+
+    const passed: unknown[] = [];
+    const started = { headersSent: true, status: () => assert.fail('must not answer twice') } as unknown as Response;
+    errorHandler(err, fakeReq, started, ((e: unknown) => passed.push(e)) as NextFunction);
+    assert.deepEqual(passed, [err]);
+
+    const failure = new Error('ERR_HTTP_HEADERS_SENT');
+    const broken = {
+      headersSent: false,
+      status: () => {
+        throw failure;
+      },
+    } as unknown as Response;
+    const forwarded = await new Promise<unknown>((resolve) => errorHandler(err, fakeReq, broken, resolve as NextFunction));
+    assert.equal(forwarded, failure, 'a throw while answering reaches next instead of rejecting unhandled');
+  });
+
   test('a 403 for a still valid session stays 403', async () => {
     const note = await createNote(demoId('nb-reading'), 'forbidden');
     mock.failNextItemRequests(403);
@@ -666,6 +698,24 @@ describe('write path follow-ups (#61)', () => {
 
     await withSyncInfo(null, async () => {
       assert.equal((await api(`/api/notes/${note}`, json('PUT', { body: 'plain account' }))).status, 200);
+
+      // An item that fails to load could be a master key: fail safe
+      const unreadable = hexId('unreadable-item');
+      putItem(JoplinItemType.MasterKey, unreadable, '', '', { encryption_method: '8', content: '{}' });
+      const original = joplinApi.getItemContent;
+      joplinApi.getItemContent = async (sessionId: string, name: string) => {
+        if (name === `${unreadable}.md`) throw new Error('read failed');
+        return original.call(joplinApi, sessionId, name);
+      };
+      try {
+        await refresh();
+      } finally {
+        joplinApi.getItemContent = original;
+      }
+      assert.equal((await api(`/api/notes/${note}`, json('PUT', { body: 'leak' }))).status, 422);
+      mock.items.delete(`${unreadable}.md`);
+      await refresh();
+      assert.equal((await api(`/api/notes/${note}`, json('PUT', { body: 'gone again' }))).status, 200);
 
       putItem(JoplinItemType.MasterKey, masterKey, '', '', {
         created_time: '2026-01-01T00:00:00.000Z',

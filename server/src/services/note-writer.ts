@@ -250,7 +250,10 @@ export class NoteWriterService {
       }
       this.writableChecks.set(sessionId, { checkedAt: now, infoUpdatedTime: entry.syncInfoUpdatedTime, infoMissing });
     }
-    if (infoMissing && (entry.masterKeyIds.size > 0 || entry.encryptedItemIds.size > 0)) {
+    // An item that could not be read might be a master key, so it counts as one (fail safe)
+    const encryptedData =
+      entry.masterKeyIds.size > 0 || entry.encryptedItemIds.size > 0 || entry.unreadableItems.size > 0;
+    if (infoMissing && encryptedData) {
       throw new WriteValidationError(
         'This account has end-to-end encrypted data. Joplin Web cannot encrypt data, so it is read-only here',
         422
