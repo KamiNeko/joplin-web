@@ -80,6 +80,26 @@ describe("NoteListItem", () => {
     expect(checkbox.disabled).toBe(true);
     expect(screen.getByRole("heading").className).toContain("line-through");
   });
+
+  it("shows the due date of an open to-do", () => {
+    render(<NoteListItem note={{ ...baseNote, isTodo: true, todoDue: NOW + 2 * 86400_000 }} />);
+    expect(screen.getByText(/^Due /).parentElement!.className).toContain("text-muted-foreground");
+  });
+
+  it("highlights an overdue open to-do", () => {
+    render(<NoteListItem note={{ ...baseNote, isTodo: true, todoDue: NOW - 3600_000 }} />);
+    expect(screen.getByText(/^Overdue /).parentElement!.className).toContain("text-destructive");
+  });
+
+  it("does not flag a completed to-do as overdue and ignores todoDue on plain notes", () => {
+    const { rerender } = render(
+      <NoteListItem note={{ ...baseNote, isTodo: true, todoCompleted: true, todoDue: NOW - 3600_000 }} />
+    );
+    expect(screen.getByText(/^Due /)).toBeTruthy();
+    expect(screen.queryByText(/^Overdue/)).toBeNull();
+    rerender(<NoteListItem note={{ ...baseNote, todoDue: NOW - 3600_000 }} />);
+    expect(screen.queryByText(/Due|Overdue/)).toBeNull();
+  });
 });
 
 describe("formatRelativeTime", () => {

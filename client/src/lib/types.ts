@@ -47,6 +47,8 @@ export interface NoteListItem {
   isConflict?: boolean;
   /** Stored end-to-end encrypted: title and content can't be read (or changed) here */
   encrypted?: boolean;
+  /** To-do due date in Unix ms; 0 or missing when none is set */
+  todoDue?: number;
 }
 
 /**
@@ -75,6 +77,8 @@ export interface Note {
   markupLanguage?: number;
   /** Stored end-to-end encrypted: title and content can't be read (or changed) here */
   encrypted?: boolean;
+  /** To-do due date in Unix ms; 0 or missing when none is set */
+  todoDue?: number;
 }
 
 /** `markupLanguage` of HTML notes, e.g. pages saved with the Joplin Web Clipper */

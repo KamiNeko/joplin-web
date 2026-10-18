@@ -273,6 +273,15 @@ Return \`application/problem+json\` with a stable \`type\` URL for every error.`
     body: 'Book an appointment at the citizen office and bring two biometric photos.',
   },
   {
+    key: 'todo-bill',
+    notebook: 'personal',
+    title: 'Pay the electricity bill',
+    hoursAgo: 50,
+    isTodo: true,
+    todoDueInHours: -30,
+    body: 'Annual statement arrived; transfer the back payment.',
+  },
+  {
     key: 'todo-train',
     notebook: 'travel',
     title: 'Book train tickets to Porto',

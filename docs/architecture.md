@@ -71,6 +71,7 @@ type_: 1
 ```
 
 - Properties are parsed **bottom-up** until the first blank line; line 1 above it is the title, the rest (after one blank line) is the body. Property order is kept on a round trip.
+- Only the item times (`created_time`, `updated_time`, `user_*_time`) are ISO strings. `todo_due` (due date / alarm) and `todo_completed` stay Unix ms numbers, `0` when unset, as Joplin desktop writes them.
 - Like Joplin's `BaseItem.unserialize`, content is split on `\n` only: a `\r` in the body (CRLF line endings) is part of the text and is written back unchanged. Only property lines are trimmed.
 - Newlines in property values are escaped as `\n`, with Joplin's exact escape/unescape chain. That format cannot tell a backslash followed by a real newline from a literal `\n`; Joplin has the same limitation (#55), and matching it keeps values read identically by all clients.
 - Notes reference attachments as `![alt](:/<resourceId>)` and other notes as `[text](:/<noteId>)`; the client resolves these to `/api/resources/:id` and in-app links.
@@ -112,7 +113,7 @@ All routes except `/api/health` and `/api/auth/login` require a session.
 | `GET` | `/api/notes` | List; filters `notebook_id`, `tag_id`, `is_trash`; `is_conflict=true` lists only conflict copies (other filters ignored). Items carry `isConflict`. |
 | `GET` | `/api/notes/:id` | Note with body, list `preview`, notebook, tags and `markupLanguage` (1 = Markdown, 2 = HTML; the write routes below return the same shape); `isConflict` / `conflictOriginalId` for conflict copies |
 | `POST` | `/api/notes` | Create `{ title, body, parentId, isTodo }` |
-| `PUT` | `/api/notes/:id` | Update `{ title, body, parentId, todoCompleted, baseUpdatedTime, force }` |
+| `PUT` | `/api/notes/:id` | Update `{ title, body, parentId, todoCompleted, todoDue, baseUpdatedTime, force }`; `todoDue` is Unix ms (`0`/`null` clears it, only to-dos can have one) |
 | `DELETE` | `/api/notes/:id` | Trash; `?permanent=true` deletes |
 | `POST` | `/api/notes/:id/restore` | Restore from trash |
 | `POST` | `/api/notes/:id/tags` | Add tag by title `{ title }` |

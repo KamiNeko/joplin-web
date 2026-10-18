@@ -163,12 +163,12 @@ describe('reading', () => {
     ]);
     assert.deepEqual(
       await searchTitles('notebook:personal -notebook:recipes'),
-      ['Book train tickets to Porto', 'Lisbon Long Weekend', 'Renew passport'],
+      ['Book train tickets to Porto', 'Lisbon Long Weekend', 'Pay the electricity bill', 'Renew passport'],
       'sub-notebooks are included and can be excluded'
     );
-    assert.deepEqual(await searchTitles('type:todo'), ['Book train tickets to Porto', 'Renew passport']);
+    assert.deepEqual(await searchTitles('type:todo'), ['Book train tickets to Porto', 'Pay the electricity bill', 'Renew passport']);
     assert.deepEqual(await searchTitles('iscompleted:1'), ['Book train tickets to Porto']);
-    assert.deepEqual(await searchTitles('iscompleted:0'), ['Renew passport']);
+    assert.deepEqual(await searchTitles('iscompleted:0'), ['Pay the electricity bill', 'Renew passport']);
     assert.ok(!(await searchTitles('type:note')).includes('Renew passport'));
     assert.deepEqual(await searchTitles('tag:nosuchtag'), []);
   });
@@ -255,6 +255,47 @@ describe('writing', () => {
     assert.equal((await api(`/api/notes/${noteId}`, { method: 'DELETE' })).status, 204); // only trashed notes can be purged
     assert.equal((await api(`/api/notes/${noteId}?permanent=true`, { method: 'DELETE' })).status, 204);
     assert.ok(!mock.items.has(`${noteId}.md`));
+  });
+
+  test('sets, changes and clears a to-do due date with conflict detection', async () => {
+    const put = (id: string, payload: unknown) => api(`/api/notes/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
+    const storedDue = (id: string) => /^todo_due: (.*)$/m.exec(mock.items.get(`${id}.md`)!.content.toString('utf8'))?.[1];
+
+    const created = await api('/api/notes', {
+      method: 'POST',
+      body: JSON.stringify({ title: 'Water plants', parentId: demoId('nb-personal'), isTodo: true }),
+    });
+    assert.equal(created.status, 201);
+    const id = created.data.id;
+    assert.equal(created.data.todoDue, 0);
+    assert.equal(storedDue(id), '0');
+
+    const due = Date.UTC(2026, 10, 3, 9, 30);
+    const set = await put(id, { todoDue: due, baseUpdatedTime: created.data.updatedTime });
+    assert.equal(set.status, 200);
+    assert.equal(set.data.todoDue, due);
+    assert.equal(set.data.title, 'Water plants', 'other fields are kept');
+    assert.equal(storedDue(id), String(due), 'stored as Unix ms like Joplin desktop');
+    assert.ok(set.data.updatedTime > created.data.updatedTime);
+    const listed = (await api(`/api/notes?notebook_id=${demoId('nb-personal')}`)).data.find((n: any) => n.id === id);
+    assert.equal(listed.todoDue, due, 'cache updated');
+
+    const stale = await put(id, { todoDue: due + 1, baseUpdatedTime: created.data.updatedTime });
+    assert.equal(stale.status, 409);
+    assert.equal(storedDue(id), String(due));
+
+    for (const bad of ['2026-11-03', -1, 1.5, 9e15, true, {}]) {
+      assert.equal((await put(id, { todoDue: bad })).status, 400, `rejects ${JSON.stringify(bad)}`);
+    }
+
+    const cleared = await put(id, { todoDue: null, baseUpdatedTime: set.data.updatedTime });
+    assert.equal(cleared.status, 200);
+    assert.equal(cleared.data.todoDue, 0);
+    assert.equal(storedDue(id), '0');
+
+    assert.equal((await put(demoId('note-roadmap'), { todoDue: due })).status, 400, 'plain notes cannot get a due date');
+    assert.equal((await api(`/api/notes/${id}`, { method: 'DELETE' })).status, 204);
+    assert.equal((await api(`/api/notes/${id}?permanent=true`, { method: 'DELETE' })).status, 204);
   });
 
   test('rejects invalid ids before touching Joplin Server', async () => {

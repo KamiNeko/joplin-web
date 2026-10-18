@@ -287,6 +287,8 @@ export class NoteWriterService {
       body?: string;
       parentId?: string;
       todoCompleted?: boolean;
+      /** Due date in Unix ms; 0 clears it. Only to-dos can have one. */
+      todoDue?: number;
       baseUpdatedTime?: number;
       force?: boolean;
     }
@@ -315,6 +317,13 @@ export class NoteWriterService {
     }
     if (changes.todoCompleted !== undefined) {
       props.todo_completed = changes.todoCompleted ? String(Date.now()) : '0';
+    }
+    if (changes.todoDue !== undefined) {
+      if (changes.todoDue > 0 && !current.isTodo) {
+        throw new WriteValidationError('Only to-dos can have a due date');
+      }
+      // Joplin stores the due date as Unix ms (not ISO like the item times); 0 means none
+      props.todo_due = String(changes.todoDue);
     }
     touch(props);
 
