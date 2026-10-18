@@ -97,10 +97,8 @@ describe("links to other notes", () => {
     expect(await screen.findByText(`Opened note ${NOTE_ID}`)).toBeTruthy();
   });
 
-  // BUG (#93): Joplin links to a heading in another note as ":/<id>#<slug>". The preprocessing regex only
-  // accepts ")" after the id, so the link is not rewritten and the sanitizer drops the ":/" href:
-  // the link renders as dead text. Remove `.fails` once fixed.
-  it.fails("opens :/id#heading links to a heading in another note", async () => {
+  // Regression test for #93 (more cases in MarkdownRenderer.heading-links.test.tsx)
+  it("opens :/id#heading links to a heading in another note", async () => {
     renderMarkdown(`[Other note](:/${NOTE_ID}#shopping-list)`);
     fireEvent.click(screen.getByRole("button", { name: "Other note" }));
     expect(await screen.findByText(`Opened note ${NOTE_ID}`)).toBeTruthy();
