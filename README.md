@@ -35,6 +35,8 @@ You already run Joplin Server to sync your notes. Joplin's desktop and mobile ap
 | 🔎 **Search** | Instant full-text search across titles and content (`Ctrl+K`). |
 | 🗑️ **Trash** | Deleted notes go to Joplin's trash and can be restored. |
 | ⚔️ **Conflict detection** | If a note was changed elsewhere while you edited it, you choose which version to keep. |
+| 🔄 **Refresh & connection status** | Changes from other devices load when you return to the tab or click *Refresh*. The sidebar shows whether the server is reachable and when data was last updated. |
+| 🛟 **No lost typing** | Unsaved text is kept on the device while offline or after the session expires, saves retry when the connection returns, and you can restore a draft later. |
 | 🌗 **Light & dark mode** | Switch themes with one click. |
 | 📱 **Responsive** | Works on phones and tablets as well as on the desktop. |
 
@@ -124,7 +126,7 @@ docker compose up -d --build
 
 Tagged releases are also published as multi-arch images (amd64, arm64) at `ghcr.io/kamineko/joplin-web`. To use one, replace `build:` in `docker-compose.yml` with `image: ghcr.io/kamineko/joplin-web:1.2.3`, then run `docker compose pull && docker compose up -d`. Pin an exact version so that you choose when to update, and roll back by setting the previous version again.
 
-To see which version is running, open `http://localhost:3001/api/health`. It returns the version and commit (and nothing about your configuration). Please include them in bug reports.
+To see which version is running, open *About Joplin Web* in the user menu, or `http://localhost:3001/api/health`. The endpoint returns the version and commit (and nothing about your configuration). Please include them in bug reports.
 
 ### Try it without a Joplin Server
 
