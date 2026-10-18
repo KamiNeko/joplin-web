@@ -299,7 +299,7 @@ describe('note cache refresh', () => {
     assert.ok(entry.itemTimestamps.get(`${NOTE}.md`)! < 0, 'keeps the local-write marker, so the next refresh re-reads it');
   });
 
-  test('a background refresh keeps items created locally while its listing loaded', async () => {
+  test('a background refresh keeps items created locally while its listing loaded', async (t) => {
     await noteCache.getNotes(session);
     const created: RawJoplinItem = {
       ...(await noteCache.getEntry(session)).notes.get(NOTE)!,
@@ -308,10 +308,14 @@ describe('note cache refresh', () => {
     };
     await ageCache(TTL + 1000);
 
+    // The write lands in the same millisecond the listing started, as it can on a fast machine
+    const now = Date.now();
+    const clock = t.mock.method(Date, 'now', () => now);
     const listing = hold(isListing);
     await noteCache.getNotes(session);
     await listing;
     noteCache.upsertItem(session, created);
+    clock.mock.restore();
 
     release();
     await noteCache.whenIdle(session);

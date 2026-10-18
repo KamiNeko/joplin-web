@@ -259,7 +259,7 @@ export class NoteCacheService {
     // Remove deleted items from the local cache
     for (const [name, timestamp] of entry.itemTimestamps) {
       // Written by Joplin Web while the listing was loading, so it may be missing from it
-      const writtenDuringListing = timestamp < 0 && -timestamp > listingStartedAt;
+      const writtenDuringListing = timestamp < 0 && -timestamp >= listingStartedAt;
       if (!currentItemNames.has(name) && !writtenDuringListing) {
         this.forgetItem(entry, name.replace(/\.md$/i, ''));
       }
