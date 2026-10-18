@@ -4,6 +4,7 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { MOBILE_SEARCH_INPUT_ID } from "@/lib/ui-constants";
 import { useAutoRefresh } from "@/hooks/use-connection";
 import { ConnectionBanner } from "./ConnectionBanner";
+import { ReadOnlyBanner } from "./ReadOnlyBanner";
 
 interface AppLayoutProps {
   sidebar: (props: { onCloseMobile?: () => void }) => React.ReactNode;
@@ -14,6 +15,9 @@ interface AppLayoutProps {
   onSearchChange: (query: string) => void;
   /** Search results are shown instead of the selected list */
   isSearchActive?: boolean;
+  /** The account can't be written (end-to-end encryption): shows a banner with `readOnlyReason` */
+  readOnly?: boolean;
+  readOnlyReason?: string | null;
 }
 
 export function AppLayout({
@@ -24,6 +28,8 @@ export function AppLayout({
   searchQuery,
   onSearchChange,
   isSearchActive = false,
+  readOnly = false,
+  readOnlyReason = null,
 }: AppLayoutProps) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   // Set when the menu is opened via Ctrl+K, so its search field gets focus instead of the first item
@@ -77,6 +83,7 @@ export function AppLayout({
           }}
         />
         <ConnectionBanner />
+        {readOnly && <ReadOnlyBanner reason={readOnlyReason} />}
         <main className="flex-1 min-h-0 overflow-hidden">
           {children}
         </main>

@@ -413,3 +413,49 @@ export function buildDemoItems(now = Date.now()): Map<string, MockItem> {
 
   return items;
 }
+
+/**
+ * Serializes an item the way Joplin uploads it with E2EE on (`BaseItem.serializeForSync`): only
+ * the keys needed to link and sync items stay in clear (`id`, `parent_id`, `note_id`, `tag_id`,
+ * `updated_time`, `deleted_time`, `type_`), everything else (title, body, other properties) is in
+ * `encryption_cipher_text`. The cipher text here is a placeholder; nothing can decrypt it.
+ */
+function encryptedItem(type: JoplinItemType, id: string, updatedTime: number, clear: Record<string, string> = {}): string {
+  return serialize({
+    type_: type,
+    properties: {
+      id,
+      ...clear,
+      updated_time: new Date(updatedTime).toISOString(),
+      deleted_time: '0',
+      encryption_cipher_text: `JED01000022${createHash('sha256').update(id).digest('hex')}`,
+      encryption_applied: '1',
+    },
+  });
+}
+
+/**
+ * The demo account with end-to-end encryption turned on: info.json says `e2ee: true`, plus an
+ * encrypted notebook, encrypted notes (one inside a readable notebook), an encrypted tag and an
+ * encrypted note-tag link, as Joplin desktop syncs them. Joplin Web shows such an account
+ * read-only. Used by the tests and by `npm run demo` with `DEMO_E2EE=1`.
+ */
+export function buildEncryptedDemoItems(now = Date.now()): Map<string, MockItem> {
+  const items = buildDemoItems(now);
+  const put = (id: string, content: string, time: number) => items.set(`${id}.md`, toItem(content, time));
+  const time = now - 2 * HOUR;
+
+  const vault = demoId('nb-vault');
+  put(vault, encryptedItem(JoplinItemType.Folder, vault, time, { parent_id: '' }), time);
+  const secret = demoId('note-secret');
+  put(secret, encryptedItem(JoplinItemType.Note, secret, time, { parent_id: vault }), time);
+  const diary = demoId('note-diary');
+  put(diary, encryptedItem(JoplinItemType.Note, diary, time + 1000, { parent_id: demoId('nb-personal') }), time + 1000);
+  const tag = demoId('tag-private');
+  put(tag, encryptedItem(JoplinItemType.Tag, tag, time), time);
+  const link = demoId('link-diary-private');
+  put(link, encryptedItem(JoplinItemType.NoteTag, link, time, { note_id: diary, tag_id: tag }), time);
+
+  items.set('info.json', syncTargetInfoItem(true, now - HOUR));
+  return items;
+}

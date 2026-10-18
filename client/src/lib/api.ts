@@ -6,6 +6,7 @@ import {
   SearchResult,
   LoginResponse,
   TrashedNotebook,
+  WriteState,
 } from "./types";
 import { changePendingWrites, recordNetworkError, recordResponse } from "./connection";
 
@@ -243,6 +244,25 @@ export async function checkSession(): Promise<SessionInfo | null> {
     if (err instanceof ApiError && err.status === 401) return null;
     throw err;
   }
+}
+
+/**
+ * Asks whether the account accepts writes. Anything but an explicit `writable: false` counts as
+ * writable: the server still refuses each write it can't take, so a missing answer only means the
+ * UI doesn't hide editing up front.
+ */
+export async function getWriteState(): Promise<WriteState> {
+  const data = await request<{ writable?: unknown; reason?: unknown } | null>("/api/account/write-state");
+  const writable = data?.writable !== false;
+  return { writable, reason: !writable && typeof data?.reason === "string" ? data.reason : null };
+}
+
+/**
+ * True when the server refused a write because the account or item can't be changed from Joplin
+ * Web (HTTP 422, e.g. end-to-end encryption). Retrying won't help; the error message says why.
+ */
+export function isReadOnlyError(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.status === 422;
 }
 
 /**

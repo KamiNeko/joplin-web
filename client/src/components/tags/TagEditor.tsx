@@ -33,7 +33,8 @@ export function TagEditor({ noteId, tags, readOnly = false, onTagClick }: TagEdi
     const onNote = new Set(tags.map((t) => t.id));
     const q = value.trim().toLowerCase();
     return (allTags ?? [])
-      .filter((t) => !onNote.has(t.id) && (!q || t.title.toLowerCase().includes(q)))
+      // An encrypted tag has no readable title to add it by, and the server refuses links to it
+      .filter((t) => !onNote.has(t.id) && !t.encrypted && (!q || t.title.toLowerCase().includes(q)))
       .slice(0, MAX_SUGGESTIONS);
   }, [allTags, tags, value]);
 

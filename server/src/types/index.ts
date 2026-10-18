@@ -49,6 +49,8 @@ export interface Notebook {
   parentId: string;
   children: Notebook[];
   noteCount: number;
+  /** Stored end-to-end encrypted (`encryption_applied: 1`): title and content are unreadable here */
+  encrypted: boolean;
   createdTime?: number;
   updatedTime?: number;
   deletedTime?: number;
@@ -68,6 +70,8 @@ export interface TrashedNotebook {
   notebookCount: number;
   /** Notes inside that were trashed on their own before; they stay trashed on restore but are deleted with the notebook */
   earlierNoteCount: number;
+  /** Stored end-to-end encrypted (`encryption_applied: 1`): title and content are unreadable here */
+  encrypted: boolean;
 }
 
 /**
@@ -86,6 +90,8 @@ export interface NoteListItem {
   todoDue: number;
   /** A conflict copy (`is_conflict: 1`) Joplin kept after a sync conflict */
   isConflict: boolean;
+  /** Stored end-to-end encrypted (`encryption_applied: 1`): title and content are unreadable here */
+  encrypted: boolean;
 }
 
 /**
@@ -114,6 +120,8 @@ export interface NoteDetail {
   conflictOriginalId: string;
   /** Joplin's `markup_language`: 1 = Markdown, 2 = HTML (e.g. pages saved with the Web Clipper) */
   markupLanguage: number;
+  /** Stored end-to-end encrypted (`encryption_applied: 1`): title and content are unreadable here */
+  encrypted: boolean;
   properties: Record<string, string>;
 }
 
@@ -124,6 +132,17 @@ export interface TagItem {
   id: string;
   title: string;
   noteCount: number;
+  /** Stored end-to-end encrypted (`encryption_applied: 1`): title and content are unreadable here */
+  encrypted: boolean;
+}
+
+/**
+ * Whether Joplin Web may write to the account (see `NoteWriterService.getWriteState`)
+ */
+export interface WriteState {
+  writable: boolean;
+  /** Why the account is read-only, as the writer's 422 refusal words it; absent when writable */
+  reason?: string;
 }
 
 /**

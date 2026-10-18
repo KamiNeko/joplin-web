@@ -35,3 +35,21 @@ export function formatRelativeTime(timestamp: number | string | undefined): stri
     year: date.getFullYear() !== new Date().getFullYear() ? "numeric" : undefined,
   });
 }
+
+/**
+ * Title to show for a note: "Encrypted note" for an end-to-end encrypted one (its real title is in
+ * the cipher text), "Untitled Note" for an empty title.
+ */
+export function noteDisplayTitle(note: { title: string; encrypted?: boolean }): string {
+  if (note.encrypted) return "Encrypted note";
+  return note.title || "Untitled Note";
+}
+
+/**
+ * Ends a message with a period unless it already ends in punctuation (server messages often
+ * don't), so it reads as a sentence before more text.
+ */
+export function asSentence(text: string): string {
+  const trimmed = text.trim();
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}

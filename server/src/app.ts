@@ -10,6 +10,7 @@ import type { AppConfig } from './config.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { createOriginCheck } from './middleware/origin-check.js';
 import { requestLogger } from './middleware/request-logger.js';
+import { accountRouter } from './routes/account.js';
 import { createAuthRouter } from './routes/auth.js';
 import { notebooksRouter } from './routes/notebooks.js';
 import { notesRouter } from './routes/notes.js';
@@ -110,6 +111,7 @@ export function createApp(config: AppConfig): Express {
 
   // API Routes
   app.use('/api/auth', createAuthRouter(config));
+  app.use('/api/account', accountRouter);
   app.use('/api/notebooks', notebooksRouter);
   app.use('/api/notes', notesRouter);
   app.use('/api/tags', tagsRouter);

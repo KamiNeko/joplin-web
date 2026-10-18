@@ -4,6 +4,8 @@ export interface FlatNotebook {
   id: string;
   title: string;
   depth: number;
+  /** End-to-end encrypted: nothing can be added to it here */
+  encrypted?: boolean;
 }
 
 /**
@@ -12,7 +14,7 @@ export interface FlatNotebook {
 export function flattenNotebooks(notebooks: Notebook[] | undefined, depth = 0): FlatNotebook[] {
   if (!notebooks) return [];
   return notebooks.flatMap((nb) => [
-    { id: nb.id, title: nb.title, depth },
+    { id: nb.id, title: nb.title, depth, encrypted: nb.encrypted },
     ...flattenNotebooks(nb.children, depth + 1),
   ]);
 }

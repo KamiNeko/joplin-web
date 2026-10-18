@@ -32,13 +32,14 @@ import {
   FileText,
   GitCompareArrows,
   History,
+  Lock,
   MoreHorizontal,
   PencilLine,
   RotateCcw,
   Trash2,
   X,
 } from "lucide-react";
-import { formatRelativeTime } from "@/lib/format";
+import { formatRelativeTime, noteDisplayTitle } from "@/lib/format";
 import { TagEditor } from "@/components/tags/TagEditor";
 import { Button } from "@/components/ui/button";
 import { useDeleteNote, useRestoreNote, useUpdateNote } from "@/hooks/use-mutations";
@@ -63,6 +64,8 @@ interface NoteViewerProps {
   onRetry?: () => void;
   isRetrying?: boolean;
   notebooks?: Notebook[];
+  /** The account can't be written (end-to-end encryption): no editing, tags, to-do or trash actions */
+  readOnly?: boolean;
   /** Open the note directly in the editor (e.g. right after creating it) */
   startInEdit?: boolean;
   onTagClick?: (tagId: string) => void;
@@ -82,6 +85,7 @@ export function NoteViewer({
   onRetry,
   isRetrying = false,
   notebooks,
+  readOnly = false,
   startInEdit = false,
   onTagClick,
   onNotebookClick,
@@ -180,8 +184,13 @@ export function NoteViewer({
   const isConflict = Boolean(note.isConflict);
   const conflictOriginalId =
     isConflict && note.conflictOriginalId && /^[0-9a-f]{32}$/.test(note.conflictOriginalId) ? note.conflictOriginalId : null;
+  const isEncrypted = Boolean(note.encrypted);
+  // Nothing can be written: the account is read-only or the note itself is encrypted
+  const locked = readOnly || isEncrypted;
+  const canEdit = !isTrashed && !locked;
   // Editing would overwrite the stored draft, so the user decides about it first
-  const editing = isEditing && !isTrashed && !restorable;
+  const editing = isEditing && canEdit && !restorable;
+  const title = noteDisplayTitle(note);
   const updatedRelative = formatRelativeTime(note.updatedTime);
   const createdDate = note.createdTime
     ? new Date(
@@ -310,7 +319,7 @@ export function NoteViewer({
             <button
               type="button"
               onClick={handleToggleTodo}
-              disabled={isTrashed || updateNote.isPending}
+              disabled={!canEdit || updateNote.isPending}
               aria-pressed={Boolean(note.todoCompleted)}
               aria-label={note.todoCompleted ? "Done: mark as not done" : "To do: mark as done"}
               title={note.todoCompleted ? "Mark as not done" : "Mark as done"}
@@ -342,10 +351,17 @@ export function NoteViewer({
               In Trash
             </Badge>
           )}
+
+          {isEncrypted && (
+            <Badge variant="outline" className="text-xs gap-1 border-primary/30 bg-primary/10 text-foreground">
+              <Lock className="h-3 w-3 text-primary" />
+              Encrypted
+            </Badge>
+          )}
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
-          {isTrashed ? (
+          {locked ? null : isTrashed ? (
             <>
               <Button size="sm" variant="outline" className="h-8" onClick={handleRestore} disabled={restoreNote.isPending}>
                 <RotateCcw className="h-3.5 w-3.5" />
@@ -398,8 +414,9 @@ export function NoteViewer({
                       {flatNotebooks.map((nb) => (
                         <DropdownMenuItem
                           key={nb.id}
-                          // Moving a conflict copy turns it into a regular note, its own notebook included
-                          disabled={nb.id === note.notebookId && !isConflict}
+                          // Moving a conflict copy turns it into a regular note, its own notebook included;
+                          // an encrypted notebook can't take a cleartext note
+                          disabled={(nb.id === note.notebookId && !isConflict) || nb.encrypted}
                           onClick={() => handleMove(nb.id, nb.title)}
                           style={{ paddingLeft: `${8 + nb.depth * 12}px` }}
                         >
@@ -444,7 +461,7 @@ export function NoteViewer({
 
       {isStale && <StaleDataHint className="px-4 sm:px-6 pt-2" onRetry={onRetry} isRetrying={isRetrying} />}
 
-      {restorable && !isTrashed && (
+      {restorable && canEdit && (
         <div
           role="status"
           className="mx-4 sm:mx-6 mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 text-xs text-foreground"
@@ -529,7 +546,8 @@ export function NoteViewer({
               <div className="flex items-center gap-2.5 p-3.5 rounded-xl bg-destructive/10 border border-destructive/25 text-destructive text-xs">
                 <AlertCircle className="h-4 w-4 shrink-0" />
                 <span>
-                  <strong>This note is in the trash.</strong> Restore it to edit it again, or delete it permanently.
+                  <strong>This note is in the trash.</strong>
+                  {!locked && " Restore it to edit it again, or delete it permanently."}
                 </span>
               </div>
             )}
@@ -537,9 +555,9 @@ export function NoteViewer({
             <div className="space-y-3">
               <h1
                 className="text-2xl/tight sm:text-3xl/9 lg:text-4xl/10 font-bold tracking-tight text-foreground"
-                onDoubleClick={() => !isTrashed && setIsEditing(true)}
+                onDoubleClick={() => canEdit && setIsEditing(true)}
               >
-                {note.title || "Untitled Note"}
+                {title}
               </h1>
 
               <div className="flex flex-wrap items-center gap-y-2 gap-x-4 text-xs text-muted-foreground pt-1 border-b border-border/40 pb-4">
@@ -568,27 +586,37 @@ export function NoteViewer({
                   noteId={note.id}
                   tags={note.tags ?? []}
                   // Tags of conflict copies are not counted or listed anywhere, so don't add any
-                  readOnly={isTrashed || isConflict}
+                  readOnly={!canEdit || isConflict}
                   onTagClick={onTagClick}
                 />
               </div>
             </div>
 
             <div className="pt-2">
-              {note.body.trim() ? (
+              {isEncrypted ? (
+                <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-primary/10 border border-primary/25 text-foreground text-xs">
+                  <Lock className="h-4 w-4 shrink-0 text-primary" />
+                  <span>
+                    <strong>This note is end-to-end encrypted.</strong> Joplin Web can't decrypt it, so its title and
+                    content can't be shown or changed here. Open it in the Joplin desktop or mobile app.
+                  </span>
+                </div>
+              ) : note.body.trim() ? (
                 <MarkdownRenderer
                   content={note.body}
                   html={note.markupLanguage === MARKUP_HTML}
-                  onToggleTask={isTrashed ? undefined : toggleTask}
+                  onToggleTask={canEdit ? toggleTask : undefined}
                 />
-              ) : (
+              ) : canEdit ? (
                 <button
                   type="button"
-                  onClick={() => !isTrashed && setIsEditing(true)}
+                  onClick={() => setIsEditing(true)}
                   className="text-sm text-muted-foreground italic hover:text-foreground"
                 >
-                  {isTrashed ? "This note is empty." : "This note is empty. Click to start writing."}
+                  This note is empty. Click to start writing.
                 </button>
+              ) : (
+                <p className="text-sm text-muted-foreground italic">This note is empty.</p>
               )}
             </div>
           </div>
@@ -601,7 +629,7 @@ export function NoteViewer({
         title="Delete note permanently?"
         description={
           <>
-            "{note.title || "Untitled Note"}" will be removed from your Joplin server and all synced devices.
+            "{title}" will be removed from your Joplin server and all synced devices.
             This cannot be undone.
           </>
         }

@@ -1,8 +1,8 @@
 import { NoteListItem as NoteListItemType, Tag } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { formatRelativeTime } from "@/lib/format";
-import { CheckSquare, Square, FileText } from "lucide-react";
+import { formatRelativeTime, noteDisplayTitle } from "@/lib/format";
+import { CheckSquare, Square, FileText, Lock } from "lucide-react";
 
 interface NoteListItemProps {
   note: NoteListItemType & {
@@ -18,6 +18,8 @@ interface NoteListItemProps {
 
 export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteListItemProps) {
   const relativeTime = formatRelativeTime(note.updatedTime || note.createdTime);
+  const title = noteDisplayTitle(note);
+  const NoteIcon = note.encrypted ? Lock : FileText;
 
   return (
     <div
@@ -57,7 +59,7 @@ export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteList
               onKeyDown={(e) => e.stopPropagation()}
               role="checkbox"
               aria-checked={Boolean(note.todoCompleted)}
-              aria-label={`Done: ${note.title || "Untitled Note"}`}
+              aria-label={`Done: ${title}`}
               className="shrink-0 mt-0.5 rounded-sm enabled:hover:scale-110 transition-transform focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary"
             >
               {note.todoCompleted ? (
@@ -67,7 +69,7 @@ export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteList
               )}
             </button>
           ) : (
-            <FileText
+            <NoteIcon
               className={cn(
                 "h-4 w-4 shrink-0 mt-0.5 transition-colors",
                 isActive ? "text-primary" : "text-muted-foreground group-hover:text-foreground"
@@ -78,10 +80,11 @@ export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteList
             className={cn(
               "font-semibold text-sm leading-snug truncate",
               isActive ? "text-foreground font-bold" : "text-foreground/90 group-hover:text-foreground",
-              note.isTodo && note.todoCompleted && "line-through text-muted-foreground"
+              note.isTodo && note.todoCompleted && "line-through text-muted-foreground",
+              note.encrypted && "italic"
             )}
           >
-            {note.title || "Untitled Note"}
+            {title}
           </h3>
         </div>
 
@@ -93,7 +96,9 @@ export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteList
       </div>
 
       {/* Preview Snippet */}
-      {note.preview ? (
+      {note.encrypted ? (
+        <p className="text-xs text-muted-foreground italic">End-to-end encrypted, can't be shown here</p>
+      ) : note.preview ? (
         <p className="text-xs text-muted-foreground line-clamp-2 leading-relaxed">
           {note.preview}
         </p>

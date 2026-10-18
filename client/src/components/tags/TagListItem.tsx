@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Hash, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import { Hash, Lock, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import { Tag } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -16,15 +16,19 @@ interface TagListItemProps {
   tag: Tag;
   isSelected: boolean;
   onSelect: () => void;
-  onRename: () => void;
-  onDelete: () => void;
+  /** Rename and delete; without them (read-only account) the row has no actions menu */
+  onRename?: () => void;
+  onDelete?: () => void;
 }
 
 /**
- * Sidebar row for a tag with an actions menu (rename, delete).
+ * Sidebar row for a tag with an actions menu (rename, delete). An encrypted tag shows as
+ * "Encrypted tag" with a lock and has no actions, since it can't be changed here.
  */
 export function TagListItem({ tag, isSelected, onSelect, onRename, onDelete }: TagListItemProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const hasActions = Boolean(onRename && onDelete) && !tag.encrypted;
+  const Icon = tag.encrypted ? Lock : Hash;
 
   return (
     // The row is only a container: the label and the menu are sibling buttons, so no control is
@@ -47,40 +51,42 @@ export function TagListItem({ tag, isSelected, onSelect, onRename, onDelete }: T
         aria-current={isSelected ? "page" : undefined}
         className="row-label flex items-center gap-2 min-w-0 flex-1 mr-2 text-left outline-hidden"
       >
-        <Hash className={cn("h-3.5 w-3.5 shrink-0", isSelected ? "text-primary" : "text-muted-foreground")} />
-        <span className="truncate">{tag.title}</span>
+        <Icon className={cn("h-3.5 w-3.5 shrink-0", isSelected ? "text-primary" : "text-muted-foreground")} />
+        <span className={cn("truncate", tag.encrypted && "italic")}>{tag.title}</span>
         <span className="sr-only">
           , {tag.noteCount} {tag.noteCount === 1 ? "note" : "notes"}
         </span>
       </button>
 
       <div className="flex items-center gap-1 shrink-0">
-        <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              onClick={(e) => e.stopPropagation()}
-              aria-label={`Actions for tag ${tag.title}`}
-              className={cn(
-                "p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted",
-                menuOpen ? "opacity-100" : ROW_ACTION_VISIBILITY
-              )}
-            >
-              <MoreHorizontal className="h-3.5 w-3.5" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-44" onClick={(e) => e.stopPropagation()}>
-            <DropdownMenuItem onClick={onRename}>
-              <Pencil className="h-4 w-4" />
-              Rename
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={onDelete} className="text-destructive focus:text-destructive">
-              <Trash2 className="h-4 w-4" />
-              Delete tag
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {hasActions && (
+          <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                onClick={(e) => e.stopPropagation()}
+                aria-label={`Actions for tag ${tag.title}`}
+                className={cn(
+                  "p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted",
+                  menuOpen ? "opacity-100" : ROW_ACTION_VISIBILITY
+                )}
+              >
+                <MoreHorizontal className="h-3.5 w-3.5" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-44" onClick={(e) => e.stopPropagation()}>
+              <DropdownMenuItem onClick={onRename}>
+                <Pencil className="h-4 w-4" />
+                Rename
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={onDelete} className="text-destructive focus:text-destructive">
+                <Trash2 className="h-4 w-4" />
+                Delete tag
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
 
         <Badge
           variant="secondary"
