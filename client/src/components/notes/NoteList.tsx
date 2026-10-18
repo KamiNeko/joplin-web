@@ -47,6 +47,38 @@ const SORT_FIELD_LABELS: Record<SortField, string> = {
   title: "Title",
 };
 
+const SORT_STORAGE_KEY = "joplin-note-sort";
+
+interface SortChoice {
+  field: SortField;
+  order: SortOrder;
+}
+
+/** The remembered sort, so it survives switching lists (the list remounts) and reloads */
+function loadSort(): SortChoice {
+  try {
+    const stored = JSON.parse(localStorage.getItem(SORT_STORAGE_KEY) ?? "null");
+    if (
+      stored &&
+      (stored.field === "updated" || stored.field === "created" || stored.field === "title") &&
+      (stored.order === "asc" || stored.order === "desc")
+    ) {
+      return stored;
+    }
+  } catch {
+    // storage unavailable or invalid
+  }
+  return { field: "updated", order: "desc" };
+}
+
+function saveSort(sort: SortChoice) {
+  try {
+    localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify(sort));
+  } catch {
+    // storage unavailable
+  }
+}
+
 /** Direction labels that fit the field: A-Z for titles, newest/oldest for dates */
 function orderLabel(field: SortField, order: SortOrder): string {
   if (field === "title") return order === "asc" ? "A–Z" : "Z–A";
@@ -55,7 +87,8 @@ function orderLabel(field: SortField, order: SortOrder): string {
 
 /**
  * Middle column: the notes of the selected notebook, tag, trash or all notes, with a local
- * filter and sort. Remount it (via `key`) when the list changes so the filter doesn't carry over.
+ * filter and sort. Remount it (via `key`) when the list changes so the filter doesn't carry over;
+ * the sort choice is remembered in localStorage and stays.
  */
 export function NoteList({
   notes = [],
@@ -74,8 +107,13 @@ export function NoteList({
   onToggleTodo,
 }: NoteListProps) {
   const [filterText, setFilterText] = useState("");
-  const [sortField, setSortField] = useState<SortField>("updated");
-  const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
+  const [sort, setSort] = useState<SortChoice>(loadSort);
+  const { field: sortField, order: sortOrder } = sort;
+
+  const updateSort = (next: SortChoice) => {
+    setSort(next);
+    saveSort(next);
+  };
 
   const filteredAndSortedNotes = useMemo(() => {
     let result = [...notes];
@@ -104,9 +142,8 @@ export function NoteList({
 
   const changeSortField = (field: SortField) => {
     if (field === sortField) return;
-    setSortField(field);
     // Titles read naturally A-Z, dates newest first
-    setSortOrder(field === "title" ? "asc" : "desc");
+    updateSort({ field, order: field === "title" ? "asc" : "desc" });
   };
 
   const sortDescription = `${SORT_FIELD_LABELS[sortField]}, ${orderLabel(sortField, sortOrder)}`;
@@ -153,7 +190,7 @@ export function NoteList({
                   ))}
                 </DropdownMenuRadioGroup>
                 <DropdownMenuSeparator />
-                <DropdownMenuRadioGroup value={sortOrder} onValueChange={(v) => setSortOrder(v as SortOrder)}>
+                <DropdownMenuRadioGroup value={sortOrder} onValueChange={(v) => updateSort({ field: sortField, order: v as SortOrder })}>
                   {(sortField === "title" ? (["asc", "desc"] as const) : (["desc", "asc"] as const)).map((order) => (
                     <DropdownMenuRadioItem key={order} value={order}>
                       {orderLabel(sortField, order)}

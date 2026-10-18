@@ -52,49 +52,51 @@ function NotebookItem({
     onSelectNotebook(notebook.id);
   };
 
+  const title = notebook.title || "Untitled Folder";
+  const hasCount = typeof notebook.noteCount === "number" && notebook.noteCount > 0;
+
   return (
     <div className="w-full select-none">
+      {/* The row is only a container: the label, chevron and menu are sibling controls, so no
+          button is nested in another. Clicking the row's padding still selects the notebook. */}
       <div
-        role="button"
-        tabIndex={0}
-        aria-current={isSelected ? "page" : undefined}
         onClick={handleSelect}
-        onKeyDown={(e) => {
-          // Only the row itself; Enter/Space on the chevron or menu button keep their own meaning
-          if (e.target !== e.currentTarget) return;
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            handleSelect();
-          }
-        }}
         style={{ paddingLeft: `${Math.max(depth * 14 + 8, 8)}px` }}
         className={cn(
-          "group flex items-center justify-between py-1.5 pr-2.5 rounded-lg text-sm transition-all duration-150 cursor-pointer outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          "group flex items-center justify-between py-1.5 pr-2.5 rounded-lg text-sm transition-all duration-150 cursor-pointer has-[.row-label:focus-visible]:ring-1 has-[.row-label:focus-visible]:ring-ring",
           isSelected
             ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
             : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
         )}
       >
-        <div className="flex items-center gap-1.5 min-w-0 flex-1 mr-2">
-          {hasChildren ? (
-            <button
-              type="button"
-              onClick={toggleOpen}
-              className="p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-transform"
-              aria-label={`${isOpen ? "Collapse" : "Expand"} ${notebook.title || "Untitled Folder"}`}
-              aria-expanded={isOpen}
-            >
-              <ChevronRight
-                className={cn(
-                  "h-3.5 w-3.5 shrink-0 transition-transform duration-200",
-                  isOpen && "rotate-90"
-                )}
-              />
-            </button>
-          ) : (
-            <span className="w-4 shrink-0" />
-          )}
+        {hasChildren ? (
+          <button
+            type="button"
+            onClick={toggleOpen}
+            className="p-0.5 mr-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-transform shrink-0"
+            aria-label={`${isOpen ? "Collapse" : "Expand"} ${title}`}
+            aria-expanded={isOpen}
+          >
+            <ChevronRight
+              className={cn(
+                "h-3.5 w-3.5 shrink-0 transition-transform duration-200",
+                isOpen && "rotate-90"
+              )}
+            />
+          </button>
+        ) : (
+          <span className="w-4 mr-1.5 shrink-0" />
+        )}
 
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            handleSelect();
+          }}
+          aria-current={isSelected ? "page" : undefined}
+          className="row-label flex items-center gap-1.5 min-w-0 flex-1 mr-2 text-left outline-none"
+        >
           {isOpen && hasChildren ? (
             <FolderOpen
               className={cn(
@@ -110,9 +112,13 @@ function NotebookItem({
               )}
             />
           )}
-
-          <span className="truncate">{notebook.title || "Untitled Folder"}</span>
-        </div>
+          <span className="truncate">{title}</span>
+          {hasCount && (
+            <span className="sr-only">
+              , {notebook.noteCount} {notebook.noteCount === 1 ? "note" : "notes"}
+            </span>
+          )}
+        </button>
 
         {onNotebookAction && (
           <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
@@ -120,7 +126,7 @@ function NotebookItem({
               <button
                 type="button"
                 onClick={(e) => e.stopPropagation()}
-                aria-label={`Actions for ${notebook.title}`}
+                aria-label={`Actions for ${title}`}
                 className={cn(
                   "mr-1 p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted shrink-0",
                   menuOpen ? "opacity-100" : ROW_ACTION_VISIBILITY
@@ -150,9 +156,10 @@ function NotebookItem({
           </DropdownMenu>
         )}
 
-        {typeof notebook.noteCount === "number" && notebook.noteCount > 0 && (
+        {hasCount && (
           <Badge
             variant="secondary"
+            aria-hidden="true"
             className={cn(
               "px-1.5 py-0 text-[10px] font-mono shrink-0 h-4 min-w-[18px] flex items-center justify-center transition-colors",
               isSelected

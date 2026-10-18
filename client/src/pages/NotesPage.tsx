@@ -176,7 +176,8 @@ export function NotesPage() {
   };
 
   const isSearchActive = debouncedQuery.length >= 2;
-  // Remount the list per scope so its filter and sort don't carry over to another notebook or tag
+  // Remount the list per scope so its filter doesn't carry over to another notebook or tag
+  // (the sort choice is stored separately and stays)
   const listKey = selectedNotebookId ?? (selectedTagId ? `tag:${selectedTagId}` : isTrashSelected ? "trash" : "all");
 
   const emptyState = isTrashSelected

@@ -130,6 +130,8 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
           queryClient.setQueryData(["note", note.id], saved);
           invalidateLists(queryClient);
           setStatus(sameDraft(draftRef.current, toSave) ? "saved" : "dirty");
+          // An earlier failure is resolved now
+          toast.dismiss(`save-error-${note.id}`);
           return true;
         } catch (err) {
           if (err instanceof ApiError && err.status === 409) {
@@ -253,8 +255,32 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
     };
   }, [note.id, queryClient]);
 
+  // What the live region announces: uploads, failures and conflicts, and "Saved" only once a
+  // failure or conflict is resolved (routine autosaves stay silent)
+  const [announcement, setAnnouncement] = useState("");
+  const hadProblemRef = useRef(false);
+  useEffect(() => {
+    if (uploadCount > 0) {
+      setAnnouncement(`Uploading ${uploadCount} ${uploadCount === 1 ? "file" : "files"}`);
+    } else if (status === "error") {
+      hadProblemRef.current = true;
+      setAnnouncement(errorMessage ? `Save failed: ${errorMessage}` : "Save failed");
+    } else if (status === "conflict") {
+      hadProblemRef.current = true;
+      setAnnouncement("Conflict: this note was changed elsewhere");
+    } else if (status === "saved" && hadProblemRef.current) {
+      hadProblemRef.current = false;
+      setAnnouncement("Saved");
+    } else {
+      setAnnouncement("");
+    }
+  }, [uploadCount, status, errorMessage]);
+
   const changeMode = (next: EditorMode) => {
     setMode(next);
+    // On phones, split already shows as Edit, so picking Edit keeps a stored split preference
+    // for the next time the editor opens on a wider screen
+    if (isMobile && next === "edit" && loadMode() === "split") return;
     try {
       localStorage.setItem(MODE_STORAGE_KEY, next);
     } catch {
@@ -365,8 +391,12 @@ export function NoteEditor({ note, focusTitle = false, onDone }: NoteEditorProps
               />
             </>
           )}
-          {/* Announced to screen readers; below sm only the icon is visible to keep Done in view */}
-          <div role="status" aria-live="polite" className="flex items-center">
+          {/* Below sm only the icon is visible to keep Done in view. Screen readers get the
+              visually hidden live region instead of every Unsaved/Saving/Saved change. */}
+          <span role="status" aria-live="polite" className="sr-only">
+            {announcement}
+          </span>
+          <div className="flex items-center">
             {uploadCount > 0 ? (
               <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
