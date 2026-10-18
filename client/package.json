@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "node node_modules/typescript7/bin/tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
     "screenshots": "node scripts/screenshots.mjs",
@@ -66,8 +66,9 @@
     "remark-parse": "^11.0.0",
     "tailwindcss": "^3.4.19",
     "tailwindcss-animate": "^1.0.7",
-    "typescript": "~5.9.3",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
     "typescript-eslint": "^8.11.0",
+    "typescript7": "npm:typescript@^7.0.2",
     "unified": "^11.0.5",
     "vite": "^5.4.10",
     "vitest": "^3.2.4"
