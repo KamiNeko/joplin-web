@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { JoplinApiError, joplinApi } from './joplin-api.js';
+import { JoplinApiError, JoplinNotFoundError, joplinApi } from './joplin-api.js';
 import { noteCache } from './note-cache.js';
 import { deserialize, serialize } from './serializer.js';
 import { JoplinItemType, NoteDetail, RawJoplinItem } from '../types/index.js';
@@ -37,6 +37,27 @@ export function assertValidId(id: string | undefined, label = 'id'): string {
     throw new WriteValidationError(`Invalid ${label}: expected 32 lowercase hex characters`);
   }
   return id;
+}
+
+/** Refuses to modify an item that is end-to-end encrypted */
+function assertNotEncrypted(item: RawJoplinItem): void {
+  if (item.properties.encryption_applied === '1') {
+    throw new WriteValidationError('This item is end-to-end encrypted and cannot be edited here', 422);
+  }
+}
+
+const TYPE_NAMES: Partial<Record<JoplinItemType, string>> = {
+  [JoplinItemType.Note]: 'note',
+  [JoplinItemType.Folder]: 'notebook',
+  [JoplinItemType.Tag]: 'tag',
+  [JoplinItemType.Resource]: 'resource',
+};
+
+/** Refuses an item of another type than expected (e.g. a notebook id passed as a note id) */
+function assertType(item: RawJoplinItem, type: JoplinItemType): void {
+  if (item.type_ !== type) {
+    throw new WriteValidationError(`Item ${item.id} is not a ${TYPE_NAMES[type] ?? 'supported item'}`, 404);
+  }
 }
 
 /** Generates a Joplin-style id (uuid v4 without dashes) */
@@ -182,27 +203,56 @@ function defaultNoteTagProperties(id: string, noteId: string, tagId: string): Re
  * keeps its original properties, and updates the in-memory cache afterwards.
  */
 export class NoteWriterService {
+  /**
+   * Refuses every write when the account uses end-to-end encryption. Joplin Web cannot encrypt,
+   * so anything it wrote would be stored and synced in plaintext. Mirrors Joplin's
+   * SyncTargetInfo: E2EE is on when `info.json` has `e2ee.value === true`. An unreadable
+   * info.json fails closed, as Joplin desktop also refuses to sync with it.
+   */
+  private async assertWritable(sessionId: string): Promise<void> {
+    const raw = await joplinApi.getSyncTargetInfo(sessionId);
+    if (raw === null || raw.trim() === '') return;
+    let e2ee: unknown;
+    try {
+      const info = JSON.parse(raw) as { e2ee?: unknown };
+      e2ee = info.e2ee;
+    } catch {
+      throw new WriteValidationError(
+        'Cannot read the sync target info (info.json), so Joplin Web does not write to this account',
+        422
+      );
+    }
+    const enabled = e2ee === true || (typeof e2ee === 'object' && e2ee !== null && (e2ee as { value?: unknown }).value === true);
+    if (enabled) {
+      throw new WriteValidationError(
+        'This account uses end-to-end encryption. Joplin Web cannot encrypt data, so it is read-only here',
+        422
+      );
+    }
+  }
+
+  /** Reads the current server version of an item (bypassing the cache), or null if it is gone */
+  private async readFresh(sessionId: string, id: string): Promise<RawJoplinItem | null> {
+    try {
+      const raw = await joplinApi.getItemContent(sessionId, `${id}.md`);
+      return deserialize(raw, `${id}.md`);
+    } catch (err) {
+      if (err instanceof JoplinNotFoundError) return null;
+      throw err;
+    }
+  }
+
   /** Reads the current server version of an item (bypassing the cache) */
   private async fetchFresh(sessionId: string, id: string): Promise<RawJoplinItem> {
     const raw = await joplinApi.getItemContent(sessionId, `${id}.md`);
     const item = deserialize(raw, `${id}.md`);
-    if (item.properties.encryption_applied === '1') {
-      throw new WriteValidationError('This item is end-to-end encrypted and cannot be edited here', 422);
-    }
+    assertNotEncrypted(item);
     return item;
   }
 
   private async fetchFreshOfType(sessionId: string, id: string, type: JoplinItemType): Promise<RawJoplinItem> {
     const item = await this.fetchFresh(sessionId, id);
-    if (item.type_ !== type) {
-      const names: Partial<Record<JoplinItemType, string>> = {
-        [JoplinItemType.Note]: 'note',
-        [JoplinItemType.Folder]: 'notebook',
-        [JoplinItemType.Tag]: 'tag',
-        [JoplinItemType.Resource]: 'resource',
-      };
-      throw new WriteValidationError(`Item ${id} is not a ${names[type] ?? 'supported item'}`, 404);
-    }
+    assertType(item, type);
     return item;
   }
 
@@ -219,13 +269,19 @@ export class NoteWriterService {
     return written;
   }
 
-  /** Ensures a notebook exists and is not in the trash */
+  /**
+   * Ensures a notebook exists on Joplin Server, is not in the trash and is not encrypted
+   * (a cleartext note inside an encrypted notebook would defeat E2EE). Reads it fresh, so a
+   * notebook trashed or deleted by another client since the last cache refresh is refused.
+   */
   private async assertActiveNotebook(sessionId: string, notebookId: string): Promise<void> {
     assertValidId(notebookId, 'notebook id');
-    const entry = await noteCache.getEntry(sessionId);
-    const notebook = entry.notebooks.get(notebookId);
-    if (!notebook || notebook.deletedTime > 0) {
+    const notebook = await this.readFresh(sessionId, notebookId);
+    if (!notebook || notebook.type_ !== JoplinItemType.Folder || notebook.deletedTime > 0) {
       throw new WriteValidationError(`Notebook not found: ${notebookId}`, 404);
+    }
+    if (notebook.properties.encryption_applied === '1') {
+      throw new WriteValidationError('This notebook is end-to-end encrypted, so nothing can be added to it here', 422);
     }
   }
 
@@ -245,6 +301,8 @@ export class NoteWriterService {
     sessionId: string,
     input: { title?: string; body?: string; parentId: string; isTodo?: boolean }
   ): Promise<NoteDetail> {
+    assertValidId(input.parentId, 'notebook id');
+    await this.assertWritable(sessionId);
     await this.assertActiveNotebook(sessionId, input.parentId);
     const id = newId();
     await this.write(sessionId, {
@@ -269,6 +327,7 @@ export class NoteWriterService {
     }
   ): Promise<NoteDetail> {
     assertValidId(id, 'note id');
+    await this.assertWritable(sessionId);
     const current = await this.fetchFreshOfType(sessionId, id, JoplinItemType.Note);
 
     if (!changes.force && changes.baseUpdatedTime !== undefined && current.updatedTime !== changes.baseUpdatedTime) {
@@ -299,6 +358,7 @@ export class NoteWriterService {
   /** Moves a note to the trash (soft delete, syncs to Joplin's trash) */
   public async trashNote(sessionId: string, id: string): Promise<void> {
     assertValidId(id, 'note id');
+    await this.assertWritable(sessionId);
     const current = await this.fetchFreshOfType(sessionId, id, JoplinItemType.Note);
     if (current.deletedTime > 0) return;
     const props = { ...current.properties, deleted_time: String(Date.now()) };
@@ -309,23 +369,22 @@ export class NoteWriterService {
   /** Restores a note from the trash, including any trashed parent notebooks */
   public async restoreNote(sessionId: string, id: string): Promise<NoteDetail> {
     assertValidId(id, 'note id');
+    await this.assertWritable(sessionId);
     const current = await this.fetchFreshOfType(sessionId, id, JoplinItemType.Note);
-    const entry = await noteCache.getEntry(sessionId);
 
-    // Walk up the notebook chain and restore trashed ancestors first
-    const visited = new Set<string>();
-    let parentId = current.parentId;
-    while (parentId && !visited.has(parentId)) {
-      visited.add(parentId);
-      const folder = entry.notebooks.get(parentId);
-      if (!folder) break;
+    // Read the whole notebook chain first, so an encrypted ancestor stops the restore
+    // before anything is written
+    const trashedAncestors: RawJoplinItem[] = [];
+    for (const folder of await this.freshAncestors(sessionId, current.parentId)) {
       if (folder.deletedTime > 0) {
-        const fresh = await this.fetchFreshOfType(sessionId, folder.id, JoplinItemType.Folder);
-        const folderProps = { ...fresh.properties, deleted_time: '0' };
-        touch(folderProps);
-        await this.write(sessionId, { type_: JoplinItemType.Folder, title: fresh.title, body: '', properties: folderProps });
+        assertNotEncrypted(folder);
+        trashedAncestors.push(folder);
       }
-      parentId = folder.parentId;
+    }
+    for (const folder of trashedAncestors) {
+      const folderProps = { ...folder.properties, deleted_time: '0' };
+      touch(folderProps);
+      await this.write(sessionId, { type_: JoplinItemType.Folder, title: folder.title, body: '', properties: folderProps });
     }
 
     if (current.deletedTime > 0) {
@@ -336,9 +395,53 @@ export class NoteWriterService {
     return this.noteDetail(sessionId, id);
   }
 
-  /** Permanently deletes a note and its note-tag links from Joplin Server */
+  /**
+   * Permanently deletes a note and its note-tag links from Joplin Server. Like Joplin's
+   * "Delete permanently", this only applies to notes in the trash: the note itself is trashed
+   * or one of its notebooks is. The note is re-read first, so other item types, encrypted
+   * notes and notes restored or moved elsewhere by another client are refused.
+   */
   public async purgeNote(sessionId: string, id: string): Promise<void> {
     assertValidId(id, 'note id');
+    await this.assertWritable(sessionId);
+    const current = await this.readFresh(sessionId, id);
+    if (!current) {
+      // Already deleted on the server (e.g. the trash was emptied on another device)
+      await this.deleteNoteAndLinks(sessionId, id);
+      return;
+    }
+    assertType(current, JoplinItemType.Note);
+    assertNotEncrypted(current);
+
+    if (!(current.deletedTime > 0)) {
+      const ancestors = await this.freshAncestors(sessionId, current.parentId);
+      if (!ancestors.some((folder) => folder.deletedTime > 0)) {
+        throw new WriteValidationError('Only notes in the trash can be deleted permanently', 409);
+      }
+    }
+    await this.deleteNoteAndLinks(sessionId, id);
+  }
+
+  /**
+   * Reads the notebook chain above an item from Joplin Server, nearest parent first.
+   * Stops at the root, at a missing notebook or at a cycle.
+   */
+  private async freshAncestors(sessionId: string, parentId: string): Promise<RawJoplinItem[]> {
+    const chain: RawJoplinItem[] = [];
+    const visited = new Set<string>();
+    let cursor = parentId;
+    while (cursor && ID_PATTERN.test(cursor) && !visited.has(cursor)) {
+      visited.add(cursor);
+      const folder = await this.readFresh(sessionId, cursor);
+      if (!folder || folder.type_ !== JoplinItemType.Folder) break;
+      chain.push(folder);
+      cursor = folder.parentId;
+    }
+    return chain;
+  }
+
+  /** Deletes a note item and its note-tag links (callers have checked that it may be purged) */
+  private async deleteNoteAndLinks(sessionId: string, id: string): Promise<void> {
     const entry = await noteCache.getEntry(sessionId);
     const linkIds = entry.noteTags.filter((link) => link.noteId === id).map((link) => link.id);
 
@@ -363,6 +466,8 @@ export class NoteWriterService {
     const title = sanitizeTitle(input.title);
     if (!title) throw new WriteValidationError('Notebook title is required');
     const parentId = input.parentId || '';
+    if (parentId) assertValidId(parentId, 'notebook id');
+    await this.assertWritable(sessionId);
     if (parentId) await this.assertActiveNotebook(sessionId, parentId);
 
     const id = newId();
@@ -381,6 +486,7 @@ export class NoteWriterService {
     changes: { title?: string; parentId?: string }
   ): Promise<{ id: string; title: string; parentId: string }> {
     assertValidId(id, 'notebook id');
+    await this.assertWritable(sessionId);
     const current = await this.fetchFreshOfType(sessionId, id, JoplinItemType.Folder);
     const props = { ...current.properties };
 
@@ -412,71 +518,92 @@ export class NoteWriterService {
   }
 
   /**
+   * Reads a notebook subtree fresh from Joplin Server: the root, its sub-notebooks and their
+   * notes. The candidates come from the cache; each one is re-read and kept only if it still
+   * belongs to the subtree, so items moved elsewhere by another client are never touched.
+   * Every item is checked before the caller writes anything, so an encrypted item stops the
+   * whole operation up front instead of leaving it half done.
+   */
+  private async freshSubtree(
+    sessionId: string,
+    root: RawJoplinItem
+  ): Promise<{ folders: RawJoplinItem[]; notes: RawJoplinItem[] }> {
+    const entry = await noteCache.getEntry(sessionId);
+    const folders: RawJoplinItem[] = [root];
+    const folderIds = new Set([root.id]);
+
+    // Breadth-first, so a parent is always verified before its children
+    for (let i = 0; i < folders.length; i++) {
+      const parentId = folders[i].id;
+      for (const cached of entry.notebooks.values()) {
+        if (cached.parentId !== parentId || folderIds.has(cached.id) || !ID_PATTERN.test(cached.id)) continue;
+        const fresh = await this.readFresh(sessionId, cached.id);
+        if (!fresh || fresh.type_ !== JoplinItemType.Folder || fresh.parentId !== parentId) continue;
+        assertNotEncrypted(fresh);
+        folders.push(fresh);
+        folderIds.add(fresh.id);
+      }
+    }
+
+    const notes: RawJoplinItem[] = [];
+    for (const cached of entry.notes.values()) {
+      if (!folderIds.has(cached.parentId) || !ID_PATTERN.test(cached.id)) continue;
+      const fresh = await this.readFresh(sessionId, cached.id);
+      if (!fresh || fresh.type_ !== JoplinItemType.Note || !folderIds.has(fresh.parentId)) continue;
+      assertNotEncrypted(fresh);
+      notes.push(fresh);
+    }
+    return { folders, notes };
+  }
+
+  /**
    * Moves a notebook, its sub-notebooks and all their notes to the trash,
-   * matching Joplin desktop's trash behaviour.
+   * matching Joplin desktop's trash behaviour. All items are checked before the first write.
    */
   public async trashNotebook(sessionId: string, id: string): Promise<{ notebooks: number; notes: number }> {
     assertValidId(id, 'notebook id');
-    await this.fetchFreshOfType(sessionId, id, JoplinItemType.Folder);
-    const entry = await noteCache.getEntry(sessionId);
-
-    // Collect the notebook subtree
-    const folderIds: string[] = [id];
-    for (let i = 0; i < folderIds.length; i++) {
-      for (const nb of entry.notebooks.values()) {
-        if (nb.parentId === folderIds[i] && !folderIds.includes(nb.id)) folderIds.push(nb.id);
-      }
-    }
-    const folderSet = new Set(folderIds);
-    const noteIds = Array.from(entry.notes.values())
-      .filter((n) => folderSet.has(n.parentId) && !(n.deletedTime > 0))
-      .map((n) => n.id);
+    await this.assertWritable(sessionId);
+    const root = await this.fetchFreshOfType(sessionId, id, JoplinItemType.Folder);
+    const { folders, notes } = await this.freshSubtree(sessionId, root);
+    const activeNotes = notes.filter((note) => !(note.deletedTime > 0));
 
     const deletedTime = String(Date.now());
-    const trash = async (itemId: string, type: JoplinItemType) => {
-      const fresh = await this.fetchFreshOfType(sessionId, itemId, type);
-      if (fresh.deletedTime > 0) return;
-      const props = { ...fresh.properties, deleted_time: deletedTime };
+    const trash = async (item: RawJoplinItem) => {
+      if (item.deletedTime > 0) return;
+      const props = { ...item.properties, deleted_time: deletedTime };
       touch(props);
-      await this.write(sessionId, { type_: type, title: fresh.title, body: fresh.body, properties: props });
+      await this.write(sessionId, { type_: item.type_, title: item.title, body: item.body, properties: props });
     };
 
     // Notes first, so an interrupted operation never leaves visible notes under a trashed notebook
-    for (const noteId of noteIds) await trash(noteId, JoplinItemType.Note);
-    for (const folderId of folderIds.reverse()) await trash(folderId, JoplinItemType.Folder);
+    for (const note of activeNotes) await trash(note);
+    for (const folder of [...folders].reverse()) await trash(folder);
 
-    return { notebooks: folderIds.length, notes: noteIds.length };
+    return { notebooks: folders.length, notes: activeNotes.length };
   }
 
   /**
    * Permanently deletes a trashed notebook with its sub-notebooks and their notes.
-   * Only notebooks that are already in the trash can be purged.
+   * Only notebooks that are already in the trash can be purged. The cache is refreshed and
+   * every item re-read first, so notes restored or moved out by another client survive.
    */
   public async purgeNotebook(sessionId: string, id: string): Promise<{ notebooks: number; notes: number }> {
     assertValidId(id, 'notebook id');
+    await this.assertWritable(sessionId);
     const root = await this.fetchFreshOfType(sessionId, id, JoplinItemType.Folder);
     if (!(root.deletedTime > 0)) {
       throw new WriteValidationError('Only notebooks in the trash can be deleted permanently', 409);
     }
-    const entry = await noteCache.getEntry(sessionId);
+    // Pick up notes moved into or out of the notebook elsewhere since the last refresh
+    await noteCache.refreshCache(sessionId);
+    const { folders, notes } = await this.freshSubtree(sessionId, root);
 
-    const folderIds: string[] = [id];
-    for (let i = 0; i < folderIds.length; i++) {
-      for (const nb of entry.notebooks.values()) {
-        if (nb.parentId === folderIds[i] && !folderIds.includes(nb.id)) folderIds.push(nb.id);
-      }
+    for (const note of notes) await this.deleteNoteAndLinks(sessionId, note.id);
+    for (const folder of [...folders].reverse()) {
+      await joplinApi.deleteItem(sessionId, `${folder.id}.md`);
+      noteCache.removeItem(sessionId, folder.id);
     }
-    const folderSet = new Set(folderIds);
-    const noteIds = Array.from(entry.notes.values())
-      .filter((n) => folderSet.has(n.parentId))
-      .map((n) => n.id);
-
-    for (const noteId of noteIds) await this.purgeNote(sessionId, noteId);
-    for (const folderId of folderIds.reverse()) {
-      await joplinApi.deleteItem(sessionId, `${folderId}.md`);
-      noteCache.removeItem(sessionId, folderId);
-    }
-    return { notebooks: folderIds.length, notes: noteIds.length };
+    return { notebooks: folders.length, notes: notes.length };
   }
 
   // ---------------------------------------------------------------------------
@@ -495,6 +622,7 @@ export class NoteWriterService {
     const title = sanitizeTitle(file.name) || 'file';
     const dot = title.lastIndexOf('.');
     const extension = dot > 0 ? title.slice(dot + 1).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10) : '';
+    await this.assertWritable(sessionId);
 
     const id = newId();
     await joplinApi.uploadResourceBinary(sessionId, id, file.data);
@@ -510,6 +638,7 @@ export class NoteWriterService {
   /** Permanently deletes an attachment: its metadata item first, then the file */
   public async deleteResource(sessionId: string, resourceId: string): Promise<void> {
     assertValidId(resourceId, 'resource id');
+    await this.assertWritable(sessionId);
     await this.fetchFreshOfType(sessionId, resourceId, JoplinItemType.Resource);
     await joplinApi.deleteItem(sessionId, `${resourceId}.md`);
     noteCache.removeItem(sessionId, resourceId);
@@ -528,12 +657,27 @@ export class NoteWriterService {
     assertValidId(noteId, 'note id');
     const tagTitle = sanitizeTitle(title);
     if (!tagTitle) throw new WriteValidationError('Tag title is required');
-    await this.fetchFreshOfType(sessionId, noteId, JoplinItemType.Note);
+    await this.assertWritable(sessionId);
+    const note = await this.fetchFreshOfType(sessionId, noteId, JoplinItemType.Note);
+    // Like creating a note in a trashed notebook: a note in the trash cannot be tagged
+    const inTrash =
+      note.deletedTime > 0 || (await this.freshAncestors(sessionId, note.parentId)).some((f) => f.deletedTime > 0);
+    if (inTrash) throw new WriteValidationError(`Note not found: ${noteId}`, 404);
 
     const entry = await noteCache.getEntry(sessionId);
     let tag = Array.from(entry.tags.values()).find(
       (t) => t.title.trim().toLowerCase() === tagTitle.toLowerCase()
     );
+    if (tag) {
+      // Never link a note to an encrypted tag, or to one deleted elsewhere since the last refresh
+      const fresh = await this.readFresh(sessionId, tag.id);
+      if (fresh && fresh.type_ === JoplinItemType.Tag) {
+        assertNotEncrypted(fresh);
+      } else {
+        noteCache.removeItem(sessionId, tag.id);
+        tag = undefined;
+      }
+    }
     if (!tag) {
       tag = await this.write(sessionId, {
         type_: JoplinItemType.Tag,
@@ -559,6 +703,7 @@ export class NoteWriterService {
   public async removeTagFromNote(sessionId: string, noteId: string, tagId: string): Promise<NoteDetail> {
     assertValidId(noteId, 'note id');
     assertValidId(tagId, 'tag id');
+    await this.assertWritable(sessionId);
     const entry = await noteCache.getEntry(sessionId);
     const links = entry.noteTags.filter((link) => link.noteId === noteId && link.tagId === tagId);
     for (const link of links) {
@@ -573,6 +718,7 @@ export class NoteWriterService {
     assertValidId(tagId, 'tag id');
     const tagTitle = sanitizeTitle(title);
     if (!tagTitle) throw new WriteValidationError('Tag title is required');
+    await this.assertWritable(sessionId);
 
     const entry = await noteCache.getEntry(sessionId);
     const clash = Array.from(entry.tags.values()).find(
@@ -590,6 +736,7 @@ export class NoteWriterService {
   /** Deletes a tag and all its note-tag links; the notes themselves are untouched */
   public async deleteTag(sessionId: string, tagId: string): Promise<{ notes: number }> {
     assertValidId(tagId, 'tag id');
+    await this.assertWritable(sessionId);
     await this.fetchFreshOfType(sessionId, tagId, JoplinItemType.Tag);
     const entry = await noteCache.getEntry(sessionId);
     const links = entry.noteTags.filter((link) => link.tagId === tagId);

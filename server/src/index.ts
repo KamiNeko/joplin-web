@@ -7,6 +7,7 @@ const app = createApp(config);
 export const server = app.listen(config.port, () => {
   console.log('====================================================');
   console.log(` Joplin Web Backend Server running on port ${config.port}`);
+  console.log(` Version: ${config.appVersion}${config.gitSha ? ` (${config.gitSha.slice(0, 7)})` : ''}`);
   console.log(` Mode: ${config.nodeEnv}`);
   console.log(` Joplin Server: ${config.joplinServerUrl}`);
   console.log(` CORS Origin: ${JSON.stringify(config.corsOrigin)}`);

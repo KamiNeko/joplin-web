@@ -60,6 +60,9 @@ describe('auth', () => {
     const res = await api('/api/health', {}, false);
     assert.equal(res.status, 200);
     assert.equal(res.data.status, 'ok');
+    assert.equal(typeof res.data.version, 'string');
+    assert.ok(res.data.commit === null || /^[0-9a-f]{7,40}$/.test(res.data.commit));
+    assert.deepEqual(Object.keys(res.data).sort(), ['commit', 'status', 'version'], 'health exposes build metadata only');
   });
 
   test('rejects requests without a session', async () => {
@@ -168,6 +171,7 @@ describe('writing', () => {
     assert.ok((await api(`/api/notes/${noteId}`)).data.deletedTime > 0);
     assert.equal((await api(`/api/notes/${noteId}/restore`, { method: 'POST' })).status, 200);
     assert.equal((await api(`/api/notes/${noteId}`)).data.deletedTime, 0);
+    assert.equal((await api(`/api/notes/${noteId}`, { method: 'DELETE' })).status, 204); // only trashed notes can be purged
     assert.equal((await api(`/api/notes/${noteId}?permanent=true`, { method: 'DELETE' })).status, 204);
     assert.ok(!mock.items.has(`${noteId}.md`));
   });
@@ -294,6 +298,30 @@ describe('security', () => {
     assert.throws(() => loadConfig({ JOPLIN_SERVER_URL: 'file:///etc/passwd' }), ConfigError);
     assert.throws(() => loadConfig({ JOPLIN_SERVER_URL: 'https://user:pw@notes.example.com' }), ConfigError);
     assert.equal(loadConfig({ JOPLIN_SERVER_URL: 'https://notes.example.com//' }).joplinServerUrl, 'https://notes.example.com');
+  });
+
+  test('reads build metadata and only accepts plain version strings', async () => {
+    const { loadConfig } = await import('../src/config.js');
+    const base = { JOPLIN_SERVER_URL: 'https://notes.example.com' };
+    assert.equal(loadConfig(base).appVersion, 'dev');
+    assert.equal(loadConfig(base).gitSha, null);
+    const sha = '0123456789abcdef0123456789abcdef01234567';
+    const tagged = loadConfig({ ...base, APP_VERSION: '1.2.0', GIT_SHA: sha });
+    assert.equal(tagged.appVersion, '1.2.0');
+    assert.equal(tagged.gitSha, sha);
+    assert.equal(loadConfig({ ...base, APP_VERSION: '<script>', GIT_SHA: 'not-a-sha' }).appVersion, 'dev');
+    assert.equal(loadConfig({ ...base, GIT_SHA: 'not-a-sha' }).gitSha, null);
+  });
+
+  test('allows no cross-origin callers in production unless CORS_ORIGIN is set', async () => {
+    const { loadConfig } = await import('../src/config.js');
+    const base = { JOPLIN_SERVER_URL: 'https://notes.example.com' };
+    assert.equal(loadConfig({ ...base, NODE_ENV: 'production' }).corsOrigin, false);
+    assert.equal(loadConfig(base).corsOrigin, 'http://localhost:5173');
+    assert.deepEqual(loadConfig({ ...base, NODE_ENV: 'production', CORS_ORIGIN: 'https://a.test, https://b.test' }).corsOrigin, [
+      'https://a.test',
+      'https://b.test',
+    ]);
   });
 });
 

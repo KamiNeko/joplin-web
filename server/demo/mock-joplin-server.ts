@@ -11,7 +11,7 @@ import { randomBytes } from 'crypto';
  *   POST   /api/sessions                              { email, password } -> { id, user_id }
  *   POST   /logout                                    ends the session (X-API-AUTH or sessionId cookie)
  *   GET    /api/items/root:/:/children                paginated { items, has_more, cursor }
- *   GET    /api/items/root:/<name>:/content           raw item text or resource binary
+ *   GET    /api/items/root:/<name>:/content           raw item text, resource binary or info.json
  *   PUT    /api/items/root:/<name>:/content           multipart upload (field "file")
  *   DELETE /api/items/root:/<name>:
  *
@@ -39,7 +39,23 @@ export interface MockJoplinServer {
   close: () => Promise<void>;
 }
 
-const ITEM_PATH = /^\/root:\/(.*?):(\/content|\/children)?$/;
+/**
+ * Builds the sync target's `info.json` the way Joplin desktop (sync version 3) writes it.
+ * Store it under the name "info.json" to simulate an account with or without E2EE.
+ */
+export function syncTargetInfoItem(e2ee: boolean, updatedTime = Date.now()): MockItem {
+  const info = {
+    version: 3,
+    e2ee: { value: e2ee, updatedTime },
+    activeMasterKeyId: { value: e2ee ? '0123456789abcdef0123456789abcdef' : '', updatedTime },
+    masterKeys: [],
+    ppk: { value: null, updatedTime: 0 },
+    appMinVersion: '3.0.0',
+  };
+  return { content: Buffer.from(JSON.stringify(info)), contentType: 'application/json', updatedTime };
+}
+
+const ITEM_PATH =/^\/root:\/(.*?):(\/content|\/children)?$/;
 
 function parseMultipartFile(body: Buffer, contentType: string): Buffer | null {
   const boundaryMatch = /boundary=(.+)$/i.exec(contentType);

@@ -1,71 +1,93 @@
+# syntax=docker/dockerfile:1
+
+# Base image for every stage, pinned by digest for reproducible builds (Dependabot bumps the digest).
+# Keep the Node.js major in sync with .nvmrc, which CI reads.
+FROM node:24-alpine@sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f AS base
+
 # ==============================================================================
 # Stage 1: Build client (React + Vite)
 # ==============================================================================
-FROM node:20-alpine AS build-client
+FROM base AS build-client
 
 WORKDIR /build/client
 
-# Copy client dependency manifests
-COPY client/package*.json ./
-RUN npm ci || npm install
+# Playwright is only used for README screenshots; never download browsers here
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+COPY client/package.json client/package-lock.json ./
+RUN npm ci --no-audit --no-fund
 
-# Copy client source code and build static assets
 COPY client/ ./
+# Build metadata, baked into the bundle through Vite's define (see client/vite.config.ts).
+# Declared late so a new commit doesn't invalidate the cached `npm ci` layer.
+ARG APP_VERSION=dev
+ARG GIT_SHA=
 RUN npm run build
 
 # ==============================================================================
-# Stage 2: Build server (Express.js + TypeScript)
+# Stage 2: Build server (Express + TypeScript)
 # ==============================================================================
-FROM node:20-alpine AS build-server
+FROM base AS build-server
 
 WORKDIR /build/server
 
-# Copy server dependency manifests
-COPY server/package*.json ./
-RUN npm ci || npm install
+COPY server/package.json server/package-lock.json ./
+RUN npm ci --no-audit --no-fund
 
-# Copy server source code and compile TypeScript
 COPY server/ ./
 RUN npm run build
 
 # ==============================================================================
-# Stage 3: Production runtime
+# Stage 3: Server production dependencies only
 # ==============================================================================
-FROM node:20-alpine AS production
+FROM base AS server-deps
 
-# Install curl for container healthcheck
-RUN apk add --no-cache curl
+WORKDIR /build/server
 
-ENV NODE_ENV=production
-ENV PORT=3001
+COPY server/package.json server/package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
 
-WORKDIR /app
+# ==============================================================================
+# Stage 4: Production runtime
+# ==============================================================================
+FROM base AS production
 
-# Install server production dependencies
+# The container only needs `node`: drop the package managers that ship with the base image.
+# This hides them from the final filesystem (and vulnerability scanners); it doesn't shrink the base layer.
+RUN rm -rf /usr/local/lib/node_modules \
+           /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+           /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn-*
+
+# App files stay owned by root and are read-only for the runtime user; the app writes nothing to disk.
 WORKDIR /app/server
-COPY server/package*.json ./
-RUN npm ci --omit=dev || npm install --omit=dev
-
-# Copy compiled server code from build-server stage
+COPY server/package.json ./
+COPY --from=server-deps /build/server/node_modules ./node_modules
 COPY --from=build-server /build/server/dist ./dist
+COPY --from=build-client /build/client/dist /app/client/dist
 
-# Copy compiled client static files from build-client stage
-WORKDIR /app/client
-COPY --from=build-client /build/client/dist ./dist
+# Build metadata: reported by GET /api/health and the image labels (same values as the client bundle)
+ARG APP_VERSION=dev
+ARG GIT_SHA=
+ENV NODE_ENV=production \
+    PORT=3001 \
+    APP_VERSION=${APP_VERSION} \
+    GIT_SHA=${GIT_SHA}
 
-# Return to root app directory
+# The release workflow sets these too, through docker/metadata-action
+LABEL org.opencontainers.image.title="Joplin Web" \
+      org.opencontainers.image.description="Web client for self-hosted Joplin Server" \
+      org.opencontainers.image.source="https://github.com/KamiNeko/joplin-web" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.revision="${GIT_SHA}"
+
 WORKDIR /app
-
-# Ensure proper ownership for non-root node user
-RUN chown -R node:node /app
 USER node
 
-# Expose server port
+# Container port. Choose the host port with the -p mapping (HOST_PORT in docker-compose.yml).
 EXPOSE 3001
 
-# Container healthcheck
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -f http://localhost:3001/api/health || curl -f http://localhost:3001/health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --start-interval=2s --retries=3 \
+  CMD ["node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||3001)+'/api/health',{signal:AbortSignal.timeout(4000)}).then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
 
-# Start the application server (it finds /app/client/dist relative to its own files, not the cwd)
+# The server finds /app/client/dist relative to its own files, not the cwd
 CMD ["node", "server/dist/index.js"]

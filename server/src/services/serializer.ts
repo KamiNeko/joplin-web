@@ -20,9 +20,13 @@ export function deserialize(rawContent: string, defaultId?: string): RawJoplinIt
     throw new Error('Cannot deserialize non-string content');
   }
 
-  // Split lines (handling both \r\n and \n)
-  const lines = rawContent.split(/\r?\n/);
-  const properties: Record<string, string> = {};
+  // Like Joplin's BaseItem.unserialize, split on "\n" only: a "\r" inside the body (CRLF line
+  // endings, e.g. text pasted from Windows apps) is part of the note text and must survive a
+  // round trip. Property lines are trimmed below, so a trailing "\r" there is harmless.
+  const lines = rawContent.split('\n');
+  // Collected bottom-up, then stored top-down below, so properties keep their order on a
+  // round trip (Joplin itself does not depend on the order)
+  const parsedProps: Array<[string, string]> = [];
   let bodyLines: string[] = [];
 
   // Parse from bottom up
@@ -48,8 +52,15 @@ export function deserialize(rawContent: string, defaultId?: string): RawJoplinIt
         .replace(/\\\n/g, '\\n')
         .replace(/\\\r/g, '\\r');
 
-      properties[key] = value;
+      parsedProps.push([key, value]);
     }
+  }
+
+  // For a duplicated key the topmost line wins, as in Joplin's bottom-up parser
+  const properties: Record<string, string> = {};
+  for (let i = parsedProps.length - 1; i >= 0; i--) {
+    const [key, value] = parsedProps[i];
+    if (!(key in properties)) properties[key] = value;
   }
 
   // Parse type_
@@ -62,9 +73,10 @@ export function deserialize(rawContent: string, defaultId?: string): RawJoplinIt
   if (bodyLines.length > 0) {
     title = bodyLines[0];
 
-    // If there is more content after title, skip blank separator line if present
+    // If there is more content after title, skip blank separator line if present.
+    // A lone "\r" also counts: Joplin drops the second line as the separator.
     if (bodyLines.length > 1) {
-      if (bodyLines[1] === '') {
+      if (bodyLines[1] === '' || bodyLines[1] === '\r') {
         body = bodyLines.slice(2).join('\n');
       } else {
         body = bodyLines.slice(1).join('\n');
@@ -217,7 +229,8 @@ export function serialize(item: {
   // one (even when empty), otherwise a note body would be read back as its title.
   const sections: string[] = [];
   if (typeof item.title === 'string') {
-    sections.push(item.title.replace(/[\r\n]+/g, ' '));
+    // Only a line feed would break the format; a stray "\r" is written back as-is, like Joplin does
+    sections.push(item.title.replace(/\r*\n[\r\n]*/g, ' '));
   }
   if (item.body && item.type_ === JoplinItemType.Note) {
     sections.push(item.body);

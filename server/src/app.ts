@@ -99,11 +99,12 @@ export function createApp(config: AppConfig): Express {
   // CSRF protection for cookie-authenticated writes
   app.use('/api/', createOriginCheck(config));
 
-  // Health check endpoint
+  // Health check endpoint (public: build metadata only, never configuration or secrets)
   app.get('/api/health', (_req: Request, res: Response) => {
     res.status(200).json({
       status: 'ok',
-      timestamp: new Date().toISOString(),
+      version: config.appVersion,
+      commit: config.gitSha,
     });
   });
 
