@@ -156,7 +156,11 @@ describe('reading', () => {
     assert.deepEqual(await searchTitles('tag:books tag:ideas'), ['Books to Read in 2026'], 'all tags must match');
     assert.deepEqual(await searchTitles('tag:"Cooking" -miso'), ['Sourdough Starter Schedule']);
     assert.deepEqual(await searchTitles('notebook:recipes'), ['Sourdough Starter Schedule', 'Weeknight Miso Ramen']);
-    assert.deepEqual(await searchTitles('notebook:"reading list"'), ['Book Notes: Deep Work', 'Books to Read in 2026']);
+    assert.deepEqual(await searchTitles('notebook:"reading list"'), [
+      'Book Notes: Deep Work',
+      'Books to Read in 2026',
+      'Clipped: The Case for Slow Travel',
+    ]);
     assert.deepEqual(
       await searchTitles('notebook:personal -notebook:recipes'),
       ['Book train tickets to Porto', 'Lisbon Long Weekend', 'Renew passport'],
