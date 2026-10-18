@@ -16,16 +16,20 @@ router.use(requireAuth);
  * - notebook_id | notebookId: filter notes in a specific notebook
  * - tag_id | tagId: filter notes linked to a specific tag
  * - is_trash | isTrash: set to 'true' or '1' to retrieve only trashed notes
+ * - is_conflict | isConflict: set to 'true' or '1' to retrieve only conflict copies (Joplin's
+ *   "Conflicts" folder); other filters are ignored then. Other lists never include them.
  */
 router.get('/', async (req, res) => {
   const notebookId = (req.query.notebook_id || req.query.notebookId) as string | undefined;
   const tagId = (req.query.tag_id || req.query.tagId) as string | undefined;
   const isTrash = isTrueFlag(req.query.is_trash) || req.query.isTrash === 'true';
+  const isConflict = isTrueFlag(req.query.is_conflict) || req.query.isConflict === 'true';
 
   const notes = await noteCache.getNotes(req.sessionId!, {
     notebookId: notebookId ? String(notebookId) : undefined,
     tagId: tagId ? String(tagId) : undefined,
     isTrash,
+    isConflict,
   });
 
   res.status(200).json(notes);

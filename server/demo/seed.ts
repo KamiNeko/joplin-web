@@ -61,6 +61,8 @@ interface DemoNote {
   todoDueInHours?: number;
   completed?: boolean;
   deleted?: boolean;
+  /** Key of the note this is a conflict copy of (`is_conflict: 1`), as Joplin creates on a sync conflict */
+  conflictOf?: string;
 }
 
 const notebooks: Array<{ key: string; title: string; parent?: string }> = [
@@ -256,6 +258,24 @@ Return \`application/problem+json\` with a stable \`type\` URL for every error.`
     body: 'Alfa Pendular, Saturday morning. Window seats.',
   },
   {
+    // The copy Joplin desktop keeps when a sync conflict happens: same notebook, flagged as a conflict
+    key: 'roadmap-conflict',
+    notebook: 'projects',
+    conflictOf: 'roadmap',
+    title: 'Website Relaunch Roadmap',
+    hoursAgo: 3,
+    body: `## Goals
+
+Ship the new marketing site before the **end of Q4** with a faster, simpler stack.
+
+## Open tasks
+
+- [x] Collect analytics from the old site
+- [ ] Finish component library
+- [ ] Write migration plan for blog posts
+- [ ] Ask legal about the cookie banner`,
+  },
+  {
     key: 'old-draft',
     notebook: 'projects',
     title: 'Old draft: landing page copy',
@@ -318,6 +338,9 @@ export function buildDemoItems(now = Date.now()): Map<string, MockItem> {
           markup_language: '1',
           encryption_applied: '0',
           source: 'joplin-web-demo',
+          ...(note.conflictOf
+            ? { is_conflict: '1', conflict_original_id: demoId(`note-${note.conflictOf}`) }
+            : {}),
         },
       }),
       updated

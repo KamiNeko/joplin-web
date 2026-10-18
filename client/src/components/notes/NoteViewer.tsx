@@ -29,6 +29,7 @@ import {
   Circle,
   AlertCircle,
   FileText,
+  GitCompareArrows,
   History,
   MoreHorizontal,
   PencilLine,
@@ -65,6 +66,8 @@ interface NoteViewerProps {
   startInEdit?: boolean;
   onTagClick?: (tagId: string) => void;
   onNotebookClick?: (notebookId: string) => void;
+  /** Opens another note, e.g. the original of a conflict copy */
+  onOpenNote?: (noteId: string) => void;
   onClose?: () => void;
   /** Called after the note was moved to the trash or deleted permanently */
   onRemoved?: () => void;
@@ -81,6 +84,7 @@ export function NoteViewer({
   startInEdit = false,
   onTagClick,
   onNotebookClick,
+  onOpenNote,
   onClose,
   onRemoved,
 }: NoteViewerProps) {
@@ -171,6 +175,10 @@ export function NoteViewer({
   }
 
   const isTrashed = Boolean(note.deletedTime && note.deletedTime > 0);
+  // A copy Joplin kept after a sync conflict; it is listed only under Conflicts
+  const isConflict = Boolean(note.isConflict);
+  const conflictOriginalId =
+    isConflict && note.conflictOriginalId && /^[0-9a-f]{32}$/.test(note.conflictOriginalId) ? note.conflictOriginalId : null;
   // Editing would overwrite the stored draft, so the user decides about it first
   const editing = isEditing && !isTrashed && !restorable;
   const updatedRelative = formatRelativeTime(note.updatedTime);
@@ -317,6 +325,13 @@ export function NoteViewer({
             </button>
           )}
 
+          {isConflict && (
+            <Badge variant="outline" className="text-xs gap-1 bg-warning/10 text-warning border-warning/30">
+              <GitCompareArrows className="h-3 w-3" />
+              Conflict
+            </Badge>
+          )}
+
           {isTrashed && (
             <Badge
               variant="destructive"
@@ -382,7 +397,8 @@ export function NoteViewer({
                       {flatNotebooks.map((nb) => (
                         <DropdownMenuItem
                           key={nb.id}
-                          disabled={nb.id === note.notebookId}
+                          // Moving a conflict copy turns it into a regular note, its own notebook included
+                          disabled={nb.id === note.notebookId && !isConflict}
                           onClick={() => handleMove(nb.id, nb.title)}
                           style={{ paddingLeft: `${8 + nb.depth * 12}px` }}
                         >
@@ -484,6 +500,30 @@ export function NoteViewer({
       ) : (
         <ScrollArea className="flex-1 px-6 sm:px-10 lg:px-12 py-8">
           <div className="max-w-4xl mx-auto space-y-6 pb-20">
+            {isConflict && !isTrashed && (
+              <div
+                role="note"
+                className="flex flex-wrap items-center gap-x-3 gap-y-2 p-3.5 rounded-xl bg-warning/10 border border-warning/30 text-foreground text-xs"
+              >
+                <GitCompareArrows className="h-4 w-4 shrink-0 text-warning" aria-hidden="true" />
+                <span className="flex-1 min-w-48 leading-relaxed">
+                  <strong>Conflict copy.</strong> Joplin kept this version because the note was changed on two
+                  devices at once. Compare it with the original and copy what you need, then move it to the
+                  trash. Moving it to a notebook keeps it as a regular note.
+                </span>
+                {conflictOriginalId && onOpenNote && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 px-2.5 text-xs"
+                    onClick={() => onOpenNote(conflictOriginalId)}
+                  >
+                    Open original
+                  </Button>
+                )}
+              </div>
+            )}
+
             {isTrashed && (
               <div className="flex items-center gap-2.5 p-3.5 rounded-xl bg-destructive/10 border border-destructive/25 text-destructive text-xs">
                 <AlertCircle className="h-4 w-4 shrink-0" />
@@ -519,7 +559,8 @@ export function NoteViewer({
                 <TagEditor
                   noteId={note.id}
                   tags={note.tags ?? []}
-                  readOnly={isTrashed}
+                  // Tags of conflict copies are not counted or listed anywhere, so don't add any
+                  readOnly={isTrashed || isConflict}
                   onTagClick={onTagClick}
                 />
               </div>

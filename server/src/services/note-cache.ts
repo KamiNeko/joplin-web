@@ -32,6 +32,13 @@ export const IDLE_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 /** Idle entries are looked for at most this often */
 const IDLE_SWEEP_INTERVAL_MS = 60 * 1000;
 
+/**
+ * Whether a note is a conflict copy (`is_conflict: 1`). Joplin desktop and mobile create one when a
+ * sync conflict happens and keep it in the original notebook, but list it only in their virtual
+ * "Conflicts" folder: never in notebooks, "All notes", tag lists or note counts.
+ */
+export const isConflictNote = (note: RawJoplinItem): boolean => note.properties.is_conflict === '1';
+
 export interface CacheEntry {
   lastFetched: number;
   /** Last time the session read or wrote through the cache, for idle eviction */
@@ -379,7 +386,7 @@ export class NoteCacheService {
     for (const nb of activeNotebooks) {
       // Calculate note count for direct active notes belonging to this notebook
       const directNoteCount = Array.from(entry.notes.values()).filter(
-        (note) => note.parentId === nb.id && (!note.deletedTime || note.deletedTime === 0)
+        (note) => note.parentId === nb.id && (!note.deletedTime || note.deletedTime === 0) && !isConflictNote(note)
       ).length;
 
       nodeMap.set(nb.id, {
@@ -436,6 +443,8 @@ export class NoteCacheService {
     }
     const notesPerFolder = new Map<string, RawJoplinItem[]>();
     for (const note of entry.notes.values()) {
+      // Conflict copies are not trashed with their notebook (they stay in "Conflicts")
+      if (isConflictNote(note) && !(note.deletedTime > 0)) continue;
       const siblings = notesPerFolder.get(note.parentId) ?? [];
       siblings.push(note);
       notesPerFolder.set(note.parentId, siblings);
@@ -480,22 +489,21 @@ export class NoteCacheService {
 
   /**
    * Retrieves notes with optional filtering by notebook or tag
+   * By default, returns only active (non-deleted) notes whose parent notebook is also not deleted,
+   * without conflict copies.
+   *
+   * With `isConflict`, returns the conflict copies that are not trashed themselves, wherever they
+   * are (like Joplin's "Conflicts" folder, which ignores the notebook); the notebook and tag
+   * filters do not apply to them. The trash lists trashed
+   * conflict copies too, but not untrashed ones in a trashed notebook: those stay in "Conflicts".
    *
    * @param sessionId Active session ID
-   * @param filters Optional filter criteria (notebookId, tagId)
-   * @returns List of matching NoteListItems, sorted by updatedTime descending
-   */
-  /**
-   * Retrieves notes with optional filtering by notebook or tag
-   * By default, returns only active (non-deleted) notes whose parent notebook is also not deleted.
-   *
-   * @param sessionId Active session ID
-   * @param filters Optional filter criteria (notebookId, tagId, isTrash)
+   * @param filters Optional filter criteria (notebookId, tagId, isTrash, isConflict)
    * @returns List of matching NoteListItems, sorted by updatedTime descending
    */
   public async getNotes(
     sessionId: string,
-    filters?: { notebookId?: string; tagId?: string; isTrash?: boolean }
+    filters?: { notebookId?: string; tagId?: string; isTrash?: boolean; isConflict?: boolean }
   ): Promise<NoteListItem[]> {
     const entry = await this.ensureFresh(sessionId);
 
@@ -508,25 +516,33 @@ export class NoteCacheService {
 
     let matchingNotes = Array.from(entry.notes.values());
 
-    if (filters?.isTrash) {
+    if (filters?.isConflict) {
+      // Like Joplin's Conflicts folder: `is_conflict = 1 AND deleted_time = 0`
+      matchingNotes = matchingNotes.filter((n) => isConflictNote(n) && !(n.deletedTime > 0));
+    } else if (filters?.isTrash) {
       // In Trash: note itself has deletedTime > 0, OR its parent notebook is deleted
       matchingNotes = matchingNotes.filter(
-        (n) => (n.deletedTime && n.deletedTime > 0) || (n.parentId && deletedNotebookIds.has(n.parentId))
+        (n) =>
+          (n.deletedTime && n.deletedTime > 0) ||
+          (n.parentId && deletedNotebookIds.has(n.parentId) && !isConflictNote(n))
       );
     } else {
       // Active notes: note itself has no deletedTime AND parent notebook is not deleted
       matchingNotes = matchingNotes.filter(
-        (n) => (!n.deletedTime || n.deletedTime === 0) && (!n.parentId || !deletedNotebookIds.has(n.parentId))
+        (n) =>
+          (!n.deletedTime || n.deletedTime === 0) &&
+          (!n.parentId || !deletedNotebookIds.has(n.parentId)) &&
+          !isConflictNote(n)
       );
     }
 
     // Filter by notebook if specified
-    if (filters?.notebookId) {
+    if (filters?.notebookId && !filters.isConflict) {
       matchingNotes = matchingNotes.filter((n) => n.parentId === filters.notebookId);
     }
 
     // Filter by tag if specified
-    if (filters?.tagId) {
+    if (filters?.tagId && !filters.isConflict) {
       const taggedNoteIds = new Set(
         entry.noteTags.filter((link) => link.tagId === filters.tagId).map((link) => link.noteId)
       );
@@ -548,6 +564,7 @@ export class NoteCacheService {
       isTodo: n.isTodo,
       todoCompleted: Boolean(n.todoCompleted),
       todoDue: n.todoDue,
+      isConflict: isConflictNote(n),
     }));
   }
 
@@ -571,8 +588,11 @@ export class NoteCacheService {
       ? { id: notebookItem.id, title: notebookItem.title || 'Untitled Notebook' }
       : null;
 
-    // Check if parent notebook is deleted
-    const isParentDeleted = notebookItem ? Boolean(notebookItem.deletedTime && notebookItem.deletedTime > 0) : false;
+    // Check if parent notebook is deleted. A conflict copy is not in the trash with its notebook:
+    // Joplin keeps it in "Conflicts" until it is trashed itself.
+    const isConflict = isConflictNote(note);
+    const isParentDeleted =
+      notebookItem && !isConflict ? Boolean(notebookItem.deletedTime && notebookItem.deletedTime > 0) : false;
     const effectiveDeletedTime = (note.deletedTime && note.deletedTime > 0)
       ? note.deletedTime
       : (isParentDeleted ? (notebookItem?.deletedTime || 1) : 0);
@@ -603,6 +623,8 @@ export class NoteCacheService {
       isTodo: note.isTodo,
       todoCompleted: Boolean(note.todoCompleted),
       todoDue: note.todoDue,
+      isConflict,
+      conflictOriginalId: isConflict ? note.properties.conflict_original_id || '' : '',
       properties: note.properties,
     };
   }
@@ -629,6 +651,7 @@ export class NoteCacheService {
           const note = entry.notes.get(link.noteId);
           if (
             note &&
+            !isConflictNote(note) &&
             (!note.deletedTime || note.deletedTime === 0) &&
             (!note.parentId || !deletedNotebookIds.has(note.parentId))
           ) {
@@ -672,8 +695,9 @@ export class NoteCacheService {
     const results: Array<SearchResult & { relevanceScore: number }> = [];
 
     for (const note of entry.notes.values()) {
-      // Exclude trashed notes from search
+      // Exclude trashed notes and conflict copies from search
       if (
+        isConflictNote(note) ||
         (note.deletedTime && note.deletedTime > 0) ||
         (note.parentId && deletedNotebookIds.has(note.parentId))
       ) {
@@ -713,6 +737,7 @@ export class NoteCacheService {
           isTodo: note.isTodo,
           todoCompleted: Boolean(note.todoCompleted),
           todoDue: note.todoDue,
+          isConflict: false,
           matches: {
             inTitle,
             inBody,
