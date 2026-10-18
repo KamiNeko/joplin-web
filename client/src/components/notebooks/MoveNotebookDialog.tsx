@@ -52,7 +52,8 @@ export function MoveNotebookDialog({ notebook, notebooks, isPending = false, onO
 
   const query = filter.trim().toLowerCase();
   const choices = useMemo(() => {
-    const flat = flattenNotebooks(notebooks).filter((nb) => !blockedIds.has(nb.id));
+    // Encrypted notebooks can't take a cleartext sub-notebook
+    const flat = flattenNotebooks(notebooks).filter((nb) => !blockedIds.has(nb.id) && !nb.encrypted);
     return query ? flat.filter((nb) => nb.title.toLowerCase().includes(query)) : flat;
   }, [notebooks, blockedIds, query]);
 

@@ -42,6 +42,14 @@ describe("NoteListItem", () => {
     expect(screen.getByText("Empty note")).toBeTruthy();
   });
 
+  it("marks an end-to-end encrypted note instead of showing an empty one", () => {
+    render(<NoteListItem note={{ ...baseNote, title: "", preview: "", encrypted: true }} />);
+    expect(screen.getByRole("heading", { name: "Encrypted note" })).toBeTruthy();
+    expect(screen.getByText(/End-to-end encrypted/)).toBeTruthy();
+    expect(screen.queryByText("Empty note")).toBeNull();
+    expect(screen.queryByText("Untitled Note")).toBeNull();
+  });
+
   it("opens the note on click, Enter and Space", () => {
     const onClick = vi.fn();
     render(<NoteListItem note={baseNote} onClick={onClick} />);

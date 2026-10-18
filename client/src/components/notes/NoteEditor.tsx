@@ -1,9 +1,9 @@
 import { useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, Check, Circle, Columns2, Eye, FileCode, Loader2, Paperclip, PencilLine } from "lucide-react";
+import { AlertTriangle, Check, Circle, Columns2, Eye, FileCode, Loader2, Lock, Paperclip, PencilLine } from "lucide-react";
 import { MARKUP_HTML, Note } from "@/lib/types";
-import { ApiError, getConflictNote } from "@/lib/api";
+import { ApiError, getConflictNote, isReadOnlyError } from "@/lib/api";
 import { invalidateLists } from "@/hooks/use-mutations";
 import { useNoteSaver } from "@/hooks/use-note-saver";
 import { setTaskChecked } from "@/lib/tasks";
@@ -24,6 +24,7 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { getConnectionSnapshot, isTemporaryFailure, setNoteUnsaved } from "@/lib/connection";
 import { createRetryScheduler, RetryScheduler } from "@/lib/retry";
 import { clearDraft, saveDraft, StoredDraft } from "@/lib/drafts";
+import { asSentence } from "@/lib/format";
 
 const AUTOSAVE_DELAY_MS = 1500;
 const MODE_STORAGE_KEY = "joplin-editor-mode";
@@ -80,6 +81,9 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
   });
   const [status, setStatus] = useState<SaveStatus>(initialDraft ? "dirty" : "saved");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // The last save was refused as read-only (422, e.g. end-to-end encryption): retrying won't help,
+  // so the server's reason is shown in the editor instead of only in the indicator's tooltip
+  const [refused, setRefused] = useState(false);
   const [conflict, setConflict] = useState<Note | null>(null);
   // A newer version arrived through a refresh while the editor is open
   const [remoteChange, setRemoteChange] = useState<Note | null>(null);
@@ -137,6 +141,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
 
       setStatus("saving");
       setErrorMessage(null);
+      setRefused(false);
       return saver.send(
         { title: toSave.title, body: toSave.body, force },
         {
@@ -162,11 +167,15 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
             const message = err instanceof Error ? err.message : "Save failed";
             setStatus("error");
             setErrorMessage(message);
+            setRefused(isReadOnlyError(err));
             // A closed editor reports through its flush; an expired session through its dialog
             if (unmountedRef.current || isSessionExpired(err)) return;
             // The indicator only shows "Save failed"; the toast carries the reason (one per note,
             // so repeated autosave failures replace it instead of stacking)
-            toast.error("Could not save note", { id: `save-error-${note.id}`, description: message });
+            toast.error(isReadOnlyError(err) ? "This note can't be saved here" : "Could not save note", {
+              id: `save-error-${note.id}`,
+              description: message,
+            });
             // Server unreachable or rate limited: try again with backoff, no sooner than the server's
             // Retry-After (and right away when the browser is back online)
             if (err instanceof ApiError && isTemporaryFailure(err.status) && navigator.onLine) {
@@ -280,9 +289,11 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
     return () => {
       clearTimer();
       const pending = { ...draftRef.current, body: draftRef.current.body.replace(UPLOAD_PLACEHOLDER, "") };
-      const reportLost = () => {
+      const reportLost = (err?: unknown) => {
+        // A refusal (422) says why, e.g. end-to-end encryption; other failures only that it failed
+        const reason = isReadOnlyError(err) ? `${asSentence(err.message)} ` : "";
         toast.error(`Could not save "${pending.title || "Untitled"}"`, {
-          description: "Your changes are kept on this device. Open the note again to restore them.",
+          description: `${reason}Your changes are kept on this device. Open the note again to restore them.`,
           action: {
             label: "Copy text",
             onClick: () => void navigator.clipboard?.writeText(pending.body),
@@ -311,7 +322,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
               clearDraft(note.id);
             },
             onError: (err) => {
-              if (!isSessionExpired(err)) reportLost();
+              if (!isSessionExpired(err)) reportLost(err);
             },
           }
         );
@@ -504,6 +515,19 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
           </Button>
         </div>
       </div>
+
+      {refused && status === "error" && errorMessage && (
+        <div
+          role="alert"
+          className="mx-4 sm:mx-6 mt-3 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-foreground"
+        >
+          <Lock className="h-3.5 w-3.5 mt-px shrink-0 text-destructive" aria-hidden="true" />
+          <span>
+            <strong className="font-semibold">Not saved.</strong> {asSentence(errorMessage)}{" "}
+            <span className="text-muted-foreground">Your text is kept on this device.</span>
+          </span>
+        </div>
+      )}
 
       {remoteChange && status !== "conflict" && (
         <div

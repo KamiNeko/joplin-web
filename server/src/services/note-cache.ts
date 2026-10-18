@@ -38,6 +38,18 @@ const IDLE_SWEEP_INTERVAL_MS = 60 * 1000;
  * "Conflicts" folder: never in notebooks, "All notes", tag lists or note counts.
  */
 export const isConflictNote = (note: RawJoplinItem): boolean => note.properties.is_conflict === '1';
+/** True for an item stored end-to-end encrypted: its title and content are only in the cipher text */
+const isEncrypted = (item: RawJoplinItem): boolean => item.properties.encryption_applied === '1';
+
+/**
+ * Display title of a notebook. An encrypted one has no readable title (Joplin only keeps ids,
+ * `parent_id`, timestamps and the cipher text in clear), so it gets a fixed label.
+ */
+const notebookTitle = (item: RawJoplinItem): string =>
+  isEncrypted(item) ? 'Encrypted notebook' : item.title || 'Untitled Notebook';
+
+/** Display title of a tag, see `notebookTitle` */
+const tagTitle = (item: RawJoplinItem): string => (isEncrypted(item) ? 'Encrypted tag' : item.title || 'Untitled Tag');
 
 export interface CacheEntry {
   lastFetched: number;
@@ -391,10 +403,11 @@ export class NoteCacheService {
 
       nodeMap.set(nb.id, {
         id: nb.id,
-        title: nb.title || 'Untitled Notebook',
+        title: notebookTitle(nb),
         parentId: nb.parentId || '',
         children: [],
         noteCount: directNoteCount,
+        encrypted: isEncrypted(nb),
         createdTime: nb.createdTime,
         updatedTime: nb.updatedTime,
         deletedTime: nb.deletedTime,
@@ -476,12 +489,13 @@ export class NoteCacheService {
         }
         return {
           id: root.id,
-          title: root.title || 'Untitled Notebook',
+          title: notebookTitle(root),
           parentId: root.parentId || '',
           deletedTime: root.deletedTime,
           noteCount,
           notebookCount,
           earlierNoteCount,
+          encrypted: isEncrypted(root),
         };
       })
       .sort((a, b) => b.deletedTime - a.deletedTime);
@@ -565,6 +579,7 @@ export class NoteCacheService {
       todoCompleted: Boolean(n.todoCompleted),
       todoDue: n.todoDue,
       isConflict: isConflictNote(n),
+      encrypted: isEncrypted(n),
     }));
   }
 
@@ -585,7 +600,7 @@ export class NoteCacheService {
     // Resolve parent notebook
     const notebookItem = note.parentId ? entry.notebooks.get(note.parentId) : null;
     const notebook = notebookItem
-      ? { id: notebookItem.id, title: notebookItem.title || 'Untitled Notebook' }
+      ? { id: notebookItem.id, title: notebookTitle(notebookItem) }
       : null;
 
     // Check if parent notebook is deleted. A conflict copy is not in the trash with its notebook:
@@ -605,7 +620,7 @@ export class NoteCacheService {
     const tags = linkedTagIds
       .map((tagId) => entry.tags.get(tagId))
       .filter((t): t is RawJoplinItem => Boolean(t))
-      .map((t) => ({ id: t.id, title: t.title || 'Untitled Tag' }));
+      .map((t) => ({ id: t.id, title: tagTitle(t) }));
 
     return {
       id: note.id,
@@ -626,6 +641,7 @@ export class NoteCacheService {
       isConflict,
       conflictOriginalId: isConflict ? note.properties.conflict_original_id || '' : '',
       markupLanguage: markupLanguageOf(note.properties),
+      encrypted: isEncrypted(note),
       properties: note.properties,
     };
   }
@@ -663,8 +679,9 @@ export class NoteCacheService {
 
       tagsList.push({
         id: tag.id,
-        title: tag.title || 'Untitled Tag',
+        title: tagTitle(tag),
         noteCount: noteIds.size,
+        encrypted: isEncrypted(tag),
       });
     }
 
@@ -739,6 +756,7 @@ export class NoteCacheService {
           todoCompleted: Boolean(note.todoCompleted),
           todoDue: note.todoDue,
           isConflict: false,
+          encrypted: isEncrypted(note),
           matches: {
             inTitle,
             inBody,

@@ -6,7 +6,7 @@ import {
   Navigate,
   useLocation,
 } from "react-router-dom";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MutationCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider, useAuth } from "@/hooks/use-auth";
 import { ThemeProvider } from "@/components/common/ThemeProvider";
 import { LoginPage } from "@/pages/LoginPage";
@@ -16,10 +16,13 @@ import { Loader2 } from "lucide-react";
 import { ApiError } from "@/lib/api";
 import { useConnectionState } from "@/hooks/use-connection";
 import { SessionExpiredDialog } from "@/components/common/Dialogs";
+import { recheckWriteStateAfter } from "@/hooks/use-write-state";
 import { AppCrashScreen, ErrorBoundary } from "@/components/common/ErrorBoundary";
 
 // Focus refetches are handled by useAutoRefresh (throttled, skips notes with unsaved edits)
-const queryClient = new QueryClient({
+const queryClient: QueryClient = new QueryClient({
+  // A write refused as read-only (422) may mean E2EE was turned on elsewhere: ask again
+  mutationCache: new MutationCache({ onError: (error) => recheckWriteStateAfter(queryClient, error) }),
   defaultOptions: {
     queries: {
       refetchOnWindowFocus: false,

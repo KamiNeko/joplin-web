@@ -53,6 +53,8 @@ interface SidebarProps {
   onSearchChange: (query: string) => void;
   onCloseMobile?: () => void;
   className?: string;
+  /** The account can't be written: no notebook or tag actions */
+  readOnly?: boolean;
 }
 
 export function Sidebar({
@@ -71,6 +73,7 @@ export function Sidebar({
   onSearchChange,
   onCloseMobile,
   className,
+  readOnly = false,
 }: SidebarProps) {
   const notebooksQuery = useNotebooks();
   const tagsQuery = useTags();
@@ -334,15 +337,17 @@ export function Sidebar({
                 <FolderTree className="h-3 w-3" />
                 Notebooks
               </span>
-              <button
-                type="button"
-                onClick={() => setDialog({ kind: "create", parent: null })}
-                className="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-sidebar-accent"
-                aria-label="New notebook"
-                title="New notebook"
-              >
-                <Plus className="h-3.5 w-3.5" />
-              </button>
+              {!readOnly && (
+                <button
+                  type="button"
+                  onClick={() => setDialog({ kind: "create", parent: null })}
+                  className="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-sidebar-accent"
+                  aria-label="New notebook"
+                  title="New notebook"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
+              )}
             </div>
 
             {isLoadingNotebooks ? (
@@ -363,7 +368,7 @@ export function Sidebar({
                 notebooks={notebooks || []}
                 selectedNotebookId={selectedNotebookId}
                 onSelectNotebook={onSelectNotebook}
-                onNotebookAction={handleNotebookAction}
+                onNotebookAction={readOnly ? undefined : handleNotebookAction}
               />
             )}
           </div>
@@ -406,8 +411,8 @@ export function Sidebar({
                     tag={tag}
                     isSelected={selectedTagId === tag.id}
                     onSelect={() => onSelectTag(tag.id)}
-                    onRename={() => setDialog({ kind: "rename-tag", tag })}
-                    onDelete={() => setDialog({ kind: "delete-tag", tag })}
+                    onRename={readOnly ? undefined : () => setDialog({ kind: "rename-tag", tag })}
+                    onDelete={readOnly ? undefined : () => setDialog({ kind: "delete-tag", tag })}
                   />
                 ))}
               </div>

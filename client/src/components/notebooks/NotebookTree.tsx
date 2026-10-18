@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Notebook } from "@/lib/types";
-import { ChevronRight, Folder, FolderInput, FolderOpen, FolderPlus, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import { ChevronRight, Folder, FolderInput, FolderOpen, FolderPlus, Lock, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -18,7 +18,7 @@ interface NotebookTreeProps {
   notebooks: Notebook[];
   selectedNotebookId?: string | null;
   onSelectNotebook: (id: string) => void;
-  /** Enables the per-notebook actions menu */
+  /** Enables the per-notebook actions menu (never shown for encrypted notebooks, which can't be changed here) */
   onNotebookAction?: (action: NotebookAction, notebook: Notebook) => void;
   depth?: number;
 }
@@ -53,6 +53,7 @@ function NotebookItem({
   };
 
   const title = notebook.title || "Untitled Folder";
+  const FolderIcon = notebook.encrypted ? Lock : isOpen && hasChildren ? FolderOpen : Folder;
   const hasCount = typeof notebook.noteCount === "number" && notebook.noteCount > 0;
 
   return (
@@ -97,22 +98,13 @@ function NotebookItem({
           aria-current={isSelected ? "page" : undefined}
           className="row-label flex items-center gap-1.5 min-w-0 flex-1 mr-2 text-left outline-hidden"
         >
-          {isOpen && hasChildren ? (
-            <FolderOpen
-              className={cn(
-                "h-4 w-4 shrink-0 transition-colors",
-                isSelected ? "text-primary" : "text-muted-foreground group-hover:text-foreground"
-              )}
-            />
-          ) : (
-            <Folder
-              className={cn(
-                "h-4 w-4 shrink-0 transition-colors",
-                isSelected ? "text-primary" : "text-muted-foreground group-hover:text-foreground"
-              )}
-            />
-          )}
-          <span className="truncate">{title}</span>
+          <FolderIcon
+            className={cn(
+              "h-4 w-4 shrink-0 transition-colors",
+              isSelected ? "text-primary" : "text-muted-foreground group-hover:text-foreground"
+            )}
+          />
+          <span className={cn("truncate", notebook.encrypted && "italic")}>{title}</span>
           {hasCount && (
             <span className="sr-only">
               , {notebook.noteCount} {notebook.noteCount === 1 ? "note" : "notes"}
@@ -120,7 +112,7 @@ function NotebookItem({
           )}
         </button>
 
-        {onNotebookAction && (
+        {onNotebookAction && !notebook.encrypted && (
           <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
             <DropdownMenuTrigger asChild>
               <button

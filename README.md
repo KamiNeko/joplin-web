@@ -181,7 +181,7 @@ Open `http://localhost:5173` and sign in with `demo@joplin-web.test` / `demo`. E
 
 ### Current limitations
 
-- **End-to-end encryption (E2EE) is not supported.** Encrypted items can't be read, and Joplin Web refuses all changes while E2EE is enabled for the account.
+- **End-to-end encryption (E2EE) is not supported.** An account with E2EE enabled opens read-only, with a banner saying so: editing, new notes and notebooks, tags and uploads are not offered. Encrypted notes, notebooks and tags are listed as "Encrypted" but can't be read. To try it, start the demo with `DEMO_E2EE=1 npm --prefix server run demo`.
 - Joplin Web is built and tested against self-hosted Joplin Server. Joplin Cloud is untested.
 - Note history (revisions) and plugins are not available.
 

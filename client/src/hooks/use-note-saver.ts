@@ -3,6 +3,7 @@ import { QueryClient, useQueryClient } from "@tanstack/react-query";
 import { NoteUpdate, updateNote } from "@/lib/api";
 import { Note } from "@/lib/types";
 import { invalidateLists, updateNoteInLists } from "./use-mutations";
+import { recheckWriteStateAfter } from "./use-write-state";
 
 export interface NoteSaveHandlers {
   /** What to put into the ["note", id] query instead of the saved note (e.g. to keep a newer optimistic body) */
@@ -67,6 +68,7 @@ export function createNoteSaver(
           onSaved?.(saved);
           return true;
         } catch (err) {
+          recheckWriteStateAfter(queryClient, err);
           onError?.(err);
           return false;
         } finally {

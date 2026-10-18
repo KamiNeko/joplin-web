@@ -13,6 +13,8 @@ import { useSearch } from "@/hooks/use-search";
 import { useCreateNote, useUpdateNote } from "@/hooks/use-mutations";
 import { findNotebookById, flattenNotebooks } from "@/lib/notebooks";
 import { toast } from "sonner";
+import { noteDisplayTitle } from "@/lib/format";
+import { useWriteState } from "@/hooks/use-write-state";
 
 /** The list shown in the middle column: everything, one notebook, one tag, the conflicts or the trash */
 type ListScope =
@@ -76,6 +78,8 @@ export function NotesPage() {
   const [editIntentNoteId, setEditIntentNoteId] = useState<string | null>(null);
   const createNote = useCreateNote();
   const updateNote = useUpdateNote();
+  // An account with end-to-end encryption is read-only: no editing, creating, tagging or uploads
+  const { readOnly, reason: readOnlyReason } = useWriteState();
 
   // TanStack queries
   const { data: notebooks } = useNotebooks();
@@ -126,7 +130,7 @@ export function NotesPage() {
     return undefined;
   }, [currentNotebook, selectedTagId, isTrashSelected, isConflictsSelected, tags]);
 
-  const noteTitle = fullNote ? fullNote.title || "Untitled Note" : undefined;
+  const noteTitle = fullNote ? noteDisplayTitle(fullNote) : undefined;
 
   // Handlers only navigate; the selection follows from the URL
   const showList = (next: ListScope) => {
@@ -154,10 +158,15 @@ export function NotesPage() {
   };
 
   // New notes go into the selected notebook, else the open note's notebook, else the first notebook
+  // (never an encrypted one: the server refuses cleartext notes in it)
   const targetNotebookId = useMemo(() => {
-    if (selectedNotebookId && findNotebookById(notebooks, selectedNotebookId)) return selectedNotebookId;
-    if (fullNote?.notebookId && findNotebookById(notebooks, fullNote.notebookId)) return fullNote.notebookId;
-    return flattenNotebooks(notebooks)[0]?.id ?? null;
+    const usable = (id: string | null | undefined) => {
+      const nb = findNotebookById(notebooks, id);
+      return Boolean(nb && !nb.encrypted);
+    };
+    if (usable(selectedNotebookId)) return selectedNotebookId;
+    if (usable(fullNote?.notebookId)) return fullNote!.notebookId;
+    return flattenNotebooks(notebooks).find((nb) => !nb.encrypted)?.id ?? null;
   }, [selectedNotebookId, fullNote, notebooks]);
 
   const handleCreateNote = (isTodo: boolean) => {
@@ -223,6 +232,8 @@ export function NotesPage() {
       isSearchActive={isSearchActive}
       searchQuery={searchQuery}
       onSearchChange={setSearchQuery}
+      readOnly={readOnly}
+      readOnlyReason={readOnlyReason}
       sidebar={({ onCloseMobile }) => (
         <Sidebar
           selectedNotebookId={selectedNotebookId}
@@ -254,6 +265,7 @@ export function NotesPage() {
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
           onCloseMobile={onCloseMobile}
+          readOnly={readOnly}
         />
       )}
     >
@@ -291,10 +303,18 @@ export function NotesPage() {
               selectedNoteId={selectedNoteId}
               onSelectNote={handleSelectNote}
               title={notebookTitle || "All Notes"}
-              onCreateNote={isTrashSelected || isConflictsSelected ? undefined : handleCreateNote}
+              onCreateNote={
+                isTrashSelected || isConflictsSelected || readOnly || currentNotebook?.encrypted ? undefined : handleCreateNote
+              }
               isCreating={createNote.isPending}
-              onToggleTodo={isTrashSelected || isConflictsSelected ? undefined : handleToggleTodo}
-              renderLeading={isTrashSelected ? (filter) => <TrashedNotebooks filterText={filter} notesHeading={(notes?.length ?? 0) > 0} /> : undefined}
+              onToggleTodo={isTrashSelected || isConflictsSelected || readOnly ? undefined : handleToggleTodo}
+              renderLeading={
+                isTrashSelected
+                  ? (filter) => (
+                      <TrashedNotebooks filterText={filter} notesHeading={(notes?.length ?? 0) > 0} readOnly={readOnly} />
+                    )
+                  : undefined
+              }
               subtitle={
                 isTrashSelected
                   ? "Deleted notes and notebooks"
@@ -320,6 +340,7 @@ export function NotesPage() {
             key={selectedNoteId ?? "none"}
             note={selectedNoteId ? fullNote : null}
             notebooks={notebooks}
+            readOnly={readOnly}
             startInEdit={editIntentNoteId !== null && editIntentNoteId === selectedNoteId}
             onRemoved={handleNoteRemoved}
             isLoading={isLoadingNote}

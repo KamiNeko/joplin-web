@@ -10,7 +10,7 @@ import {
   defaultResourceProperties,
   defaultTagProperties,
 } from './item-defaults.js';
-import { JoplinItemType, NoteDetail, RawJoplinItem } from '../types/index.js';
+import { JoplinItemType, NoteDetail, RawJoplinItem, WriteState } from '../types/index.js';
 
 /**
  * Thrown when an item changed on Joplin Server since the client loaded it
@@ -144,6 +144,25 @@ export class NoteWriterService {
         'This account has end-to-end encrypted data. Joplin Web cannot encrypt data, so it is read-only here',
         422
       );
+    }
+  }
+
+  /**
+   * Tells the client up front whether writes to the account will be accepted, using the same
+   * check every write runs (`assertWritable`), so the answer and the 422 refusals always agree.
+   * Only that refusal becomes `writable: false`; other failures (expired session, Joplin Server
+   * unreachable) are thrown as usual. Single encrypted items in a writable account are not
+   * covered here: they are flagged `encrypted` in the lists and refused one by one.
+   */
+  public async getWriteState(sessionId: string): Promise<WriteState> {
+    try {
+      await this.assertWritable(sessionId);
+      return { writable: true };
+    } catch (err) {
+      if (err instanceof WriteValidationError && err.status === 422) {
+        return { writable: false, reason: err.message };
+      }
+      throw err;
     }
   }
 

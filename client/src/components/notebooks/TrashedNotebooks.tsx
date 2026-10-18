@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { toast } from "sonner";
-import { Folder, RotateCcw, Trash2 } from "lucide-react";
+import { Folder, Lock, RotateCcw, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ConfirmDialog } from "@/components/common/Dialogs";
@@ -18,9 +18,18 @@ const headingClass = "px-1 pb-1.5 text-[11px] font-semibold text-muted-foregroun
 /**
  * Trashed notebooks at the top of the trash list, each with Restore and Delete permanently.
  * `filterText` is the note list's filter, applied to notebook titles as well. With
- * `notesHeading`, a "Notes" heading follows the notebooks so the two groups read apart.
+ * `notesHeading`, a "Notes" heading follows the notebooks so the two groups read apart. On a
+ * read-only account, and for encrypted notebooks, Restore and Delete are not offered.
  */
-export function TrashedNotebooks({ filterText = "", notesHeading = false }: { filterText?: string; notesHeading?: boolean }) {
+export function TrashedNotebooks({
+  filterText = "",
+  notesHeading = false,
+  readOnly = false,
+}: {
+  filterText?: string;
+  notesHeading?: boolean;
+  readOnly?: boolean;
+}) {
   const query = useTrashedNotebooks();
   const restore = useRestoreNotebook();
   const purge = usePurgeNotebook();
@@ -77,38 +86,44 @@ export function TrashedNotebooks({ filterText = "", notesHeading = false }: { fi
       <ul className="space-y-2">
         {notebooks.map((nb) => {
           const busy = (restore.isPending && restore.variables === nb.id) || (purge.isPending && purge.variables === nb.id);
+          const canChange = !readOnly && !nb.encrypted;
+          const Icon = nb.encrypted ? Lock : Folder;
           return (
             <li
               key={nb.id}
               className="flex items-center gap-2.5 p-3 rounded-xl border border-border/40 bg-card/20"
             >
-              <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-foreground truncate">{nb.title}</p>
+                <p className={`text-sm font-medium text-foreground truncate${nb.encrypted ? " italic" : ""}`}>{nb.title}</p>
                 <p className="text-xs text-muted-foreground truncate first-letter:uppercase">{contentsLabel(nb)}</p>
               </div>
-              <Button
-                size="icon"
-                variant="ghost"
-                className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
-                onClick={() => handleRestore(nb)}
-                disabled={busy}
-                aria-label={`Restore ${nb.title}`}
-                title="Restore"
-              >
-                <RotateCcw className="h-3.5 w-3.5" />
-              </Button>
-              <Button
-                size="icon"
-                variant="ghost"
-                className="h-8 w-8 shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
-                onClick={() => setConfirmPurge(nb)}
-                disabled={busy}
-                aria-label={`Delete ${nb.title} permanently`}
-                title="Delete permanently"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </Button>
+              {canChange && (
+                <>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+                    onClick={() => handleRestore(nb)}
+                    disabled={busy}
+                    aria-label={`Restore ${nb.title}`}
+                    title="Restore"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-8 w-8 shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
+                    onClick={() => setConfirmPurge(nb)}
+                    disabled={busy}
+                    aria-label={`Delete ${nb.title} permanently`}
+                    title="Delete permanently"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </>
+              )}
             </li>
           );
         })}

@@ -7,6 +7,8 @@ export interface Notebook {
   parentId: string;
   children: Notebook[];
   noteCount: number;
+  /** Stored end-to-end encrypted: title and content can't be read (or changed) here */
+  encrypted?: boolean;
 }
 
 /**
@@ -23,6 +25,8 @@ export interface TrashedNotebook {
   notebookCount: number;
   /** Notes inside that were trashed on their own earlier: not restored, but deleted with it */
   earlierNoteCount: number;
+  /** Stored end-to-end encrypted: title and content can't be read (or changed) here */
+  encrypted?: boolean;
 }
 
 /**
@@ -41,6 +45,8 @@ export interface NoteListItem {
   todoCompleted?: boolean;
   /** A conflict copy Joplin kept after a sync conflict (listed only under Conflicts) */
   isConflict?: boolean;
+  /** Stored end-to-end encrypted: title and content can't be read (or changed) here */
+  encrypted?: boolean;
 }
 
 /**
@@ -67,6 +73,8 @@ export interface Note {
   conflictOriginalId?: string;
   /** Joplin's `markup_language`: 1 = Markdown, 2 = HTML (see `MARKUP_HTML`) */
   markupLanguage?: number;
+  /** Stored end-to-end encrypted: title and content can't be read (or changed) here */
+  encrypted?: boolean;
 }
 
 /** `markupLanguage` of HTML notes, e.g. pages saved with the Joplin Web Clipper */
@@ -79,6 +87,18 @@ export interface Tag {
   id: string;
   title: string;
   noteCount: number;
+  /** Stored end-to-end encrypted: title and content can't be read (or changed) here */
+  encrypted?: boolean;
+}
+
+/**
+ * Whether Joplin Web may write to the account. Accounts with end-to-end encryption are read-only:
+ * Joplin Web can't encrypt, so the server refuses every write to them.
+ */
+export interface WriteState {
+  writable: boolean;
+  /** The server's explanation when not writable */
+  reason: string | null;
 }
 
 /**

@@ -138,6 +138,25 @@ describe('reading', () => {
   });
 });
 
+describe('account', () => {
+  test('reports a writable account without E2EE', async () => {
+    const res = await api('/api/account/write-state');
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.data, { writable: true });
+  });
+
+  test('write state requires a session', async () => {
+    assert.equal((await api('/api/account/write-state', {}, false)).status, 401);
+  });
+
+  test('marks readable items as not encrypted', async () => {
+    const notes = await api('/api/notes');
+    assert.ok(notes.data.length > 0 && notes.data.every((n: any) => n.encrypted === false));
+    const notebooks = await api('/api/notebooks');
+    assert.ok(notebooks.data.every((nb: any) => nb.encrypted === false));
+  });
+});
+
 describe('writing', () => {
   let noteId: string;
   let updatedTime: number;
