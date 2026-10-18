@@ -8,21 +8,19 @@ import { QueryError } from "@/components/common/QueryError";
 import { useTrashedNotebooks } from "@/hooks/use-notebooks";
 import { usePurgeNotebook, useRestoreNotebook } from "@/hooks/use-mutations";
 import { TrashedNotebook } from "@/lib/types";
+import { notebookContentsLabel } from "@/lib/notebooks";
 
-const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
+/** What was trashed with the notebook (what Restore brings back), e.g. "3 notes, 1 sub-notebook" */
+const contentsLabel = (nb: TrashedNotebook) => notebookContentsLabel(nb.noteCount, nb.notebookCount);
 
-/** "3 notes, 1 sub-notebook" or "Empty" */
-function contentsLabel(nb: TrashedNotebook): string {
-  const parts = [plural(nb.noteCount, "note")];
-  if (nb.notebookCount > 0) parts.push(plural(nb.notebookCount, "sub-notebook"));
-  return nb.noteCount === 0 && nb.notebookCount === 0 ? "Empty" : parts.join(", ");
-}
+const headingClass = "px-1 pb-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider";
 
 /**
  * Trashed notebooks at the top of the trash list, each with Restore and Delete permanently.
- * `filterText` is the note list's filter, applied to notebook titles as well.
+ * `filterText` is the note list's filter, applied to notebook titles as well. With
+ * `notesHeading`, a "Notes" heading follows the notebooks so the two groups read apart.
  */
-export function TrashedNotebooks({ filterText = "" }: { filterText?: string }) {
+export function TrashedNotebooks({ filterText = "", notesHeading = false }: { filterText?: string; notesHeading?: boolean }) {
   const query = useTrashedNotebooks();
   const restore = useRestoreNotebook();
   const purge = usePurgeNotebook();
@@ -73,10 +71,7 @@ export function TrashedNotebooks({ filterText = "" }: { filterText?: string }) {
 
   return (
     <section aria-labelledby="trashed-notebooks-heading" className="pb-3">
-      <h3
-        id="trashed-notebooks-heading"
-        className="px-1 pb-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider"
-      >
+      <h3 id="trashed-notebooks-heading" className={headingClass}>
         Notebooks
       </h3>
       <ul className="space-y-2">
@@ -90,7 +85,7 @@ export function TrashedNotebooks({ filterText = "" }: { filterText?: string }) {
               <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium text-foreground truncate">{nb.title}</p>
-                <p className="text-xs text-muted-foreground truncate">{contentsLabel(nb)}</p>
+                <p className="text-xs text-muted-foreground truncate first-letter:uppercase">{contentsLabel(nb)}</p>
               </div>
               <Button
                 size="icon"
@@ -125,7 +120,11 @@ export function TrashedNotebooks({ filterText = "" }: { filterText?: string }) {
         title="Delete notebook permanently?"
         description={
           confirmPurge
-            ? `"${confirmPurge.title}" and everything in it (${contentsLabel(confirmPurge).toLowerCase()}) will be deleted from the server. This can't be undone.`
+            ? `"${confirmPurge.title}" and everything in it (${contentsLabel(confirmPurge)}${
+                confirmPurge.earlierNoteCount > 0
+                  ? `, plus ${confirmPurge.earlierNoteCount} ${confirmPurge.earlierNoteCount === 1 ? "note" : "notes"} trashed earlier`
+                  : ""
+              }) will be deleted from the server. This can't be undone.`
             : undefined
         }
         confirmLabel="Delete permanently"
@@ -133,6 +132,7 @@ export function TrashedNotebooks({ filterText = "" }: { filterText?: string }) {
         isPending={purge.isPending}
         onConfirm={handlePurge}
       />
+      {notesHeading && <h3 className={`${headingClass} pt-3`}>Notes</h3>}
     </section>
   );
 }

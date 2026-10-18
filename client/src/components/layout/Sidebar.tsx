@@ -13,7 +13,7 @@ import {
   useUpdateNotebook,
 } from "@/hooks/use-mutations";
 import { TagListItem } from "@/components/tags/TagListItem";
-import { findNotebookById } from "@/lib/notebooks";
+import { countNotebookContents, findNotebookById, notebookContentsLabel } from "@/lib/notebooks";
 import { Notebook, Tag } from "@/lib/types";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -171,8 +171,11 @@ export function Sidebar({
     });
   };
 
-  const countNotes = (nb: Notebook): number =>
-    (nb.noteCount || 0) + (nb.children || []).reduce((sum, child) => sum + countNotes(child), 0);
+  /** Same wording and counting as the trash list, so the numbers match after trashing */
+  const contentsOf = (nb: Notebook) => {
+    const { notes, notebooks } = countNotebookContents(nb);
+    return notebookContentsLabel(notes, notebooks);
+  };
 
   return (
     <aside
@@ -410,7 +413,7 @@ export function Sidebar({
         title="Move notebook to trash?"
         description={
           dialog?.kind === "delete"
-            ? `"${dialog.notebook.title}" and everything in it (${countNotes(dialog.notebook)} notes, including sub-notebooks) will be moved to the trash. You can restore it from the trash.`
+            ? `"${dialog.notebook.title}" and everything in it (${contentsOf(dialog.notebook)}) will be moved to the trash. You can restore it from the trash.`
             : undefined
         }
         confirmLabel="Move to trash"

@@ -17,10 +17,12 @@ export interface TrashedNotebook {
   title: string;
   parentId: string;
   deletedTime: number;
-  /** Notes anywhere inside, including sub-notebooks */
+  /** Notes trashed together with the notebook (restored with it), at any depth */
   noteCount: number;
-  /** Sub-notebooks at any depth */
+  /** Sub-notebooks trashed together with the notebook, at any depth */
   notebookCount: number;
+  /** Notes inside that were trashed on their own earlier: not restored, but deleted with it */
+  earlierNoteCount: number;
 }
 
 /**

@@ -264,7 +264,7 @@ export function NotesPage() {
               onCreateNote={isTrashSelected ? undefined : handleCreateNote}
               isCreating={createNote.isPending}
               onToggleTodo={isTrashSelected ? undefined : handleToggleTodo}
-              renderLeading={isTrashSelected ? (filter) => <TrashedNotebooks filterText={filter} /> : undefined}
+              renderLeading={isTrashSelected ? (filter) => <TrashedNotebooks filterText={filter} notesHeading={(notes?.length ?? 0) > 0} /> : undefined}
               subtitle={
                 isTrashSelected
                   ? "Deleted notes and notebooks"
