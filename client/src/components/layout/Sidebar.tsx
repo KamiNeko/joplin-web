@@ -32,7 +32,7 @@ import {
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { QueryError } from "@/components/common/QueryError";
-import { MOBILE_SEARCH_INPUT_ID } from "@/lib/ui-constants";
+import { MOBILE_SEARCH_INPUT_ID, SEARCH_SYNTAX_HINT } from "@/lib/ui-constants";
 import { ConnectionStatus } from "./ConnectionStatus";
 import { StaleDataHint } from "@/components/common/QueryError";
 
@@ -228,6 +228,7 @@ export function Sidebar({
               id={MOBILE_SEARCH_INPUT_ID}
               type="search"
               placeholder="Search notes..."
+              title={SEARCH_SYNTAX_HINT}
               aria-label="Search notes"
               value={searchQuery}
               onChange={(e) => onSearchChange(e.target.value)}

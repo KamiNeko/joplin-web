@@ -1,6 +1,7 @@
 import { config } from '../config.js';
 import { joplinApi } from './joplin-api.js';
 import { deserialize, markupLanguageOf, notePreview } from './serializer.js';
+import { isEmptySearchQuery, matchesNamePattern, parseSearchQuery } from './search-query.js';
 import { trashedTogether } from './trash.js';
 import {
   JoplinItemType,
@@ -691,24 +692,42 @@ export class NoteCacheService {
   }
 
   /**
-   * Searches notes across titles and body contents (excludes trashed notes by default)
+   * Searches active notes (trashed ones are excluded). The query syntax is parsed by
+   * `parseSearchQuery`: all words/phrases must appear in the title or body, plus optional
+   * `tag:`, `notebook:` (including sub-notebooks), `type:` and `iscompleted:` filters.
    *
    * @param sessionId Active session ID
    * @param query Search query string
    * @returns Matching SearchResults sorted by relevance and updatedTime
    */
   public async searchNotes(sessionId: string, query: string): Promise<SearchResult[]> {
-    const entry = await this.ensureFresh(sessionId);
-    const trimmed = query.trim().toLowerCase();
-    if (!trimmed) {
+    const parsed = parseSearchQuery(query);
+    if (isEmptySearchQuery(parsed)) {
       return [];
     }
+    const entry = await this.ensureFresh(sessionId);
 
     const deletedNotebookIds = new Set(
       Array.from(entry.notebooks.values())
         .filter((nb) => nb.deletedTime && nb.deletedTime > 0)
         .map((nb) => nb.id)
     );
+
+    const notebookFilter = parsed.notebooks.length > 0 ? this.notebooksMatching(entry, parsed.notebooks) : null;
+    const excludedNotebookIds =
+      parsed.excludedNotebooks.length > 0 ? this.notebooksMatching(entry, parsed.excludedNotebooks) : null;
+
+    const needsTags = parsed.tags.length > 0 || parsed.excludedTags.length > 0;
+    const tagTitlesByNote = new Map<string, string[]>();
+    if (needsTags) {
+      for (const link of entry.noteTags) {
+        const tag = entry.tags.get(link.tagId);
+        if (!tag) continue;
+        const titles = tagTitlesByNote.get(link.noteId) ?? [];
+        titles.push(tag.title || '');
+        tagTitlesByNote.set(link.noteId, titles);
+      }
+    }
 
     const results: Array<SearchResult & { relevanceScore: number }> = [];
 
@@ -721,50 +740,79 @@ export class NoteCacheService {
       ) {
         continue;
       }
+
+      const isTodo = Boolean(note.isTodo);
+      if (parsed.type === 'todo' && !isTodo) continue;
+      if (parsed.type === 'note' && isTodo) continue;
+      if (parsed.completed !== undefined && (!isTodo || Boolean(note.todoCompleted) !== parsed.completed)) continue;
+
+      const parentId = note.parentId || '';
+      if (notebookFilter && !notebookFilter.has(parentId)) continue;
+      if (excludedNotebookIds && excludedNotebookIds.has(parentId)) continue;
+
+      if (needsTags) {
+        const noteTagTitles = tagTitlesByNote.get(note.id) ?? [];
+        const hasTag = (pattern: string) => noteTagTitles.some((title) => matchesNamePattern(title, pattern));
+        if (!parsed.tags.every(hasTag) || parsed.excludedTags.some(hasTag)) continue;
+      }
+
       const title = note.title || '';
       const body = note.body || '';
       const titleLower = title.toLowerCase();
       const bodyLower = body.toLowerCase();
 
-      const inTitle = titleLower.includes(trimmed);
-      const inBody = bodyLower.includes(trimmed);
+      const contains = (term: string) => titleLower.includes(term) || bodyLower.includes(term);
+      if (!parsed.terms.every(contains) || parsed.excludedTerms.some(contains)) continue;
 
-      if (inTitle || inBody) {
-        let snippet = '';
-        if (inBody) {
-          const matchIdx = bodyLower.indexOf(trimmed);
-          const start = Math.max(0, matchIdx - 60);
-          const end = Math.min(body.length, matchIdx + trimmed.length + 60);
-          const rawSnippet = body.substring(start, end);
-          snippet = `${start > 0 ? '...' : ''}${notePreview(rawSnippet, markupLanguageOf(note.properties), 150)}${
-            end < body.length ? '...' : ''
-          }`;
+      const titleHits = parsed.terms.filter((term) => titleLower.includes(term)).length;
+      // Earliest occurrence of any term in the body, for the snippet
+      let matchIdx = -1;
+      let matchLength = 0;
+      for (const term of parsed.terms) {
+        const idx = bodyLower.indexOf(term);
+        if (idx !== -1 && (matchIdx === -1 || idx < matchIdx)) {
+          matchIdx = idx;
+          matchLength = term.length;
         }
-
-        // Title matches receive higher priority
-        const relevanceScore = (inTitle ? 100 : 0) + (inBody ? 10 : 0);
-
-        results.push({
-          id: note.id,
-          title,
-          parentId: note.parentId || '',
-          createdTime: note.createdTime,
-          updatedTime: note.updatedTime,
-          deletedTime: note.deletedTime || 0,
-          preview: notePreview(note.body, markupLanguageOf(note.properties), 150),
-          isTodo: note.isTodo,
-          todoCompleted: Boolean(note.todoCompleted),
-          todoDue: note.todoDue,
-          isConflict: false,
-          encrypted: isEncrypted(note),
-          matches: {
-            inTitle,
-            inBody,
-            snippet,
-          },
-          relevanceScore,
-        });
       }
+      const inTitle = titleHits > 0;
+      const inBody = matchIdx !== -1;
+
+      let snippet = '';
+      if (inBody) {
+        const start = Math.max(0, matchIdx - 60);
+        const end = Math.min(body.length, matchIdx + matchLength + 60);
+        const rawSnippet = body.substring(start, end);
+        snippet = `${start > 0 ? '...' : ''}${notePreview(rawSnippet, markupLanguageOf(note.properties), 150)}${
+          end < body.length ? '...' : ''
+        }`;
+      }
+
+      // Title matches receive higher priority
+      const bodyHits = parsed.terms.filter((term) => bodyLower.includes(term)).length;
+      const relevanceScore = titleHits * 100 + bodyHits * 10;
+
+      results.push({
+        id: note.id,
+        title,
+        parentId,
+        createdTime: note.createdTime,
+        updatedTime: note.updatedTime,
+        deletedTime: note.deletedTime || 0,
+        preview: notePreview(note.body, markupLanguageOf(note.properties), 150),
+        isTodo: note.isTodo,
+        todoCompleted: Boolean(note.todoCompleted),
+        todoDue: note.todoDue,
+        isConflict: false,
+        encrypted: isEncrypted(note),
+        matches: {
+          inTitle,
+          inBody,
+          snippet,
+          terms: parsed.terms,
+        },
+        relevanceScore,
+      });
     }
 
     // Sort by relevance score descending, then by updatedTime descending
@@ -776,6 +824,31 @@ export class NoteCacheService {
     });
 
     return results.map(({ relevanceScore, ...item }) => item);
+  }
+
+  /**
+   * Ids of the notebooks whose title matches one of the patterns, plus all their sub-notebooks
+   */
+  private notebooksMatching(entry: CacheEntry, patterns: string[]): Set<string> {
+    const childrenOf = new Map<string, string[]>();
+    for (const nb of entry.notebooks.values()) {
+      const parent = nb.parentId || '';
+      const siblings = childrenOf.get(parent) ?? [];
+      siblings.push(nb.id);
+      childrenOf.set(parent, siblings);
+    }
+
+    const ids = new Set<string>();
+    const stack = Array.from(entry.notebooks.values())
+      .filter((nb) => patterns.some((pattern) => matchesNamePattern(nb.title || '', pattern)))
+      .map((nb) => nb.id);
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (ids.has(id)) continue; // guards against parent cycles in corrupt data
+      ids.add(id);
+      stack.push(...(childrenOf.get(id) ?? []));
+    }
+    return ids;
   }
 
   /**

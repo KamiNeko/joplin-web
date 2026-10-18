@@ -193,6 +193,8 @@ export interface SearchResult extends NoteListItem {
     inTitle: boolean;
     inBody: boolean;
     snippet?: string;
+    /** Lower-cased words and phrases the note matched, for highlighting (empty for filter-only queries) */
+    terms: string[];
   };
 }
 

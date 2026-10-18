@@ -49,7 +49,7 @@ In short: choose Joplin Web if you want quick, install-free access to your notes
 | 🖼️ **Images & attachments** | Shows Joplin resources inline. Drop, paste or attach files to upload them. |
 | ✅ **To-dos** | Create to-dos and tick them off, right from the note list. |
 | 🏷️ **Tags** | Tag notes, browse by tag, rename and delete tags. |
-| 🔎 **Search** | Instant full-text search across titles and content (`Ctrl+K`). |
+| 🔎 **Search** | Instant search across titles and content (`Ctrl+K`): all words must match, `"exact phrases"`, `-word` to exclude, and Joplin-style filters `tag:`, `notebook:`, `type:todo`, `iscompleted:0`. |
 | 🗑️ **Trash** | Deleted notes and notebooks go to Joplin's trash, where you can restore them or delete them permanently. |
 | ⚔️ **Conflict detection** | If a note was changed elsewhere while you edited it, you choose which version to keep. |
 | 🔀 **Sync conflicts** | Conflict copies that Joplin desktop or mobile keep after a sync conflict are listed under *Conflicts* (only when there are any), not as duplicates in your notebooks, tags or search. Compare a copy with the original, then trash it or move it to a notebook to keep it. |

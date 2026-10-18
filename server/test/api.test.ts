@@ -125,6 +125,59 @@ describe('reading', () => {
     assert.deepEqual(res.data.map((n: any) => n.title), ['Weeknight Miso Ramen']);
   });
 
+  /** Titles found for a search query, sorted */
+  const searchTitles = async (q: string): Promise<string[]> => {
+    const res = await api(`/api/search?q=${encodeURIComponent(q)}`);
+    assert.equal(res.status, 200);
+    return res.data.map((n: any) => n.title).sort();
+  };
+
+  test('search matches all words in any order, in title or body', async () => {
+    assert.deepEqual(await searchTitles('ramen weeknight'), ['Weeknight Miso Ramen']);
+    assert.deepEqual(await searchTitles('RAMEN Weeknight'), ['Weeknight Miso Ramen'], 'case-insensitive');
+    assert.deepEqual(await searchTitles('ramen biometric'), [], 'every word must match');
+    assert.deepEqual(await searchTitles('"ramen weeknight"'), [], 'a quoted phrase must match as written');
+    assert.deepEqual(await searchTitles('"weeknight miso"'), ['Weeknight Miso Ramen']);
+  });
+
+  test('search returns matched terms and a snippet around the first body match', async () => {
+    const res = await api('/api/search?q=passport%20biometric');
+    assert.equal(res.data.length, 1);
+    const { matches } = res.data[0];
+    assert.deepEqual(matches.terms, ['passport', 'biometric']);
+    assert.equal(matches.inTitle, true);
+    assert.equal(matches.inBody, true);
+    assert.match(matches.snippet, /biometric/);
+  });
+
+  test('search filters by tag, notebook (with sub-notebooks), type and completion', async () => {
+    assert.deepEqual(await searchTitles('tag:cooking'), ['Sourdough Starter Schedule', 'Weeknight Miso Ramen']);
+    assert.deepEqual(await searchTitles('tag:cooking miso'), ['Weeknight Miso Ramen']);
+    assert.deepEqual(await searchTitles('tag:books tag:ideas'), ['Books to Read in 2026'], 'all tags must match');
+    assert.deepEqual(await searchTitles('tag:"Cooking" -miso'), ['Sourdough Starter Schedule']);
+    assert.deepEqual(await searchTitles('notebook:recipes'), ['Sourdough Starter Schedule', 'Weeknight Miso Ramen']);
+    assert.deepEqual(await searchTitles('notebook:"reading list"'), [
+      'Book Notes: Deep Work',
+      'Books to Read in 2026',
+      'Clipped: The Case for Slow Travel',
+    ]);
+    assert.deepEqual(
+      await searchTitles('notebook:personal -notebook:recipes'),
+      ['Book train tickets to Porto', 'Lisbon Long Weekend', 'Renew passport'],
+      'sub-notebooks are included and can be excluded'
+    );
+    assert.deepEqual(await searchTitles('type:todo'), ['Book train tickets to Porto', 'Renew passport']);
+    assert.deepEqual(await searchTitles('iscompleted:1'), ['Book train tickets to Porto']);
+    assert.deepEqual(await searchTitles('iscompleted:0'), ['Renew passport']);
+    assert.ok(!(await searchTitles('type:note')).includes('Renew passport'));
+    assert.deepEqual(await searchTitles('tag:nosuchtag'), []);
+  });
+
+  test('search never returns trashed notes', async () => {
+    assert.deepEqual(await searchTitles('landing'), []);
+    assert.ok(!(await searchTitles('notebook:projects')).includes('Old draft: landing page copy'));
+  });
+
   test('lists tags with note counts', async () => {
     const res = await api('/api/tags');
     const cooking = res.data.find((t: any) => t.title === 'cooking');

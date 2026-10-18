@@ -24,6 +24,7 @@ In production the backend also serves the compiled client (`client/dist`) on the
 | `services/joplin-api.ts` | HTTP client for Joplin Server; maps errors to `JoplinAuthError` / `JoplinNotFoundError` / `JoplinConnectionError`. |
 | `services/serializer.ts` | `deserialize` / `serialize` Joplin's text format, `stripMarkdown` / `stripHtml` (via `notePreview`, by `markup_language`) for list previews. |
 | `services/note-cache.ts` | Per-session in-memory cache of all items, refreshed after `CACHE_TTL_MS`; only items whose `updated_time` changed are re-fetched. Builds the notebook tree, note lists, tag counts and search (all without conflict copies, see *Conflict copies*) and the conflicts list; every item in them carries `encrypted` (see *Encrypted items*). A session's cache is freed on logout, when Joplin Server rejects the session, and after 2 hours without use (expired or abandoned sessions never log out). |
+| `services/search-query.ts` | Parses the search syntax (words, phrases, negation, `tag:`/`notebook:`/`type:`/`iscompleted:` filters) for `note-cache`'s search; see *Search syntax*. |
 | `services/note-writer.ts` | All writes: create/update/trash/restore/purge for notes, notebooks, tags, note-tag links and resources; conflict detection; `getWriteState` (the E2EE guard as a yes/no answer for the client). |
 | `services/item-defaults.ts` | Property sets Joplin desktop writes for new notes, notebooks, tags, note-tag links and resources; used by the writer on create. |
 | `app.ts` | `createApp(config)`: helmet/CSP, CORS, rate limits, origin check, routers, static client. `index.ts` only starts it. |
@@ -119,10 +120,26 @@ All routes except `/api/health` and `/api/auth/login` require a session.
 | `GET` | `/api/tags` | Tags with note counts |
 | `PUT` | `/api/tags/:id` | Rename tag |
 | `DELETE` | `/api/tags/:id` | Delete tag and its links |
-| `GET` | `/api/search?q=` | Full-text search over titles and bodies |
+| `GET` | `/api/search?q=` | Search over active notes (see *Search syntax*); each result has `matches: { inTitle, inBody, snippet, terms }` |
 | `POST` | `/api/resources` | Upload attachment (raw body, `X-File-Name`, `X-File-Type`) |
 | `GET` | `/api/resources/:id` | Attachment binary (see *Serving attachments*) |
 | `DELETE` | `/api/resources/:id` | Delete attachment |
+
+### Search syntax
+
+`GET /api/search` uses a subset of Joplin desktop's syntax, parsed by `services/search-query.ts`. Everything is case-insensitive; trashed notes (and notes in trashed notebooks) are never returned.
+
+| Syntax | Meaning |
+| :--- | :--- |
+| `shopping list` | Every word must appear in the title or the body, in any order (substring match). |
+| `"shopping list"` | Exact phrase. An unclosed quote runs to the end of the query. |
+| `-word`, `-"some phrase"` | The note must not contain it. |
+| `tag:name`, `tag:"two words"` | The note has a tag with this title. Several `tag:` filters must all match; `-tag:` excludes. |
+| `notebook:name` | The note is in a notebook with this title **or any of its sub-notebooks** (like Joplin desktop). Several `notebook:` filters match any of them; `-notebook:` excludes the notebook and its sub-notebooks. |
+| `type:todo`, `type:note` | Only to-dos / only plain notes. |
+| `iscompleted:1`, `iscompleted:0` | Completed / open to-dos (implies to-dos). |
+
+Filter values may be quoted; tag and notebook names must match the whole title, with `*` as a wildcard (`tag:proj*`). Unknown filters and invalid values (`foo:bar`, `type:x`) are searched as plain words. A query of only filters is valid and lists all notes that pass them. Results are sorted by how many terms match in the title (×100) and body (×10), then by `updatedTime`. `matches.terms` lists the lower-cased positive words/phrases so the client highlights them; `snippet` is cut around the first term found in the body (empty for filter-only queries, where the client shows the preview).
 
 ### Security headers
 
