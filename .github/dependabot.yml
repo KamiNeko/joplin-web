@@ -1,0 +1,69 @@
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /server
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      server-minor-patch:
+        update-types: [minor, patch]
+    ignore:
+      # Runtime is Node 24 (.nvmrc, docker/Dockerfile): keep @types/node on 24.x
+      - dependency-name: "@types/node"
+        versions: [">=25.0.0"]
+      # Majors needing migration, tracked in #73; remove when upgrading
+      - dependency-name: express
+        update-types: [version-update:semver-major]
+      - dependency-name: "@types/express"
+        update-types: [version-update:semver-major]
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: npm
+    directory: /client
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      client-minor-patch:
+        update-types: [minor, patch]
+    ignore:
+      # Majors needing migration, tracked in #73; remove when upgrading
+      - dependency-name: tailwindcss
+        update-types: [version-update:semver-major]
+      - dependency-name: "@vitejs/plugin-react"
+        update-types: [version-update:semver-major]
+      - dependency-name: eslint-plugin-react-hooks
+        update-types: [version-update:semver-major]
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /docker
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+      include: scope
+    ignore:
+      # Node.js major upgrades are deliberate: move docker/Dockerfile and .nvmrc together to the next LTS
+      - dependency-name: node
+        update-types: [version-update:semver-major]

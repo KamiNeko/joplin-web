@@ -27,27 +27,94 @@ function pruneSessionValidationCache(now: number): void {
  * Caches session validity status
  */
 export function cacheSessionValidation(sessionId: string, isValid: boolean): void {
-  sessionValidationCache.set(sessionId, {
-    isValid,
-    validatedAt: Date.now(),
-  });
+  const now = Date.now();
+  pruneSessionValidationCache(now);
+  sessionValidationCache.set(sessionId, { isValid, validatedAt: now });
 }
 
 /**
- * Removes a session from the validation cache (e.g. upon logout)
+ * Marks a session as logged out: it is rejected without asking Joplin Server until the validation
+ * cache entry expires, even if ending it on Joplin Server failed.
  */
 export function invalidateSessionValidation(sessionId: string): void {
-  sessionValidationCache.delete(sessionId);
+  cacheSessionValidation(sessionId, false);
+}
+
+/** httpOnly cookie that carries the session for the browser client over plain HTTP */
+export const SESSION_COOKIE = 'joplin_web_session';
+/**
+ * Name used when the cookie is Secure. The __Host- prefix makes browsers refuse versions of it set
+ * with a Domain or another Path, so sibling hosts and other apps on this host can't plant one.
+ */
+export const SECURE_SESSION_COOKIE = '__Host-joplin_web_session';
+
+/** Joplin Server session ids are short ASCII tokens; anything else is rejected before use */
+const TOKEN_PATTERN = /^[\x21-\x7e]{1,256}$/;
+
+/**
+ * Whether a token looks like a Joplin Server session id (before it is cached or sent upstream)
+ */
+export function isWellFormedToken(token: string): boolean {
+  return TOKEN_PATTERN.test(token);
 }
 
 /**
- * Authentication middleware that verifies session token against Joplin Server
- * Checks for:
- * 1. Authorization: Bearer <sessionId>
- * 2. X-API-AUTH: <sessionId>
+ * Returns the values of all session cookies (either name) in the request's Cookie header. More than
+ * one means another app on this host planted a cookie (e.g. with a longer Path) to ride on.
+ */
+export function readSessionCookies(req: Request): string[] {
+  const header = req.headers.cookie;
+  if (!header) return [];
+  const values: string[] = [];
+  for (const part of header.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    const name = part.slice(0, eq).trim();
+    if (name !== SESSION_COOKIE && name !== SECURE_SESSION_COOKIE) continue;
+    let value: string;
+    try {
+      value = decodeURIComponent(part.slice(eq + 1).trim());
+    } catch {
+      value = '';
+    }
+    values.push(value);
+  }
+  return values;
+}
+
+/**
+ * Returns the session token sent in a header (Authorization: Bearer or X-API-AUTH), if any.
+ * Header tokens are never sent automatically by browsers, so they need no CSRF protection.
+ */
+export function getHeaderSessionToken(req: Request): string | undefined {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.toLowerCase().startsWith('bearer ')) {
+    const token = authHeader.substring(7).trim();
+    if (token) return token;
+  }
+  const apiAuth = req.headers['x-api-auth'];
+  if (typeof apiAuth === 'string' && apiAuth.trim()) return apiAuth.trim();
+  return undefined;
+}
+
+/**
+ * Returns the session token of a request: a header token (API clients) or the session cookie
+ * (browser client).
  *
  * Tokens in the query string (e.g. ?auth=) are deliberately not accepted: URLs end up in access
  * logs, browser history and Referer headers.
+ */
+export function getSessionToken(req: Request): { token: string | undefined; duplicateCookies: boolean } {
+  const headerToken = getHeaderSessionToken(req);
+  if (headerToken) return { token: headerToken, duplicateCookies: false };
+  const cookies = readSessionCookies(req);
+  if (cookies.length > 1) return { token: undefined, duplicateCookies: true };
+  return { token: cookies[0] || undefined, duplicateCookies: false };
+}
+
+/**
+ * Authentication middleware that verifies the session token against Joplin Server.
+ * Accepts Authorization: Bearer <sessionId>, X-API-AUTH: <sessionId> or the session cookie.
  */
 export async function requireAuth(
   req: Request,
@@ -55,23 +122,20 @@ export async function requireAuth(
   next: NextFunction
 ): Promise<void> {
   try {
-    let sessionId: string | undefined;
+    const { token: sessionId, duplicateCookies } = getSessionToken(req);
 
-    // Check Authorization: Bearer <token>
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.toLowerCase().startsWith('bearer ')) {
-      sessionId = authHeader.substring(7).trim();
-    }
-
-    // Check X-API-AUTH header
-    if (!sessionId && typeof req.headers['x-api-auth'] === 'string') {
-      sessionId = req.headers['x-api-auth'].trim();
+    if (duplicateCookies) {
+      res.status(401).json({ error: 'Unauthorized: Conflicting session cookies. Please sign in again.' });
+      return;
     }
 
     if (!sessionId) {
-      res.status(401).json({
-        error: 'Unauthorized: Missing session token. Please provide Authorization: Bearer <token>',
-      });
+      res.status(401).json({ error: 'Unauthorized: Missing session. Please sign in.' });
+      return;
+    }
+
+    if (!isWellFormedToken(sessionId)) {
+      res.status(401).json({ error: 'Unauthorized: Session has expired or is invalid' });
       return;
     }
 

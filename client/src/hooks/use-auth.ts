@@ -5,18 +5,21 @@ import React, {
   useEffect,
   useCallback,
 } from "react";
+import { flushSync } from "react-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   login as apiLogin,
   logout as apiLogout,
-  getStoredSessionId,
+  checkSession,
+  clearResourceCache,
   getStoredEmail,
-  setStoredSession,
+  setStoredEmail,
   clearStoredSession,
+  waitForPendingWrites,
 } from "@/lib/api";
 
 export interface AuthContextType {
   isAuthenticated: boolean;
-  sessionId: string | null;
   email: string | null;
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
@@ -29,50 +32,75 @@ export interface AuthProviderProps {
   children: React.ReactNode;
 }
 
+/**
+ * Holds the sign-in state. The session token is an httpOnly cookie the client can't read, so the
+ * session is checked with the server on startup.
+ */
 export function AuthProvider({ children }: AuthProviderProps) {
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [email, setEmail] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
   useEffect(() => {
-    try {
-      const stored = getStoredSessionId();
-      if (stored) {
-        setSessionId(stored);
-        setEmail(getStoredEmail());
-      }
-    } finally {
-      setIsLoading(false);
-    }
+    let cancelled = false;
+    checkSession()
+      .then((valid) => {
+        if (cancelled) return;
+        if (valid) {
+          setIsAuthenticated(true);
+          setEmail(getStoredEmail());
+        } else {
+          clearStoredSession();
+        }
+      })
+      .catch(() => {
+        // Server unreachable: show the login page, which reports the error on submit
+      })
+      .finally(() => !cancelled && setIsLoading(false));
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const login = useCallback(async (email: string, password: string) => {
-    setIsLoading(true);
-    try {
-      const response = await apiLogin(email, password);
-      setSessionId(response.sessionId);
-      setEmail(email);
-      setStoredSession(response.sessionId, response.userId, email);
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
+  const login = useCallback(
+    async (email: string, password: string) => {
+      setIsLoading(true);
+      try {
+        await apiLogin(email, password);
+        // Never show data cached for a previous session
+        queryClient.clear();
+        clearResourceCache();
+        setStoredEmail(email);
+        setEmail(email);
+        setIsAuthenticated(true);
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [queryClient]
+  );
 
   const logout = useCallback(async () => {
-    setIsLoading(true);
+    // isLoading unmounts the protected pages right away; open editors flush unsaved changes
+    // while the session is still valid, and logout waits for those saves.
+    flushSync(() => setIsLoading(true));
     try {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForPendingWrites();
       await apiLogout();
     } finally {
+      queryClient.clear();
+      clearResourceCache();
       clearStoredSession();
-      setSessionId(null);
+      setIsAuthenticated(false);
       setEmail(null);
       setIsLoading(false);
     }
-  }, []);
+  }, [queryClient]);
 
   const value: AuthContextType = {
-    isAuthenticated: Boolean(sessionId),
-    sessionId,
+    isAuthenticated,
     email,
     isLoading,
     login,

@@ -60,17 +60,8 @@ export interface SearchResult extends NoteListItem {
 }
 
 /**
- * Authentication state definition.
- */
-export interface AuthState {
-  sessionId: string | null;
-  isAuthenticated: boolean;
-}
-
-/**
- * Login response payload from API.
+ * Login response payload from API. The session itself is set as an httpOnly cookie.
  */
 export interface LoginResponse {
-  sessionId: string;
   userId: string;
 }

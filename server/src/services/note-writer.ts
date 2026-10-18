@@ -1,4 +1,4 @@
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 import { JoplinApiError, JoplinNotFoundError, joplinApi } from './joplin-api.js';
 import { noteCache } from './note-cache.js';
 import { deserialize, serialize } from './serializer.js';
@@ -62,7 +62,7 @@ function assertType(item: RawJoplinItem, type: JoplinItemType): void {
 
 /** Generates a Joplin-style id (uuid v4 without dashes) */
 function newId(): string {
-  return uuidv4().replace(/-/g, '');
+  return randomUUID().replace(/-/g, '');
 }
 
 function sanitizeTitle(title: string | undefined): string {

@@ -1,4 +1,4 @@
-import axios, { AxiosError, AxiosInstance } from 'axios';
+import axios, { AxiosError, AxiosInstance, AxiosResponse } from 'axios';
 import { config } from '../config.js';
 import {
   JoplinChildItem,
@@ -137,6 +137,42 @@ export class JoplinApiService {
       };
     } catch (error) {
       this.handleError(error, 'createSession');
+    }
+  }
+
+  /**
+   * Ends a session on Joplin Server. Joplin Server has no API route for this; its web UI logs out
+   * with POST /logout (routes/index/logout.ts). That route reads the session from X-API-AUTH or the
+   * sessionId cookie (contextSessionId), deletes it (SessionModel.logout) and redirects to
+   * `<baseUrl>/login`. The CSRF check (utils/csrf.ts) explicitly skips /logout. Errors are rendered
+   * as an HTML page with a 4xx/5xx status, so only a redirect to /login counts as success; anything
+   * else (e.g. a proxy redirecting to HTTPS) throws.
+   *
+   * @param sessionId Session to end
+   */
+  public async deleteSession(sessionId: string): Promise<void> {
+    let res: AxiosResponse;
+    try {
+      res = await this.client.post('/logout', null, {
+        headers: { 'X-API-AUTH': sessionId, Cookie: `sessionId=${encodeURIComponent(sessionId)}` },
+        maxRedirects: 0,
+        validateStatus: (status) => status >= 200 && status < 400,
+      });
+    } catch (error) {
+      this.handleError(error, 'deleteSession');
+    }
+    const location = String(res.headers['location'] ?? '');
+    let locationPath = '';
+    try {
+      locationPath = new URL(location, 'http://joplin.invalid').pathname;
+    } catch {
+      // unparsable Location, treated as failure below
+    }
+    if (res.status < 300 || res.status >= 400 || !/\/login\/?$/.test(locationPath)) {
+      throw new JoplinApiError(
+        `[deleteSession] Unexpected logout response from Joplin Server (HTTP ${res.status}${location ? `, redirect to ${locationPath}` : ''})`,
+        502
+      );
     }
   }
 
