@@ -606,6 +606,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
                 key={editorKey}
                 onUploadsChange={handleUploadsChange}
                 html={isHtml}
+                noteId={note.id}
                 value={draft.body}
                 onChange={(body) => updateDraft({ body })}
                 autoFocus={!focusTitle}

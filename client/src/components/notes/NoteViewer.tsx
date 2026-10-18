@@ -32,6 +32,7 @@ import {
   FileText,
   GitCompareArrows,
   History,
+  Link,
   Lock,
   MoreHorizontal,
   PencilLine,
@@ -48,6 +49,8 @@ import { useNoteSaver } from "@/hooks/use-note-saver";
 import { cn } from "@/lib/utils";
 import { QueryError, StaleDataHint } from "@/components/common/QueryError";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
+import { copyText } from "@/lib/clipboard";
+import { noteMarkdownLink } from "@/lib/markdown-format";
 import { clearDraft, findRestorableDraft, restoreStoredDraft, StoredDraft } from "@/lib/drafts";
 
 // The editor brings CodeMirror and its language data, so it is a separate chunk
@@ -219,6 +222,12 @@ export function NoteViewer({
         onError: (err) => toast.error("Could not move note", { description: err.message }),
       }
     );
+  };
+
+  const handleCopyLink = async () => {
+    const link = noteMarkdownLink(note);
+    if (await copyText(link)) toast.success("Markdown link copied");
+    else toast.error("Could not copy the link", { description: link });
   };
 
   const handleTrash = () => {
@@ -434,6 +443,10 @@ export function NoteViewer({
                       {note.todoCompleted ? "Mark as not done" : "Mark as done"}
                     </DropdownMenuItem>
                   )}
+                  <DropdownMenuItem onClick={() => void handleCopyLink()}>
+                    <Link className="h-4 w-4" />
+                    Copy Markdown link
+                  </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
                     onClick={handleTrash}

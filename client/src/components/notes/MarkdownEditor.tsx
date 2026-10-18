@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useImperativeHandle, useMemo, useRef } from "react";
+import { forwardRef, useCallback, useImperativeHandle, useMemo, useRef, useState } from "react";
 import CodeMirror, { EditorView } from "@uiw/react-codemirror";
 import { toast } from "sonner";
 import { uploadResource } from "@/lib/api";
@@ -6,6 +6,10 @@ import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
+import { cn } from "@/lib/utils";
+import { FormattingToolbar } from "./FormattingToolbar";
+import { NoteLinkPicker } from "./NoteLinkPicker";
+import { formattingKeymap, insertNoteLinkCommand, runFormatCommand } from "./editor-commands";
 
 interface MarkdownEditorProps {
   value: string;
@@ -16,6 +20,8 @@ interface MarkdownEditorProps {
   onUploadsChange?: (pending: number) => void;
   /** The text is HTML (an HTML note): uploaded files are inserted as `<img>` / `<a>` instead of Markdown */
   html?: boolean;
+  /** The note being edited; the "Link to note" picker leaves it out */
+  noteId?: string;
 }
 
 export interface MarkdownEditorHandle {
@@ -106,14 +112,16 @@ const markdownHighlight = HighlightStyle.define([
 ]);
 
 /**
- * CodeMirror 6 Markdown editor with syntax highlighting for fenced code blocks.
+ * CodeMirror 6 Markdown editor with syntax highlighting for fenced code blocks, a formatting
+ * toolbar with shortcuts (Ctrl+B/I/E/K) and a picker for links to other notes.
  * Files dropped or pasted into it are uploaded as Joplin resources and linked at that position.
  */
 export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorProps>(function MarkdownEditor(
-  { value, onChange, autoFocus, className, onUploadsChange, html = false },
+  { value, onChange, autoFocus, className, onUploadsChange, html = false, noteId },
   ref
 ) {
   const viewRef = useRef<EditorView | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const pendingRef = useRef(0);
   const onUploadsChangeRef = useRef(onUploadsChange);
   onUploadsChangeRef.current = onUploadsChange;
@@ -168,6 +176,8 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
     () => [
       markdown({ base: markdownLanguage, codeLanguages: languages }),
       syntaxHighlighting(markdownHighlight),
+      // HTML notes are edited as raw HTML: no Markdown formatting commands
+      ...(html ? [] : [formattingKeymap()]),
       EditorView.lineWrapping,
       appTheme,
       EditorView.domEventHandlers({
@@ -188,29 +198,49 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
         },
       }),
     ],
-    [uploadFiles]
+    [uploadFiles, html]
   );
 
+  const focusEditor = () => viewRef.current?.focus();
+
   return (
-    <CodeMirror
-      value={value}
-      onChange={onChange}
-      onCreateEditor={(view) => {
-        viewRef.current = view;
-      }}
-      autoFocus={autoFocus}
-      theme="none"
-      height="100%"
-      className={className}
-      placeholder="Start writing in Markdown..."
-      extensions={extensions}
-      basicSetup={{
-        lineNumbers: false,
-        foldGutter: false,
-        highlightActiveLine: false,
-        highlightActiveLineGutter: false,
-        autocompletion: false,
-      }}
-    />
+    <div className={cn("flex min-h-0 flex-col", className)}>
+      {!html && (
+        <div className="shrink-0 border-b border-border/40 mb-2">
+          <FormattingToolbar
+            onCommand={(command) => viewRef.current && runFormatCommand(viewRef.current, command)}
+            onInsertNoteLink={() => setPickerOpen(true)}
+            onRestoreFocus={focusEditor}
+          />
+        </div>
+      )}
+      <CodeMirror
+        value={value}
+        onChange={onChange}
+        onCreateEditor={(view) => {
+          viewRef.current = view;
+        }}
+        autoFocus={autoFocus}
+        theme="none"
+        height="100%"
+        className="flex-1 min-h-0"
+        placeholder="Start writing in Markdown..."
+        extensions={extensions}
+        basicSetup={{
+          lineNumbers: false,
+          foldGutter: false,
+          highlightActiveLine: false,
+          highlightActiveLineGutter: false,
+          autocompletion: false,
+        }}
+      />
+      <NoteLinkPicker
+        open={pickerOpen}
+        onOpenChange={setPickerOpen}
+        excludeId={noteId}
+        onSelect={(note) => viewRef.current && insertNoteLinkCommand(viewRef.current, note)}
+        onCloseAutoFocus={focusEditor}
+      />
+    </div>
   );
 });
