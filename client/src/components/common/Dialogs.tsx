@@ -177,7 +177,16 @@ export function AboutDialog({ open, onOpenChange }: { open: boolean; onOpenChang
  * Shown when a request was rejected with 401. Not dismissible: nothing works until the user signs
  * in again. Unsaved editor text stays on this device and is offered for restore afterwards.
  */
-export function SessionExpiredDialog({ open, onSignIn }: { open: boolean; onSignIn: () => void }) {
+export function SessionExpiredDialog({
+  open,
+  onSignIn,
+  onDiscard,
+}: {
+  open: boolean;
+  onSignIn: () => void;
+  /** Signs out and deletes unsaved changes stored on this device (shared computers) */
+  onDiscard: () => void;
+}) {
   return (
     <Dialog open={open}>
       <DialogContent
@@ -189,7 +198,10 @@ export function SessionExpiredDialog({ open, onSignIn }: { open: boolean; onSign
           <DialogTitle>Session expired</DialogTitle>
           <DialogDescription>Sign in again to continue. Unsaved changes are kept on this device.</DialogDescription>
         </DialogHeader>
-        <DialogFooter>
+        <DialogFooter className="gap-2">
+          <Button variant="ghost" onClick={onDiscard}>
+            Sign out and discard
+          </Button>
           <Button autoFocus onClick={onSignIn}>
             Sign in again
           </Button>

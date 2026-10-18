@@ -20,7 +20,8 @@ import {
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
-import { isConnectionFailure, setNoteUnsaved } from "@/lib/connection";
+import { getConnectionSnapshot, isConnectionFailure, setNoteUnsaved } from "@/lib/connection";
+import { createRetryScheduler, RetryScheduler } from "@/lib/retry";
 import { clearDraft, saveDraft, StoredDraft } from "@/lib/drafts";
 
 const AUTOSAVE_DELAY_MS = 1500;
@@ -48,29 +49,26 @@ function loadMode(): EditorMode {
   return "split";
 }
 
-/** Retry delays for saves that failed because the server was unreachable */
-const RETRY_BASE_MS = 5000;
-const RETRY_MAX_MS = 60000;
-
 interface NoteEditorProps {
   note: Note;
   /** Focus the title instead of the body (used for freshly created notes) */
   focusTitle?: boolean;
   /** Start from a draft restored from this device instead of the server text */
   initialDraft?: StoredDraft | null;
-  /** Called on the first edit (the viewer hides its restore offer then) */
-  onEdit?: () => void;
   onDone: () => void;
 }
+
+const isSessionExpired = (err: unknown) => err instanceof ApiError && err.status === 401;
 
 /**
  * Markdown note editor with debounced autosave, Ctrl+S, and conflict detection.
  * Initialised once from `note`; later updates to the prop are ignored so typing is never reset.
  * Unsaved text is mirrored to localStorage (see lib/drafts) until the server has it.
  */
-export function NoteEditor({ note, focusTitle = false, initialDraft = null, onEdit, onDone }: NoteEditorProps) {
+export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDone }: NoteEditorProps) {
   const queryClient = useQueryClient();
-  const isMobile = useIsMobile();
+  // Split view needs the width of the lg breakpoint; below it (phones, three panes on tablets) it acts as Edit
+  const noRoomForSplit = useIsMobile(1024);
   const [draft, setDraft] = useState<Draft>(
     initialDraft ? { title: initialDraft.title, body: initialDraft.body } : { title: note.title, body: note.body }
   );
@@ -95,8 +93,9 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onEd
   // A restored draft keeps the base it was written against, so a newer server version conflicts
   const baseUpdatedTimeRef = useRef(initialDraft?.baseUpdatedTime ?? note.updatedTime);
   const restoredRef = useRef(Boolean(initialDraft));
-  const retryCountRef = useRef(0);
-  const editedRef = useRef(false);
+  // Set when the editor closes: no more saves, retries or toasts from this instance
+  const unmountedRef = useRef(false);
+  const retryRef = useRef<RetryScheduler | null>(null);
   // The save currently talking to the server. Saves run one at a time; later ones chain onto it
   // so each starts from the baseUpdatedTime the previous one returned.
   const inflightRef = useRef<Promise<boolean> | null>(null);
@@ -119,6 +118,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onEd
   const save = useCallback(
     (force = false): Promise<boolean> => {
       clearTimer();
+      if (unmountedRef.current) return Promise.resolve(false);
       if (conflictRef.current && !force) return Promise.resolve(false);
       if (uploadsRef.current > 0) {
         timerRef.current = window.setTimeout(() => void save(force), AUTOSAVE_DELAY_MS);
@@ -147,7 +147,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onEd
           savedRef.current = toSave;
           conflictRef.current = false;
           restoredRef.current = false;
-          retryCountRef.current = 0;
+          retryRef.current?.reset();
           queryClient.setQueryData(["note", note.id], saved);
           invalidateLists(queryClient);
           const upToDate = sameDraft(draftRef.current, toSave);
@@ -166,15 +166,14 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onEd
             const message = err instanceof Error ? err.message : "Save failed";
             setStatus("error");
             setErrorMessage(message);
+            // A closed editor reports through its flush; an expired session through its dialog
+            if (unmountedRef.current || isSessionExpired(err)) return false;
             // The indicator only shows "Save failed"; the toast carries the reason (one per note,
             // so repeated autosave failures replace it instead of stacking)
             toast.error("Could not save note", { id: `save-error-${note.id}`, description: message });
             // Server unreachable: try again with backoff (and right away when the browser is back online)
             if (err instanceof ApiError && isConnectionFailure(err.status) && navigator.onLine) {
-              const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** retryCountRef.current);
-              retryCountRef.current += 1;
-              clearTimer();
-              timerRef.current = window.setTimeout(() => void save(), delay);
+              retryRef.current?.schedule();
             }
           }
           return false;
@@ -192,10 +191,6 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onEd
     const next = { ...draftRef.current, ...changes };
     draftRef.current = next;
     setDraft(next);
-    if (!editedRef.current) {
-      editedRef.current = true;
-      onEdit?.();
-    }
     // Safety net until the server has the text (tab closed, connection or session lost)
     if (sameDraft(next, savedRef.current) && !restoredRef.current) clearDraft(note.id);
     else saveDraft(note.id, { ...next, baseUpdatedTime: baseUpdatedTimeRef.current });
@@ -212,10 +207,22 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onEd
     return clearTimer;
   }, [save]);
 
+  // Retries of failed saves belong to this editor and stop when it closes (or on logout, which
+  // closes it), so a leftover timer can never write text the user has discarded since
+  useEffect(() => {
+    unmountedRef.current = false;
+    const retry = createRetryScheduler(() => void save());
+    retryRef.current = retry;
+    return () => {
+      unmountedRef.current = true;
+      retry.dispose();
+    };
+  }, [save]);
+
   // Saves that failed while offline go out as soon as the connection is back
   useEffect(() => {
     const onOnline = () => {
-      retryCountRef.current = 0;
+      retryRef.current?.reset();
       void save();
     };
     window.addEventListener("online", onOnline);
@@ -230,12 +237,23 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onEd
 
   // Metadata-only updates (to-do toggle, move) bump updatedTime without touching the text.
   // Adopt them as the new base so the next save isn't reported as a conflict. A newer text from
-  // another device is offered in a banner instead of waiting for the 409 at save time.
+  // another device replaces the text when there are no local edits; with local edits a banner lets
+  // the user choose instead of waiting for the 409 at save time.
   useEffect(() => {
     if (note.updatedTime <= baseUpdatedTimeRef.current || inflightRef.current || restoredRef.current) return;
-    if (sameDraft({ title: note.title, body: note.body }, savedRef.current)) {
+    const theirs = { title: note.title, body: note.body };
+    if (sameDraft(theirs, savedRef.current)) {
       baseUpdatedTimeRef.current = note.updatedTime;
-    } else if (!conflictRef.current) {
+    } else if (conflictRef.current) {
+      return;
+    } else if (sameDraft(draftRef.current, savedRef.current) && uploadsRef.current === 0) {
+      draftRef.current = theirs;
+      savedRef.current = theirs;
+      baseUpdatedTimeRef.current = note.updatedTime;
+      setDraft(theirs);
+      setEditorKey((k) => k + 1);
+      setRemoteChange(null);
+    } else {
       setRemoteChange(note);
     }
   }, [note]);
@@ -287,6 +305,8 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onEd
           return;
         }
         if (sameDraft(pending, savedRef.current)) return;
+        // The session-expired dialog already says the draft is kept on this device
+        if (getConnectionSnapshot().sessionExpired) return;
         if (conflictRef.current) {
           reportLost();
           return;
@@ -304,8 +324,8 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onEd
             invalidateLists(queryClient);
             return true;
           })
-          .catch(() => {
-            reportLost();
+          .catch((err: unknown) => {
+            if (!isSessionExpired(err)) reportLost();
             return false;
           })
           .finally(() => {
@@ -340,9 +360,9 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onEd
 
   const changeMode = (next: EditorMode) => {
     setMode(next);
-    // On phones, split already shows as Edit, so picking Edit keeps a stored split preference
+    // On narrow screens, split already shows as Edit, so picking Edit keeps a stored split preference
     // for the next time the editor opens on a wider screen
-    if (isMobile && next === "edit" && loadMode() === "split") return;
+    if (noRoomForSplit && next === "edit" && loadMode() === "split") return;
     try {
       localStorage.setItem(MODE_STORAGE_KEY, next);
     } catch {
@@ -410,15 +430,15 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onEd
     }
   };
 
-  // Phones have no room for split view (its tab is hidden there), so it behaves like Edit
-  const effectiveMode: EditorMode = isMobile && mode === "split" ? "edit" : mode;
+  // Narrow screens have no room for split view (its tab is hidden there), so it behaves like Edit
+  const effectiveMode: EditorMode = noRoomForSplit && mode === "split" ? "edit" : mode;
   const showEditor = effectiveMode === "edit" || effectiveMode === "split";
   const showPreview = effectiveMode === "preview" || effectiveMode === "split";
 
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Editor toolbar */}
-      <div className="flex items-center justify-between gap-2 px-4 sm:px-6 py-2 border-b border-border/40">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-2 border-b border-border/40">
         <div className="flex items-center rounded-lg bg-muted p-0.5" role="group" aria-label="Editor layout">
           {(
             [
@@ -431,17 +451,18 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onEd
               key={id}
               type="button"
               aria-pressed={effectiveMode === id}
+              title={label}
               onClick={() => changeMode(id)}
               className={cn(
                 "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                id === "split" && "hidden md:flex",
+                id === "split" && "hidden lg:flex",
                 effectiveMode === id
                   ? "bg-background text-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground"
               )}
             >
-              <Icon className="h-3.5 w-3.5" />
-              {label}
+              <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+              <span className="md:sr-only xl:not-sr-only">{label}</span>
             </button>
           ))}
         </div>
@@ -482,7 +503,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onEd
             {uploadCount > 0 ? (
               <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                <span className="sr-only sm:not-sr-only">
+                <span className="sr-only sm:not-sr-only md:sr-only xl:not-sr-only">
                   Uploading {uploadCount} {uploadCount === 1 ? "file" : "files"}…
                 </span>
               </span>
@@ -549,14 +570,14 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onEd
       <div
         className={cn(
           "flex-1 min-h-0 grid",
-          effectiveMode === "split" ? "grid-cols-1 md:grid-cols-2" : "grid-cols-1"
+          effectiveMode === "split" ? "grid-cols-1 lg:grid-cols-2" : "grid-cols-1"
         )}
       >
         {showEditor && (
           <div
             className={cn(
               "min-h-0 overflow-hidden px-4 sm:px-10 lg:px-12 pt-2",
-              effectiveMode === "split" && "md:border-r border-border/40 md:pr-6 lg:pr-8"
+              effectiveMode === "split" && "lg:border-r border-border/40 lg:pr-8"
             )}
           >
             <div className={cn("h-full", effectiveMode === "edit" && "max-w-4xl mx-auto")}>
@@ -576,7 +597,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onEd
           <div
             className={cn(
               "min-h-0 overflow-y-auto px-4 sm:px-10 lg:px-12 pt-2 pb-20",
-              effectiveMode === "split" && "hidden md:block md:pl-6 lg:pl-8"
+              effectiveMode === "split" && "hidden lg:block lg:pl-8"
             )}
           >
             <div className="max-w-4xl mx-auto">
@@ -641,7 +662,7 @@ function SaveIndicator({
   onRetry: () => void;
 }) {
   // Below sm only the icon is visible; the text stays available to screen readers
-  const label = (text: string) => <span className="sr-only sm:not-sr-only">{text}</span>;
+  const label = (text: string) => <span className="sr-only sm:not-sr-only md:sr-only xl:not-sr-only">{text}</span>;
   if (status === "saving") {
     return (
       <span className="flex items-center gap-1.5 text-xs text-muted-foreground">

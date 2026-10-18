@@ -43,7 +43,7 @@ import { Button } from "@/components/ui/button";
 import { invalidateLists, useDeleteNote, useRestoreNote, useUpdateNote } from "@/hooks/use-mutations";
 import { cn } from "@/lib/utils";
 import { QueryError, StaleDataHint } from "@/components/common/QueryError";
-import { clearDraft, findRestorableDraft, saveDraft, StoredDraft } from "@/lib/drafts";
+import { clearDraft, findRestorableDraft, restoreStoredDraft, StoredDraft } from "@/lib/drafts";
 
 interface NoteViewerProps {
   note?: Note | null;
@@ -79,11 +79,12 @@ export function NoteViewer({
 }: NoteViewerProps) {
   const [isEditing, setIsEditing] = useState(startInEdit);
   // Unsaved text left on this device by an earlier session (failed save, closed tab, expired login)
-  const [restorable, setRestorable] = useState<StoredDraft | null>(null);
+  // Checked during the first render, so an editor opened right away (startInEdit) waits for the decision
+  const [restorable, setRestorable] = useState<StoredDraft | null>(() => (note ? findRestorableDraft(note) : null));
   const [restoredDraft, setRestoredDraft] = useState<StoredDraft | null>(null);
   const [editorKey, setEditorKey] = useState(0);
   const loadedNoteId = note?.id;
-  const draftCheckedRef = useRef<string | null>(null);
+  const draftCheckedRef = useRef<string | null>(note?.id ?? null);
   useEffect(() => {
     if (!note || draftCheckedRef.current === note.id) return;
     draftCheckedRef.current = note.id;
@@ -157,7 +158,8 @@ export function NoteViewer({
   }
 
   const isTrashed = Boolean(note.deletedTime && note.deletedTime > 0);
-  const editing = isEditing && !isTrashed;
+  // Editing would overwrite the stored draft, so the user decides about it first
+  const editing = isEditing && !isTrashed && !restorable;
   const updatedRelative = formatRelativeTime(note.updatedTime);
   const createdDate = note.createdTime
     ? new Date(
@@ -242,7 +244,7 @@ export function NoteViewer({
       action: {
         label: "Undo",
         onClick: () => {
-          saveDraft(note.id, draft, draft.savedAt);
+          restoreStoredDraft(note.id, draft);
           setRestorable(draft);
         },
       },
@@ -317,7 +319,14 @@ export function NoteViewer({
           ) : (
             <>
               {!editing && (
-                <Button size="sm" variant="outline" className="h-8" onClick={() => setIsEditing(true)}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8"
+                  onClick={() => setIsEditing(true)}
+                  disabled={Boolean(restorable)}
+                  title={restorable ? "Restore or discard the unsaved changes first" : undefined}
+                >
                   <PencilLine className="h-3.5 w-3.5" />
                   Edit
                 </Button>
@@ -416,7 +425,6 @@ export function NoteViewer({
           note={note}
           focusTitle={startInEdit && !note.title}
           initialDraft={restoredDraft}
-          onEdit={() => setRestorable(null)}
           onDone={() => {
             setRestoredDraft(null);
             setIsEditing(false);

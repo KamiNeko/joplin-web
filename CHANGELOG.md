@@ -11,10 +11,10 @@ Notable changes to Joplin Web. The format follows [Keep a Changelog](https://kee
 - `GET /api/health` reports the running `version` and `commit`. Both are set at build time (`APP_VERSION` and `GIT_SHA` build args) and are also available to the client.
 - `HOST_PORT` chooses the host port in Docker Compose.
 - Connection status at the bottom of the sidebar (updated, refreshing, saving, server error, offline, session expired). Its popover shows the Joplin Server host, the account, the last update and error, a *Refresh* button and the app version. `GET /api/auth/check` now returns `serverHost`.
-- Lists and the open note refresh when you return to the tab or come back online (at most every 30 s). Notes with unsaved edits are never refetched; the editor shows a banner when the open note changed on another device.
+- Lists and the open note refresh when you return to the tab or come back online (at most every 30 s). Notes with unsaved edits are never refetched. A newer version of the note open in the editor is loaded directly when you haven't typed anything; with unsaved edits a banner lets you load it or keep yours.
 - *About Joplin Web* in the user menu, with version, commit and project links.
-- Offline banner, automatic retry of failed saves (with backoff, and right away when the browser is back online), and a local draft of unsaved editor text that is offered for restore when the note is opened again. Drafts are removed after saving and on sign-out.
-- A "Session expired" prompt on any 401 that signs you in again and returns to the same note, instead of a hard redirect that lost unsaved text.
+- Offline banner, automatic retry of failed saves (with backoff, up to 6 times, and right away when the browser is back online; retries stop when the editor closes), and a local draft of unsaved editor text that is offered for restore when the note is opened again. Editing waits until you restore or discard it. Drafts belong to the account and Joplin Server they were written for, expire after 7 days, and are removed after saving, on sign-out and when another account signs in.
+- A "Session expired" prompt on any 401 that signs you in again (email pre-filled) and returns to the same note, instead of a hard redirect that lost unsaved text. *Sign out and discard* deletes the unsaved changes kept on the device.
 - A "Couldn't refresh" hint when earlier data stays on screen after a failed refetch.
 
 ### Changed
@@ -27,6 +27,7 @@ Notable changes to Joplin Web. The format follows [Keep a Changelog](https://kee
 - A failed refetch of the open note no longer replaces it (or an open editor) with an error.
 - To-do toggles in the note list are exposed as checkboxes (`role="checkbox"`, `aria-checked`).
 - Queries are no longer retried after a 4xx response.
+- The editor toolbar fits next to the note list on tablet widths; split view needs a desktop-wide window and otherwise behaves like Edit.
 - Smaller, stricter image: lockfile-exact installs, production dependencies from a separate stage, no `chown` layer, app files read-only for the runtime user, no npm/yarn in the runtime image, healthcheck through `node` instead of `curl`.
 
 ### Deprecated

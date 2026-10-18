@@ -22,6 +22,8 @@ const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       refetchOnWindowFocus: false,
+      // useAutoRefresh handles "online" too, and skips notes with unsaved edits
+      refetchOnReconnect: false,
       // Retry once when the server is unreachable or failing; a 4xx won't change on retry
       retry: (failureCount, error) =>
         failureCount < 1 && !(error instanceof ApiError && error.status >= 400 && error.status < 500),
@@ -33,9 +35,15 @@ const queryClient = new QueryClient({
  * Asks the user to sign in again once a request was rejected with 401.
  */
 function SessionExpiredPrompt() {
-  const { isAuthenticated, signInAgain } = useAuth();
+  const { isAuthenticated, signInAgain, discardAndSignOut } = useAuth();
   const { sessionExpired } = useConnectionState();
-  return <SessionExpiredDialog open={isAuthenticated && sessionExpired} onSignIn={signInAgain} />;
+  return (
+    <SessionExpiredDialog
+      open={isAuthenticated && sessionExpired}
+      onSignIn={signInAgain}
+      onDiscard={discardAndSignOut}
+    />
+  );
 }
 
 /**
