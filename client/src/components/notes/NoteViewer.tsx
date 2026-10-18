@@ -43,11 +43,14 @@ import { useDeleteNote, useRestoreNote, useUpdateNote } from "@/hooks/use-mutati
 import { useNoteSaver } from "@/hooks/use-note-saver";
 import { cn } from "@/lib/utils";
 import { QueryError, StaleDataHint } from "@/components/common/QueryError";
+import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { clearDraft, findRestorableDraft, restoreStoredDraft, StoredDraft } from "@/lib/drafts";
 
 // The editor brings CodeMirror and its language data, so it is a separate chunk
 const loadNoteEditor = () => import("./NoteEditor");
-const NoteEditor = lazy(() => loadNoteEditor().then((m) => ({ default: m.NoteEditor })));
+const lazyNoteEditor = () => lazy(() => loadNoteEditor().then((m) => ({ default: m.NoteEditor })));
+// React.lazy keeps a failed import for good, so Retry replaces it with a fresh one
+let NoteEditor = lazyNoteEditor();
 
 interface NoteViewerProps {
   note?: Note | null;
@@ -87,6 +90,8 @@ export function NoteViewer({
   const [restorable, setRestorable] = useState<StoredDraft | null>(() => (note ? findRestorableDraft(note) : null));
   const [restoredDraft, setRestoredDraft] = useState<StoredDraft | null>(null);
   const [editorKey, setEditorKey] = useState(0);
+  // Bumped by Retry after the editor chunk failed to load
+  const [editorAttempt, setEditorAttempt] = useState(0);
   const loadedNoteId = note?.id;
   const draftCheckedRef = useRef<string | null>(note?.id ?? null);
   useEffect(() => {
@@ -241,6 +246,23 @@ export function NoteViewer({
     // Remount an open editor so it starts from the draft
     setEditorKey((k) => k + 1);
     setIsEditing(true);
+  };
+
+  const retryEditor = () => {
+    // Failing again after a fresh import usually means the chunk is gone (new deployment): reload
+    if (editorAttempt > 0) {
+      window.location.reload();
+      return;
+    }
+    NoteEditor = lazyNoteEditor();
+    setEditorAttempt((n) => n + 1);
+  };
+
+  const closeBrokenEditor = () => {
+    // A restored draft is still stored on this device; offer it again
+    if (restoredDraft) setRestorable(restoredDraft);
+    setRestoredDraft(null);
+    setIsEditing(false);
   };
 
   const handleDiscardDraft = () => {
@@ -428,18 +450,37 @@ export function NoteViewer({
       )}
 
       {editing ? (
-        <Suspense fallback={<div className="flex-1" aria-busy="true" />}>
-          <NoteEditor
-            key={editorKey}
-            note={note}
-            focusTitle={startInEdit && !note.title}
-            initialDraft={restoredDraft}
-            onDone={() => {
-              setRestoredDraft(null);
-              setIsEditing(false);
-            }}
-          />
-        </Suspense>
+        <ErrorBoundary
+          key={editorAttempt}
+          fallback={() => (
+            <div role="alert" className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+              <AlertCircle className="h-6 w-6 text-destructive" aria-hidden="true" />
+              <p className="text-sm font-medium text-foreground">Editor could not be loaded</p>
+              <p className="max-w-xs text-xs text-muted-foreground">Check your connection and try again.</p>
+              <div className="flex gap-2">
+                <Button size="sm" onClick={retryEditor}>
+                  Retry
+                </Button>
+                <Button size="sm" variant="ghost" onClick={closeBrokenEditor}>
+                  Back to reading
+                </Button>
+              </div>
+            </div>
+          )}
+        >
+          <Suspense fallback={<div className="flex-1" aria-busy="true" />}>
+            <NoteEditor
+              key={editorKey}
+              note={note}
+              focusTitle={startInEdit && !note.title}
+              initialDraft={restoredDraft}
+              onDone={() => {
+                setRestoredDraft(null);
+                setIsEditing(false);
+              }}
+            />
+          </Suspense>
+        </ErrorBoundary>
       ) : (
         <ScrollArea className="flex-1 px-6 sm:px-10 lg:px-12 py-8">
           <div className="max-w-4xl mx-auto space-y-6 pb-20">
@@ -528,7 +569,6 @@ const TASK_SAVE_DELAY_MS = 600;
  */
 function useTaskToggle(noteId: string | undefined) {
   const queryClient = useQueryClient();
-  // baseUpdatedTime stays null until a save returned one; until then the cached note's is used
   const saver = useNoteSaver(noteId);
   const timerRef = useRef<number | null>(null);
 
@@ -554,7 +594,9 @@ function useTaskToggle(noteId: string | undefined) {
     const cached = queryClient.getQueryData<Note>(["note", noteId]);
     if (!cached) return;
 
-    saver.baseUpdatedTime ??= cached.updatedTime;
+    // The new body is built from the cached note, so that is the version it is based on. The cache
+    // also holds what the editor saved, so a save there never makes this one a false conflict.
+    saver.baseUpdatedTime = cached.updatedTime;
     await saver.send(
       { body: cached.body },
       {
@@ -563,7 +605,6 @@ function useTaskToggle(noteId: string | undefined) {
         onError: (err) => {
           if (timerRef.current !== null) window.clearTimeout(timerRef.current);
           timerRef.current = null;
-          saver.baseUpdatedTime = null;
           const current = getConflictNote(err);
           if (current) {
             queryClient.setQueryData(["note", noteId], current);

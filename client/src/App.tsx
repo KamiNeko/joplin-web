@@ -16,6 +16,7 @@ import { Loader2 } from "lucide-react";
 import { ApiError } from "@/lib/api";
 import { useConnectionState } from "@/hooks/use-connection";
 import { SessionExpiredDialog } from "@/components/common/Dialogs";
+import { AppCrashScreen, ErrorBoundary } from "@/components/common/ErrorBoundary";
 
 // Focus refetches are handled by useAutoRefresh (throttled, skips notes with unsaved edits)
 const queryClient = new QueryClient({
@@ -75,70 +76,72 @@ export function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <ThemeProvider defaultTheme="dark" storageKey="joplin-theme">
-        <AuthProvider>
-          <BrowserRouter>
-            <Routes>
-              {/* Public route */}
-              <Route path="/login" element={<LoginPage />} />
+        <ErrorBoundary fallback={() => <AppCrashScreen />}>
+          <AuthProvider>
+            <BrowserRouter>
+              <Routes>
+                {/* Public route */}
+                <Route path="/login" element={<LoginPage />} />
 
-              {/* Protected notes routes */}
-              <Route
-                path="/notes"
-                element={
-                  <ProtectedRoute>
-                    <NotesPage />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/notes/:id"
-                element={
-                  <ProtectedRoute>
-                    <NotesPage />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/notebooks/:id"
-                element={
-                  <ProtectedRoute>
-                    <NotesPage />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/notebooks/:notebookId/notes/:id"
-                element={
-                  <ProtectedRoute>
-                    <NotesPage />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/trash"
-                element={
-                  <ProtectedRoute>
-                    <NotesPage />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/trash/:id"
-                element={
-                  <ProtectedRoute>
-                    <NotesPage />
-                  </ProtectedRoute>
-                }
-              />
+                {/* Protected notes routes */}
+                <Route
+                  path="/notes"
+                  element={
+                    <ProtectedRoute>
+                      <NotesPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/notes/:id"
+                  element={
+                    <ProtectedRoute>
+                      <NotesPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/notebooks/:id"
+                  element={
+                    <ProtectedRoute>
+                      <NotesPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/notebooks/:notebookId/notes/:id"
+                  element={
+                    <ProtectedRoute>
+                      <NotesPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/trash"
+                  element={
+                    <ProtectedRoute>
+                      <NotesPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/trash/:id"
+                  element={
+                    <ProtectedRoute>
+                      <NotesPage />
+                    </ProtectedRoute>
+                  }
+                />
 
-              {/* Redirect root and unknown routes to /notes */}
-              <Route path="/" element={<Navigate to="/notes" replace />} />
-              <Route path="*" element={<Navigate to="/notes" replace />} />
-            </Routes>
-            <SessionExpiredPrompt />
-          </BrowserRouter>
-          <Toaster richColors position="bottom-right" />
-        </AuthProvider>
+                {/* Redirect root and unknown routes to /notes */}
+                <Route path="/" element={<Navigate to="/notes" replace />} />
+                <Route path="*" element={<Navigate to="/notes" replace />} />
+              </Routes>
+              <SessionExpiredPrompt />
+            </BrowserRouter>
+            <Toaster richColors position="bottom-right" />
+          </AuthProvider>
+        </ErrorBoundary>
       </ThemeProvider>
     </QueryClientProvider>
   );
