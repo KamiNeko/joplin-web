@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { JoplinApiError, JoplinNotFoundError, joplinApi } from './joplin-api.js';
 import { noteCache } from './note-cache.js';
 import { deserialize, serialize } from './serializer.js';
+import { trashedTogether } from './trash.js';
 import {
   defaultFolderProperties,
   defaultNoteProperties,
@@ -560,9 +561,10 @@ export class NoteWriterService {
   }
 
   /**
-   * Restores a trashed notebook with everything in it, like Joplin desktop: its sub-notebooks
-   * and all of their trashed notes come back, plus any trashed parent notebooks so it is visible
-   * again. Every item is read fresh and checked before the first write.
+   * Restores a trashed notebook with the sub-notebooks and notes that were trashed together with
+   * it (see `trashedTogether`). Items trashed individually before stay in the trash. Trashed
+   * parent notebooks are restored too, so the notebook is visible again. Every item is read
+   * fresh and checked before the first write.
    */
   public async restoreNotebook(sessionId: string, id: string): Promise<{ notebooks: number; notes: number }> {
     assertValidId(id, 'notebook id');
@@ -589,9 +591,17 @@ export class NoteWriterService {
       await this.write(sessionId, { type_: item.type_, title: item.title, body: item.body, properties: props });
     };
 
+    // freshSubtree lists parents before children, so one pass finds the notebooks that come back:
+    // the root and every sub-notebook trashed with it whose parent comes back too
+    const restoredIds = new Set([root.id]);
+    for (const folder of folders) {
+      if (folder.id === root.id || !restoredIds.has(folder.parentId)) continue;
+      if (!(folder.deletedTime > 0) || trashedTogether(folder, root.deletedTime)) restoredIds.add(folder.id);
+    }
+    const subtreeFolders = folders.filter((folder) => restoredIds.has(folder.id) && folder.deletedTime > 0);
     // Notebooks top-down first, so restored notes never sit in a notebook that is still trashed
-    const trashedFolders = [...trashedAncestors.reverse(), ...folders].filter((folder) => folder.deletedTime > 0);
-    const trashedNotes = notes.filter((note) => note.deletedTime > 0);
+    const trashedFolders = [...trashedAncestors.reverse(), ...subtreeFolders];
+    const trashedNotes = notes.filter((note) => restoredIds.has(note.parentId) && trashedTogether(note, root.deletedTime));
     for (const folder of trashedFolders) await restore(folder);
     for (const note of trashedNotes) await restore(note);
 
