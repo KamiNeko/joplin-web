@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { getNotes } from "@/lib/api";
@@ -15,7 +15,7 @@ const OTHER_ID = "fedcba9876543210fedcba9876543210";
 
 let calls: FetchCall[];
 let refreshResponse: () => Response | Promise<Response>;
-let queryFns: Record<string, ReturnType<typeof vi.fn>>;
+let queryFns: Record<string, Mock<() => Promise<unknown>>>;
 
 /** Active queries the Refresh button should refetch */
 function ActiveQueries() {
