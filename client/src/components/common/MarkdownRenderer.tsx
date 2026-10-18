@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
@@ -11,7 +11,8 @@ import { ApiError, downloadResource, getNote, getResourceIdFromUrl, getResourceU
 import { ResourceImage } from "./ResourceImage";
 import { cn } from "@/lib/utils";
 import type { TaskLocation } from "@/lib/tasks";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
+import { findHeading, fragmentSlug, headingSlug } from "@/lib/heading-slug";
 
 interface MarkdownRendererProps {
   content: string;
@@ -155,22 +156,23 @@ function preprocessJoplinMarkdown(raw: string): string {
     (_, before, id, after) => `<img${before}src="${getResourceUrl(id)}"${after}>`
   );
 
-  // Replace links to notes/attachments: [text](:/id) and <a href=":/id"> -> /joplin-item/id.
-  // A ":/" href would be dropped by the sanitizer as an unknown protocol.
+  // Replace links to notes/attachments: [text](:/id) and <a href=":/id"> -> /joplin-item/id, keeping
+  // a "#heading" fragment. A ":/" href would be dropped by the sanitizer as an unknown protocol.
   transformed = transformed.replace(
-    /(^|[^!])\[([^\]]*)\]\((\s*):\/?([0-9a-fA-F]{32})(\s+"[^"]*")?(\s*)\)/g,
-    (_, before, text, lead, id, title = "", trail) =>
-      `${before}[${text}](${lead}${JOPLIN_ITEM_PATH}${id.toLowerCase()}${title}${trail})`
+    /(^|[^!])\[([^\]]*)\]\((\s*):\/?([0-9a-fA-F]{32})(#[^\s()"'<>]*)?(\s+"[^"]*")?(\s*)\)/g,
+    (_, before, text, lead, id, fragment = "", title = "", trail) =>
+      `${before}[${text}](${lead}${JOPLIN_ITEM_PATH}${id.toLowerCase()}${fragment}${title}${trail})`
   );
   transformed = transformed.replace(
-    /<a([^>]+)href=["']:\/?([0-9a-fA-F]{32})["']/gi,
-    (_, before, id) => `<a${before}href="${JOPLIN_ITEM_PATH}${id.toLowerCase()}"`
+    /<a([^>]+)href=(["']):\/?([0-9a-fA-F]{32})(#[^\s"'<>]*)?\2/gi,
+    (_, before, _quote, id, fragment = "") => `<a${before}href="${JOPLIN_ITEM_PATH}${id.toLowerCase()}${fragment}"`
   );
 
   return transformed;
 }
 
 const JOPLIN_ITEM_PATH = "/joplin-item/";
+const JOPLIN_ITEM_HREF = /^\/joplin-item\/([0-9a-f]{32})(?:#(.*))?$/;
 
 /** Flattens rendered link children to plain text (used as the download file name) */
 function textContent(node: React.ReactNode): string {
@@ -257,13 +259,16 @@ function CodeBlock({ inline, className, children, ...props }: CodeBlockProps) {
  */
 export function MarkdownRenderer({ content, className, onToggleTask }: MarkdownRendererProps) {
   const navigate = useNavigate();
+  const location = useLocation();
   const queryClient = useQueryClient();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const scrolledForRef = useRef<string | null>(null);
 
   // ":/id" can point to a note or an attachment; only the server knows which
-  const openJoplinItem = async (id: string, label: string) => {
+  const openJoplinItem = async (id: string, label: string, slug: string | null) => {
     try {
       await queryClient.fetchQuery({ queryKey: ["note", id], queryFn: () => getNote(id), staleTime: 15 * 1000 });
-      navigate(`/notes/${id}`);
+      navigate(`/notes/${id}${slug ? `#${encodeURIComponent(slug)}` : ""}`);
     } catch (err) {
       if (!(err instanceof ApiError) || err.status !== 404) {
         toast.error("Could not open link", { description: err instanceof Error ? err.message : undefined });
@@ -278,8 +283,24 @@ export function MarkdownRenderer({ content, className, onToggleTask }: MarkdownR
   };
   const processedContent = preprocessJoplinMarkdown(content);
 
+  // A link to a heading ("/notes/<id>#<slug>") scrolls to it once per navigation, not on every
+  // re-render (the editor preview re-renders while typing)
+  useEffect(() => {
+    const slug = fragmentSlug(location.hash);
+    const container = containerRef.current;
+    if (!slug || !container || scrolledForRef.current === location.key) return;
+    const headings = Array.from(container.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6")).map((item) => ({
+      slug: headingSlug(item.textContent ?? ""),
+      item,
+    }));
+    const target = findHeading(headings, slug);
+    if (!target) return;
+    scrolledForRef.current = location.key;
+    target.scrollIntoView({ block: "start" });
+  }, [location.hash, location.key, processedContent]);
+
   return (
-    <div className={`prose-content text-foreground leading-relaxed ${className ?? ""}`}>
+    <div ref={containerRef} className={`prose-content text-foreground leading-relaxed ${className ?? ""}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkTaskItems]}
         rehypePlugins={[
@@ -295,11 +316,13 @@ export function MarkdownRenderer({ content, className, onToggleTask }: MarkdownR
 
             // Links to Joplin notes or attachments (":/id", rewritten in preprocessing)
             if (href.startsWith(JOPLIN_ITEM_PATH)) {
-              const itemId = href.slice(JOPLIN_ITEM_PATH.length);
+              const match = JOPLIN_ITEM_HREF.exec(href);
+              if (!match) return <span>{children}</span>;
+              const [, itemId, fragment] = match;
               return (
                 <button
                   type="button"
-                  onClick={() => void openJoplinItem(itemId, textContent(children))}
+                  onClick={() => void openJoplinItem(itemId, textContent(children), fragmentSlug(fragment ?? ""))}
                   className="inline-flex items-center text-primary underline underline-offset-4 hover:text-primary/80 transition-colors font-medium"
                 >
                   {children}
