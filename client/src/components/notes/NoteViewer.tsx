@@ -81,6 +81,41 @@ interface NoteViewerProps {
   onRemoved?: () => void;
 }
 
+// A note usually arrives within a few hundred milliseconds; showing the skeleton only after this
+// keeps a quick first open from flashing it
+const SKELETON_DELAY_MS = 300;
+
+/** Placeholder while a note loads; stays blank for quick loads. */
+function NoteSkeleton() {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setVisible(true), SKELETON_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, []);
+
+  if (!visible) return <div className="h-full bg-background" aria-busy="true" />;
+  return (
+    <div className="flex flex-col h-full bg-background p-6 lg:p-8 space-y-6 animate-in fade-in duration-300" aria-busy="true">
+      <div className="space-y-3">
+        <Skeleton className="h-9 w-3/4" />
+        <div className="flex gap-3">
+          <Skeleton className="h-5 w-28" />
+          <Skeleton className="h-5 w-24" />
+          <Skeleton className="h-5 w-32" />
+        </div>
+      </div>
+      <div className="space-y-4 pt-4">
+        <Skeleton className="h-4 w-full" />
+        <Skeleton className="h-4 w-11/12" />
+        <Skeleton className="h-4 w-4/5" />
+        <Skeleton className="h-32 w-full rounded-xl" />
+        <Skeleton className="h-4 w-full" />
+        <Skeleton className="h-4 w-3/4" />
+      </div>
+    </div>
+  );
+}
+
 export function NoteViewer({
   note,
   isLoading = false,
@@ -125,26 +160,7 @@ export function NoteViewer({
   }, [loadedNoteId]);
 
   if (isLoading) {
-    return (
-      <div className="flex flex-col h-full bg-background p-6 lg:p-8 space-y-6">
-        <div className="space-y-3">
-          <Skeleton className="h-9 w-3/4" />
-          <div className="flex gap-3">
-            <Skeleton className="h-5 w-28" />
-            <Skeleton className="h-5 w-24" />
-            <Skeleton className="h-5 w-32" />
-          </div>
-        </div>
-        <div className="space-y-4 pt-4">
-          <Skeleton className="h-4 w-full" />
-          <Skeleton className="h-4 w-11/12" />
-          <Skeleton className="h-4 w-4/5" />
-          <Skeleton className="h-32 w-full rounded-xl" />
-          <Skeleton className="h-4 w-full" />
-          <Skeleton className="h-4 w-3/4" />
-        </div>
-      </div>
-    );
+    return <NoteSkeleton />;
   }
 
   if (error) {
