@@ -3,7 +3,7 @@ services:
     container_name: joplin-web
     # Builds from this checkout. To use the prebuilt image instead, comment out `build:` and
     # uncomment `image:` (pin a version, not `latest`).
-    # image: ghcr.io/kamineko/joplin-web:1.1.0
+    # image: ghcr.io/kamineko/joplin-web:1.1.1
     build:
       context: .
       dockerfile: docker/Dockerfile
