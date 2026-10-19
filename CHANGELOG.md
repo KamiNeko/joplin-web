@@ -4,6 +4,17 @@ Notable changes to Joplin Web. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [1.1.1] – 2026-10-19
+
+### Changed
+
+- Tidier layout: the header line runs through all columns and meets the column dividers, the header takes the sidebar background, the selected note card has a full-height accent edge, and tag chips in note cards are filled (#132).
+
+### Fixed
+
+- Opening a note for the first time no longer flashes a reddish loading skeleton: it only appears after 300 ms and uses a neutral colour (#131).
+- The `Ctrl K` hint and the count pills are centred vertically (#132).
+
 ## [1.1.0] – 2026-10-18
 
 ### Features
