@@ -71,7 +71,7 @@ export function Header({
   }, [onOpenMobileSearch]);
 
   return (
-    <header className="h-14 border-b border-border/40 bg-card/60 backdrop-blur-md px-4 flex items-center justify-between gap-4 z-20">
+    <header className="h-14 shrink-0 border-b border-sidebar-border bg-sidebar px-4 flex items-center justify-between gap-4 z-20">
       {/* Left: Mobile sidebar toggle & breadcrumbs */}
       <div className="flex items-center gap-3 min-w-0">
         {onToggleSidebar && (

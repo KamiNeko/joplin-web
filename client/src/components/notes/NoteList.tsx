@@ -156,9 +156,9 @@ export function NoteList({
   const isFiltering = filterText.trim().length > 0;
 
   return (
-    <div className="flex flex-col h-full bg-background border-r border-border/50">
+    <div className="flex flex-col h-full bg-background border-r border-border">
       {/* Top bar with Title & Sort */}
-      <div className="p-3.5 border-b border-border/40 space-y-2.5">
+      <div className="px-4 py-3.5 border-b border-border space-y-2.5">
         <div className="flex items-center justify-between">
           <div className="min-w-0">
             <h2 className="text-base font-bold text-foreground truncate">{title}</h2>
