@@ -9,6 +9,16 @@ Read, write and organize your notes from any device, with nothing to install.
 
 [![CI](https://github.com/KamiNeko/joplin-web/actions/workflows/ci.yml/badge.svg)](https://github.com/KamiNeko/joplin-web/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/KamiNeko/joplin-web?sort=semver)](https://github.com/KamiNeko/joplin-web/releases)
+[![Docker image](https://img.shields.io/badge/docker-ghcr.io-2496ED?logo=docker&logoColor=white)](https://github.com/KamiNeko/joplin-web/pkgs/container/joplin-web)
+[![Last commit](https://img.shields.io/github/last-commit/KamiNeko/joplin-web)](https://github.com/KamiNeko/joplin-web/commits/main)
+<br>
+[![Node.js 22+](https://img.shields.io/badge/node-%E2%89%A522-5FA04E?logo=nodedotjs&logoColor=white)](https://nodejs.org)
+[![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![React](https://img.shields.io/badge/React-087EA4?logo=react&logoColor=white)](https://react.dev)
+[![Vite](https://img.shields.io/badge/Vite-646CFF?logo=vite&logoColor=white)](https://vite.dev)
+[![Express](https://img.shields.io/badge/Express-000000?logo=express&logoColor=white)](https://expressjs.com)
+[![Tested with Playwright](https://img.shields.io/badge/tested%20with-Playwright-2EAD33?logo=playwright&logoColor=white)](client/e2e)
 
 ![Joplin Web showing a note with a table and task list in dark mode](docs/images/notes-dark.png)
 
