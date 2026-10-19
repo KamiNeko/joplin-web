@@ -153,7 +153,8 @@ export function Header({
             </button>
           ) : (
             <kbd className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 inline-flex h-4 select-none items-center gap-1 rounded border border-border bg-muted px-1.5 font-mono text-[10px] font-medium text-muted-foreground">
-              Ctrl K
+              {/* Trimmed to the cap height so the text sits in the middle of the key */}
+              <span className="[text-box:trim-both_cap_alphabetic]">Ctrl K</span>
             </kbd>
           )}
         </div>
