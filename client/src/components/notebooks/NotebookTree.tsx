@@ -163,7 +163,8 @@ function NotebookItem({
                 : "bg-muted text-muted-foreground group-hover:bg-muted-foreground/20"
             )}
           >
-            {notebook.noteCount}
+            {/* Trimmed to the cap height so the digits sit in the middle of the pill */}
+            <span className="[text-box:trim-both_cap_alphabetic]">{notebook.noteCount}</span>
           </Badge>
         )}
       </div>

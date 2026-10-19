@@ -71,7 +71,7 @@ export function Header({
   }, [onOpenMobileSearch]);
 
   return (
-    <header className="h-14 border-b border-border/40 bg-card/60 backdrop-blur-md px-4 flex items-center justify-between gap-4 z-20">
+    <header className="h-14 shrink-0 border-b border-sidebar-border bg-sidebar px-4 flex items-center justify-between gap-4 z-20">
       {/* Left: Mobile sidebar toggle & breadcrumbs */}
       <div className="flex items-center gap-3 min-w-0">
         {onToggleSidebar && (
@@ -153,7 +153,8 @@ export function Header({
             </button>
           ) : (
             <kbd className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 inline-flex h-4 select-none items-center gap-1 rounded border border-border bg-muted px-1.5 font-mono text-[10px] font-medium text-muted-foreground">
-              Ctrl K
+              {/* Trimmed to the cap height so the text sits in the middle of the key */}
+              <span className="[text-box:trim-both_cap_alphabetic]">Ctrl K</span>
             </kbd>
           )}
         </div>

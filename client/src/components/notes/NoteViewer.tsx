@@ -328,7 +328,7 @@ export function NoteViewer({
   return (
     <div className="flex flex-col h-full bg-background relative overflow-hidden">
       {/* Header bar */}
-      <div className="px-4 sm:px-6 py-3 border-b border-border/40 flex items-center justify-between gap-3 bg-background/80 backdrop-blur-xs z-10">
+      <div className="px-4 sm:px-6 py-3 flex items-center justify-between gap-3 bg-background z-10">
         <div className="flex flex-wrap items-center gap-2 min-w-0">
           {note.notebookTitle && (
             <button

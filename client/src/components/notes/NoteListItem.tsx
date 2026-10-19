@@ -38,16 +38,12 @@ export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteList
         }
       }}
       className={cn(
-        "group relative flex flex-col gap-1.5 p-3.5 rounded-xl border text-left transition-all duration-150 cursor-pointer outline-hidden focus-visible:ring-2 focus-visible:ring-primary",
+        "group relative flex flex-col gap-1.5 p-3.5 rounded-xl border border-l-2 text-left transition-all duration-150 cursor-pointer outline-hidden focus-visible:ring-2 focus-visible:ring-primary",
         isActive
-          ? "bg-card border-primary/40 shadow-xs"
+          ? "bg-card border-border border-l-primary"
           : "bg-transparent border-transparent hover:bg-muted/60"
       )}
     >
-      {/* Active accent pill indicator */}
-      {isActive && (
-        <span className="absolute left-0 top-3 bottom-3 w-1 bg-primary rounded-r-full" />
-      )}
 
       {/* Header: Title and Time */}
       <div className="flex items-start justify-between gap-2">
@@ -131,7 +127,7 @@ export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteList
             <Badge
               key={tag.id}
               variant="outline"
-              className="text-[10px] px-1.5 py-0 h-4 bg-muted/30 border-border/40 text-muted-foreground"
+              className="text-[10px] px-1.5 py-0 h-4 rounded-md bg-muted border-transparent text-muted-foreground font-normal"
             >
               #{tag.title}
             </Badge>

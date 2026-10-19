@@ -39,7 +39,7 @@ export function AppLayout({
   return (
     <div className="flex h-screen w-full overflow-hidden bg-background">
       {/* Desktop Persistent Sidebar */}
-      <div className="hidden md:flex w-64 lg:w-72 shrink-0 h-full border-r border-border/40">
+      <div className="hidden md:flex w-64 lg:w-72 shrink-0 h-full">
         {sidebar({})}
       </div>
 

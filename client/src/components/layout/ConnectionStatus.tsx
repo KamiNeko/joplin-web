@@ -50,7 +50,7 @@ export function ConnectionStatus() {
   }
 
   return (
-    <div className="border-t border-border/40 px-3 py-2">
+    <div className="border-t border-sidebar-border px-3 py-2">
       <span role="status" aria-live="polite" className="sr-only">
         {announcement}
       </span>

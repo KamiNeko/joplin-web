@@ -196,10 +196,11 @@ export function Sidebar({
       )}
     >
       {/* Brand & App Logo */}
-      <div className="flex items-center justify-between px-4 py-3.5 border-b border-border/40">
+      {/* Same height and line as the header, so the line runs through both columns */}
+      <div className="flex items-center justify-between h-14 shrink-0 px-4 border-b border-sidebar-border">
         <div className="flex items-center gap-2.5">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary/15 text-primary border border-primary/25 shadow-xs">
-            <BookOpen className="h-5 w-5" />
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/15 text-primary border border-primary/25">
+            <BookOpen className="h-4 w-4" />
           </div>
           <h1 className="text-sm font-bold text-foreground tracking-tight">
             Joplin Web
@@ -221,7 +222,7 @@ export function Sidebar({
 
       {/* Search Input Bar: only in the mobile slide-out menu; on desktop the header holds the search field */}
       {onCloseMobile && (
-        <div className="p-3 border-b border-border/30">
+        <div className="p-3 border-b border-sidebar-border">
           <div className="relative">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
             <Input

@@ -143,7 +143,7 @@
     --accent-foreground: 48 33% 97%;
     --destructive: 0 70% 67%;
     --destructive-foreground: 60 3% 8%;
-    --border: 50 4% 24%;
+    --border: 50 4% 22%;
     --input: 50 4% 28%;
     --ring: 15 63% 60%;
 
@@ -163,7 +163,7 @@
     --sidebar-primary-foreground: 60 3% 8%;
     --sidebar-accent: 60 3% 18%;
     --sidebar-accent-foreground: 48 33% 97%;
-    --sidebar-border: 50 4% 20%;
+    --sidebar-border: 50 4% 22%;          /* same as --border, so the header and column lines meet */
     --sidebar-ring: 15 63% 60%;
   }
 
