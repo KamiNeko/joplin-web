@@ -23,7 +23,7 @@ In production the backend also serves the compiled client (`client/dist`) on the
 | :--- | :--- |
 | `services/joplin-api.ts` | HTTP client for Joplin Server; maps errors to `JoplinAuthError` / `JoplinNotFoundError` / `JoplinConnectionError`. |
 | `services/serializer.ts` | `deserialize` / `serialize` Joplin's text format, `stripMarkdown` / `stripHtml` (via `notePreview`, by `markup_language`) for list previews. |
-| `services/note-cache.ts` | Per-session in-memory cache of all items, refreshed after `CACHE_TTL_MS`; only items whose `updated_time` changed are re-fetched. Builds the notebook tree, note lists, tag counts (each counted in one pass) and search (all without conflict copies, see *Conflict copies*) and the conflicts list; every item in them carries `encrypted` (see *Encrypted items*). A session's cache is freed on logout, when Joplin Server rejects the session, and after 2 hours without use (expired or abandoned sessions never log out). See *Cache refresh* below. |
+| `services/note-cache.ts` | In-memory cache of all items, one per session or, with `CACHE_DIR`, one per Joplin user (shared by the user's sessions, saved to disk after each refresh that changed something and loaded from there after a restart). Refreshed after `CACHE_TTL_MS`; only changed items are re-fetched. Builds the notebook tree, note lists, tag counts (each counted in one pass) and search (all without conflict copies, see *Conflict copies*) and the conflicts list; every item in them carries `encrypted` (see *Encrypted items*). A session's cache is freed on logout, when Joplin Server rejects the session, and after 2 hours without use (expired or abandoned sessions never log out). With `CACHE_DIR` those only unlink the session (logins are mapped to users by a SHA-256 of the session id in `sessions.json`); an idle user entry leaves memory after 2 hours and is reloaded from disk. See *Cache refresh* below. |
 | `services/search-query.ts` | Parses the search syntax (words, phrases, negation, `tag:`/`notebook:`/`type:`/`iscompleted:` filters) for `note-cache`'s search; see *Search syntax*. |
 | `services/note-writer.ts` | All writes: create/update/trash/restore/purge for notes, notebooks, tags, note-tag links and resources; conflict detection; `getWriteState` (the E2EE guard as a yes/no answer for the client). |
 | `services/item-defaults.ts` | Property sets Joplin desktop writes for new notes, notebooks, tags, note-tag links and resources; used by the writer on create. |
@@ -44,7 +44,8 @@ In production the backend also serves the compiled client (`client/dist`) on the
 | `GET /api/ping` | Health check |
 | `POST /api/sessions` `{ email, password }` | Login, returns `{ id, user_id }` |
 | `POST /logout` (`X-API-AUTH` + `sessionId` cookie) | Ends the session (Joplin Server's web logout; there is no API route for it). Its CSRF check skips `/logout`. Success is a redirect to `<baseUrl>/login`; anything else is treated as failure. |
-| `GET /api/items/root:/:/children?cursor=` | Paginated listing of all items (`{ items, has_more, cursor }`) |
+| `GET /api/items/root:/:/children?cursor=` | Paginated listing of all items (`{ items, has_more, cursor }`), at most 100 per page |
+| `GET /api/items/root/delta?cursor=&limit=` | Changes since a cursor (`{ items: [{ item_name, type, updated_time }], cursor, has_more }`, `type` 1 created, 2 updated, 3 deleted; an empty cursor starts at the beginning). `400` with `code: "resyncRequired"` when the cursor was pruned. Used for refreshes after the first listing; a server without it (`404`) is listed in full every time. |
 | `GET /api/items/root:/<id>.md:/content` | Raw item text |
 | `GET /api/items/root:/.resource/<id>:/content` | Attachment binary |
 | `GET /api/items/root:/info.json:/content` | Sync target info (E2EE state), checked before writes (see Write rules); 404 means none yet |
@@ -53,7 +54,7 @@ In production the backend also serves the compiled client (`client/dist`) on the
 
 ### Cache refresh
 
-A refresh lists all items (`/children`, every page) and re-reads only `.md` items whose `updated_time` differs from the cached one (10 in parallel); items missing from the listing are dropped. When it runs:
+The first refresh notes where the delta feed stands, then lists all items (`/children`, every page) and reads the `.md` items (10 in parallel). Later refreshes read only the changes since from the delta feed (one request when nothing changed), re-read the changed `.md` items and drop deleted ones. When the cursor has expired (`resyncRequired`) or the server has no delta feed, a refresh lists all items again, re-reads only `.md` items whose `updated_time` differs from the cached one and drops items missing from the listing. When it runs:
 
 - **Reads** (lists, tree, tags, search, note, attachment metadata): within `CACHE_TTL_MS` the cache answers directly. Once it has expired, data up to 10 × `CACHE_TTL_MS` old is still served at once while a refresh runs in the background (stale-while-revalidate); concurrent requests share one refresh. The first load, older data, and the first read after a failed refresh wait for the refresh. With `CACHE_TTL_MS=0` every read waits.
 - **Writes** (`noteCache.getEntry`) never use expired data: they wait for a refresh (or join the one running), since the E2EE check, link cleanup and tag-name lookups rely on it.
@@ -186,4 +187,4 @@ Filter values may be quoted; tag and notebook names must match the whole title, 
 
 ## Mock Joplin Server (`server/demo`)
 
-`mock-joplin-server.ts` implements the endpoints above in memory; `seed.ts` builds sample notebooks, notes, tags and an image with stable ids (`demoId(key)`). `buildEncryptedDemoItems()` is the same account with E2EE on (`info.json` `e2ee: true`, plus an encrypted notebook, notes, tag and note-tag link written the way Joplin's `serializeForSync` does); `DEMO_E2EE=1 npm run demo` starts the demo with it. It backs `npm run demo`, the API tests and the README screenshots. When Joplin Web starts using a new Joplin Server endpoint, add it to the mock too.
+`mock-joplin-server.ts` implements the endpoints above in memory (the delta feed only with `delta: true`, so the other tests cover a server without it); `seed.ts` builds sample notebooks, notes, tags and an image with stable ids (`demoId(key)`). `buildEncryptedDemoItems()` is the same account with E2EE on (`info.json` `e2ee: true`, plus an encrypted notebook, notes, tag and note-tag link written the way Joplin's `serializeForSync` does); `DEMO_E2EE=1 npm run demo` starts the demo with it. It backs `npm run demo`, the API tests and the README screenshots. When Joplin Web starts using a new Joplin Server endpoint, add it to the mock too.

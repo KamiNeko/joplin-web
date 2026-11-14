@@ -176,6 +176,14 @@ export interface JoplinChildItem {
   updated_time: number;
 }
 
+/** One entry of Joplin Server's delta feed (GET /api/items/root/delta) */
+export interface JoplinDeltaChange {
+  item_name: string;
+  /** 1 created, 2 updated, 3 deleted */
+  type: number;
+  updated_time: number;
+}
+
 /**
  * Joplin Server children list response
  */

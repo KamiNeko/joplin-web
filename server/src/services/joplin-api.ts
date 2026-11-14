@@ -3,6 +3,7 @@ import { config } from '../config.js';
 import {
   JoplinChildItem,
   JoplinChildrenResponse,
+  JoplinDeltaChange,
   SessionInfo,
 } from '../types/index.js';
 
@@ -248,6 +249,34 @@ export class JoplinApiService {
     }
 
     return allItems;
+  }
+
+  /**
+   * Reads every change since `cursor` from Joplin Server's delta feed (what the desktop app syncs
+   * with). An empty cursor starts at the beginning of the account's history. Throws a
+   * JoplinApiError with `details.code === 'resyncRequired'` when the cursor has expired, and a
+   * JoplinNotFoundError when the server has no delta route.
+   *
+   * @returns The changes in order and the cursor to resume from
+   */
+  public async getDelta(sessionId: string, cursor: string): Promise<{ changes: JoplinDeltaChange[]; cursor: string }> {
+    const changes: JoplinDeltaChange[] = [];
+    for (;;) {
+      let data: { items?: JoplinDeltaChange[]; cursor?: string; has_more?: boolean };
+      try {
+        const res = await this.client.get('/api/items/root/delta', {
+          headers: { 'X-API-AUTH': sessionId },
+          params: { cursor, limit: 1000 },
+        });
+        data = res.data;
+      } catch (error) {
+        this.handleError(error, 'getDelta');
+      }
+      if (Array.isArray(data?.items)) changes.push(...data.items);
+      const next = data?.cursor || cursor;
+      if (!data?.has_more || next === cursor) return { changes, cursor: next };
+      cursor = next;
+    }
   }
 
   /**

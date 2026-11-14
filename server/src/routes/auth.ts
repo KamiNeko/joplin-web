@@ -70,6 +70,7 @@ export function createAuthRouter(
 
       // Cache the new session as valid
       cacheSessionValidation(session.sessionId, true);
+      if (session.userId) noteCache.bindSession(session.sessionId, session.userId);
       console.log(`[AuthRoute] Login succeeded, session ${session.sessionId.substring(0, 8)}...`);
 
       const cookie = sessionCookie(config, req);
