@@ -12,6 +12,8 @@ export interface AppConfig {
   corsOrigin: string | string[] | false;
   nodeEnv: string;
   cacheTtlMs: number;
+  /** Directory the note caches are kept in across restarts (CACHE_DIR), null keeps them in memory only */
+  cacheDir: string | null;
   authCacheTtlMs: number;
   clientDistPath: string;
   /** Value for Express' "trust proxy" setting; false means X-Forwarded-* headers are ignored */
@@ -176,6 +178,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     corsOrigin: parseCorsOrigin(env.CORS_ORIGIN, nodeEnv),
     nodeEnv,
     cacheTtlMs: parseInt(env.CACHE_TTL_MS || '30000', 10),
+    cacheDir: env.CACHE_DIR || null,
     authCacheTtlMs: parseInt(env.AUTH_CACHE_TTL_MS || '300000', 10),
     clientDistPath: defaultClientDistPath,
     trustProxy: parseTrustProxy(env.TRUST_PROXY),

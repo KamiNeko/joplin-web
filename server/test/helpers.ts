@@ -47,19 +47,21 @@ export async function freePort(): Promise<number> {
  * @param options.cacheTtlMs Backend cache TTL, defaults to 0 (every read re-syncs with the mock)
  */
 export async function startTestApp(
-  options: { pageSize?: number; items?: Map<string, MockItem>; cacheTtlMs?: number } = {}
+  options: { pageSize?: number; items?: Map<string, MockItem>; cacheTtlMs?: number; delta?: boolean; cacheDir?: string } = {}
 ): Promise<TestApp> {
   const mock = await startMockJoplinServer({
     email: DEMO_EMAIL,
     password: DEMO_PASSWORD,
     items: options.items ?? buildDemoItems(),
     pageSize: options.pageSize,
+    delta: options.delta,
   });
   const port = await freePort();
   // Must be set before the backend's config module is loaded
   process.env.JOPLIN_SERVER_URL = mock.url;
   process.env.PORT = String(port);
   process.env.CACHE_TTL_MS = String(options.cacheTtlMs ?? 0);
+  if (options.cacheDir) process.env.CACHE_DIR = options.cacheDir;
   const baseUrl = `http://127.0.0.1:${port}`;
   const { server } = (await import('../src/index.js')) as { server: Server };
   if (!server.listening) await new Promise((resolve) => server.once('listening', resolve));
