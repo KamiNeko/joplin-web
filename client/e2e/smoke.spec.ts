@@ -144,7 +144,7 @@ test("selects multiple notes, moves them in bulk and undoes the move", async ({ 
   await sidebar.getByRole("button", { name: /^Recipes/ }).click();
   await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-recipes")}(/|$)`));
   await expect(page.getByRole("heading", { level: 2, name: "Recipes" })).toBeVisible();
-  await expect(page.getByText("Weeknight Miso Ramen")).toBeVisible();
+  await expect(page.getByRole("heading", { level: 3, name: "Weeknight Miso Ramen", exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Select", exact: true }).click();
   await page.getByRole("checkbox", { name: "Select Weeknight Miso Ramen" }).click();
@@ -159,8 +159,8 @@ test("selects multiple notes, moves them in bulk and undoes the move", async ({ 
 
   await page.getByRole("button", { name: "Undo" }).click();
   await expect(page.getByText("Moved back 2 notes")).toBeVisible();
-  await expect(page.getByText("Weeknight Miso Ramen")).toBeVisible();
-  await expect(page.getByText("Sourdough Starter Schedule")).toBeVisible();
+  await expect(page.getByRole("heading", { level: 3, name: "Weeknight Miso Ramen", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 3, name: "Sourdough Starter Schedule", exact: true })).toBeVisible();
   await expect(sidebar.getByRole("button", { name: /^Recipes\s*, 2 notes$/ })).toBeVisible();
 });
 
