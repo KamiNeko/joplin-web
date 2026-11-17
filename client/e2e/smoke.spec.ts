@@ -2,11 +2,16 @@ import { readFile } from "node:fs/promises";
 import { expect, Page, test } from "@playwright/test";
 import { demoId, signIn, uniqueWord } from "./helpers";
 
+/** A note's row in the list (its title also shows in the open note on desktop) */
+const listedNote = (page: Page, title: string) => page.getByRole("heading", { level: 3, name: title, exact: true });
+
 /** Opens the Reading List notebook and waits until its notes are listed */
 async function openReadingList(page: Page) {
   await page.getByRole("complementary").first().getByRole("button", { name: /^Reading List/ }).click();
   await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-reading")}(/|$)`));
-  await expect(page.getByText("Book Notes: Deep Work")).toBeVisible();
+  // The previous list (All Notes) lists the same note until the new one renders
+  await expect(page.getByRole("heading", { level: 2, name: "Reading List" })).toBeVisible();
+  await expect(listedNote(page, "Book Notes: Deep Work")).toBeVisible();
 }
 
 /** Creates a note in the current list; it opens in the editor */
@@ -28,7 +33,7 @@ test.describe("sign-in", () => {
     await expect(page.getByText("Invalid email or password", { exact: false })).toBeVisible();
 
     await signIn(page);
-    await expect(page).toHaveURL(/\/notes$/);
+    await expect(page).toHaveURL(/\/notes(\/[0-9a-f]{32})?$/);
     await expect(page.getByRole("heading", { name: "All Notes" })).toBeVisible();
   });
 
@@ -54,14 +59,14 @@ test("browses notebooks and tags of the demo data", async ({ page }) => {
   const sidebar = page.getByRole("complementary").first();
 
   await sidebar.getByRole("button", { name: /^Recipes/ }).click();
-  await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-recipes")}$`));
-  await expect(page.getByText("Weeknight Miso Ramen")).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-recipes")}/notes/[0-9a-f]{32}$`));
+  await expect(listedNote(page, "Weeknight Miso Ramen")).toBeVisible();
   await expect(page.getByText("Website Relaunch Roadmap")).toHaveCount(0);
 
   await sidebar.getByRole("button", { name: /^books\b/ }).click();
-  await expect(page).toHaveURL(new RegExp(`/notes\\?tag=${demoId("tag-books")}$`));
-  await expect(page.getByText("Book Notes: Deep Work")).toBeVisible();
-  await expect(page.getByText("Books to Read in 2026")).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`/notes/[0-9a-f]{32}\\?tag=${demoId("tag-books")}$`));
+  await expect(listedNote(page, "Book Notes: Deep Work")).toBeVisible();
+  await expect(listedNote(page, "Books to Read in 2026")).toBeVisible();
   await expect(page.getByText("Weeknight Miso Ramen")).toHaveCount(0);
 });
 
@@ -80,7 +85,7 @@ test("creates, edits, tags, finds, trashes and restores a note", async ({ page }
   await page.getByLabel("Note title").fill(title);
   await page.locator(".cm-content").click();
   await page.keyboard.type(`Written by the smoke test: ${word}`);
-  await page.getByRole("button", { name: "Done" }).click();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
   await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
   await expect(page.locator(".prose-content").getByText(`Written by the smoke test: ${word}`)).toBeVisible();
 
@@ -136,7 +141,7 @@ test("attaches a file to a note", async ({ page }) => {
   });
   // The placeholder becomes a link to the new resource
   await expect(page.locator(".cm-content")).toContainText(new RegExp(`\\[${word}\\.txt\\]\\(:/[0-9a-f]{32}\\)`));
-  await page.getByRole("button", { name: "Done" }).click();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
 
   // The rendered note links the attachment; clicking it downloads the uploaded file
   const download = page.waitForEvent("download");
