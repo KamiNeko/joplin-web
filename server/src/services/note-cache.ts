@@ -100,6 +100,26 @@ const notebookTitle = (item: RawJoplinItem): string =>
 /** Display title of a tag, see `notebookTitle` */
 const tagTitle = (item: RawJoplinItem): string => (isEncrypted(item) ? 'Encrypted tag' : item.title || 'Untitled Tag');
 
+/** Image types every browser shows in an `<img>`: no SVG (sent as an attachment) or TIFF/HEIC */
+const THUMBNAIL_IMAGE_MIME = /^image\/(jpeg|png|gif|webp|avif|bmp)$/;
+
+/**
+ * The first image or PDF attachment a note body links to (`:/id` in Markdown or HTML), shown as the
+ * note's thumbnail in lists. Encrypted notes have no readable body, so they never get one.
+ */
+const noteThumbnail = (
+  note: RawJoplinItem,
+  resources: Map<string, ResourceMetadata>
+): NoteListItem['thumbnail'] => {
+  if (isEncrypted(note) || !note.body) return undefined;
+  for (const [, id] of note.body.matchAll(/:\/([0-9a-fA-F]{32})/g)) {
+    const mime = resources.get(id.toLowerCase())?.mime ?? '';
+    if (mime === 'application/pdf') return { resourceId: id.toLowerCase(), kind: 'pdf' };
+    if (THUMBNAIL_IMAGE_MIME.test(mime)) return { resourceId: id.toLowerCase(), kind: 'image' };
+  }
+  return undefined;
+};
+
 /**
  * How a caller wants the cache refreshed, see `NoteCacheService.ensureFresh`
  */
@@ -859,6 +879,7 @@ export class NoteCacheService {
       todoDue: n.todoDue,
       isConflict: isConflictNote(n),
       encrypted: isEncrypted(n),
+      thumbnail: noteThumbnail(n, entry.resources),
     }));
   }
 
