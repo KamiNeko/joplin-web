@@ -16,6 +16,8 @@ export interface PdfThumbnail {
 type PdfJs = typeof import("pdfjs-dist");
 
 let pdfjsPromise: Promise<PdfJs> | null = null;
+/** Directory of pdf.js's no-WASM image decoders (JBIG2/CCITT scans, JPEG 2000), see vite.config.ts */
+let wasmUrl = "";
 const resolvedThumbnails = new Map<string, PdfThumbnail>();
 const pendingThumbnails = new Map<string, Promise<PdfThumbnail>>();
 let cacheGeneration = 0;
@@ -29,9 +31,14 @@ function loadPdfJs(): Promise<PdfJs> {
     pdfjsPromise = Promise.all([
       import("pdfjs-dist"),
       import("pdfjs-dist/build/pdf.worker.min.mjs?url"),
+      // Not imported by pdf.js itself: its worker loads them by name from `wasmUrl`. Without them
+      // scanned (1-bit CCITT/JBIG2) pages render blank.
+      import("pdfjs-dist/wasm/jbig2_nowasm_fallback.js?url"),
+      import("pdfjs-dist/wasm/openjpeg_nowasm_fallback.js?url"),
     ])
-      .then(([pdfjs, worker]) => {
+      .then(([pdfjs, worker, jbig2]) => {
         pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
+        wasmUrl = new URL(".", new URL(jbig2.default, window.location.href)).href;
         return pdfjs;
       })
       .catch((err) => {
@@ -94,6 +101,7 @@ async function renderFirstPage(resourceId: string): Promise<PdfThumbnail> {
     // Keep pdf.js free of dynamic eval / runtime Wasm compilation under strict `script-src 'self'` CSP
     isEvalSupported: false,
     useWasm: false,
+    wasmUrl,
     verbosity: pdfjs.VerbosityLevel?.ERRORS ?? 0,
   } as DocumentInitParameters & { isEvalSupported: boolean };
 
