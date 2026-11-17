@@ -153,6 +153,9 @@ function NoteSearch({
                   <span className="block truncate font-medium">{note.title || "Untitled"}</span>
                   {(note.matches?.snippet || note.preview) && (
                     <span className="block truncate text-xs text-muted-foreground">
+                      {note.matches?.matchedIn === "attachment" && note.matches.snippet && (
+                        <span className="font-medium text-foreground/75">Found in attachment: </span>
+                      )}
                       {note.matches?.snippet || note.preview}
                     </span>
                   )}

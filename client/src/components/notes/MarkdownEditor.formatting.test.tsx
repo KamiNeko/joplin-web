@@ -82,4 +82,36 @@ describe("MarkdownEditor formatting", () => {
     expect(onChange).toHaveBeenLastCalledWith(`[Trip \\[2026\\]](:/${other})`, expect.anything());
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
+
+  it('shows "Found in attachment:" in the link picker when a result matched only via OCR', async () => {
+    mockFetch((call) => {
+      if (call.path.startsWith("/api/search")) {
+        return jsonResponse([
+          {
+            id: other,
+            title: "2024_03_11.pdf",
+            preview: "2024_03_11.pdf",
+            updatedTime: 1,
+            createdTime: 1,
+            matches: {
+              inTitle: false,
+              inBody: false,
+              matchedIn: "attachment",
+              snippet: "...Dedicated Backup Storage (2 TB)...",
+              terms: ["backup storage"],
+            },
+          },
+        ]);
+      }
+    });
+    renderEditor("");
+    fireEvent.click(screen.getByRole("button", { name: "Link to note" }));
+    fireEvent.change(await screen.findByRole("combobox", { name: "Search notes" }), {
+      target: { value: "backup" },
+    });
+
+    const option = await screen.findByRole("option", { name: /2024_03_11\.pdf/ });
+    expect(option.textContent).toContain("Found in attachment:");
+    expect(option.textContent).toContain("Dedicated Backup Storage");
+  });
 });

@@ -1,9 +1,20 @@
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { config } from '../config.js';
-import { joplinApi } from './joplin-api.js';
+import { JoplinApiError, JoplinNotFoundError, joplinApi } from './joplin-api.js';
 import { deserialize, markupLanguageOf, notePreview } from './serializer.js';
-import { isEmptySearchQuery, matchesNamePattern, parseSearchQuery } from './search-query.js';
+import {
+  buildOcrSnippet,
+  extractLinkedResourceIds,
+  isEmptySearchQuery,
+  matchesNamePattern,
+  normalizeOcrText,
+  parseSearchQuery,
+} from './search-query.js';
 import { trashedTogether } from './trash.js';
 import {
+  JoplinDeltaChange,
   JoplinItemType,
   Notebook,
   NoteDetail,
@@ -33,6 +44,50 @@ export const IDLE_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 /** Idle entries are looked for at most this often */
 const IDLE_SWEEP_INTERVAL_MS = 60 * 1000;
 
+/** Delta feed change type of a deleted item */
+const DELTA_DELETED = 3;
+
+/** The delta cursor expired (Joplin Server prunes old changes) or the server has no delta feed */
+const needsRelisting = (err: unknown): boolean =>
+  err instanceof JoplinNotFoundError ||
+  (err instanceof JoplinApiError && (err.details as { code?: string } | undefined)?.code === 'resyncRequired');
+
+/** Session ids are bearer tokens, so only their hashes are written to disk */
+const hashSession = (sessionId: string): string => createHash('sha256').update(sessionId).digest('hex');
+
+/** Cache key of a Joplin user's shared entry; session ids never contain ':' */
+const userKey = (userId: string): string => `user:${userId}`;
+
+const SESSIONS_FILE = 'sessions.json';
+const entryFile = (key: string): string => `${key.replace(':', '-')}.json`;
+
+function readCacheFile<T>(name: string): T | null {
+  if (!config.cacheDir) return null;
+  try {
+    return JSON.parse(readFileSync(join(config.cacheDir, name), 'utf8')) as T;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Replaces a file in CACHE_DIR atomically. Failures are logged, never thrown: the cache then just
+ * stays in memory.
+ * The JSON of the whole account is built synchronously (~17 MB for ~17k items, well under a second
+ * of blocking), and only after a refresh that changed something. Stream it if that ever shows.
+ */
+function writeCacheFile(name: string, value: unknown): void {
+  if (!config.cacheDir) return;
+  const file = join(config.cacheDir, name);
+  try {
+    mkdirSync(config.cacheDir, { recursive: true, mode: 0o700 });
+    writeFileSync(`${file}.tmp`, JSON.stringify(value), { mode: 0o600 });
+    renameSync(`${file}.tmp`, file);
+  } catch (err) {
+    console.error(`[NoteCache] Could not save ${name}:`, err);
+  }
+}
+
 /**
  * Whether a note is a conflict copy (`is_conflict: 1`). Joplin desktop and mobile create one when a
  * sync conflict happens and keep it in the original notebook, but list it only in their virtual
@@ -51,6 +106,40 @@ const notebookTitle = (item: RawJoplinItem): string =>
 
 /** Display title of a tag, see `notebookTitle` */
 const tagTitle = (item: RawJoplinItem): string => (isEncrypted(item) ? 'Encrypted tag' : item.title || 'Untitled Tag');
+
+/**
+ * Copies a string out of any V8 SlicedString backing buffer so keeping resource metadata in
+ * memory never retains the full deserialized `.md` string (which can include large `ocr_details`).
+ */
+function detachString(value: string): string {
+  return value.length === 0 ? '' : Buffer.from(value, 'utf8').toString('utf8');
+}
+
+/**
+ * Extracts `ocr_text` only when OCR completed (`ocr_status: 2`) on a readable resource item.
+ */
+function ocrTextOf(item: RawJoplinItem): string {
+  if (isEncrypted(item) || item.properties.ocr_status !== '2') return '';
+  const raw = item.properties.ocr_text;
+  return raw && raw.trim() ? detachString(raw) : '';
+}
+
+/** Builds a detached `ResourceMetadata` record from a deserialized resource item */
+function resourceMetadataOf(item: RawJoplinItem): ResourceMetadata {
+  return {
+    id: detachString(item.id),
+    title: detachString(item.title),
+    mime: detachString(item.properties.mime || 'application/octet-stream'),
+    filename: detachString(item.properties.filename || ''),
+    fileExtension: detachString(item.properties.file_extension || ''),
+    size: Number(item.properties.size || 0),
+    updatedTime: item.updatedTime,
+    ocrText: ocrTextOf(item),
+  };
+}
+
+/** On-disk cache format version; bumped whenever `SavedEntry` changes so old caches rebuild */
+const CACHE_FORMAT_VERSION = 2 as const;
 
 /**
  * How a caller wants the cache refreshed, see `NoteCacheService.ensureFresh`
@@ -84,6 +173,12 @@ export interface CacheEntry {
   itemTimestamps: Map<string, number>;
   /** `updated_time` of the sync target's info.json in the last listing, null when it has none */
   syncInfoUpdatedTime: number | null;
+  /**
+   * Where the last refresh left Joplin Server's delta feed. The next refresh then only reads the
+   * changes since (one request when nothing changed) instead of re-listing the whole account.
+   * null until the first full listing, or when the server has no delta feed.
+   */
+  deltaCursor: string | null;
   /** Ids of items stored with `encryption_applied: 1` */
   encryptedItemIds: Set<string>;
   /** Ids of master key items (type 9), which exist only on accounts that used E2EE */
@@ -100,6 +195,23 @@ export interface CacheEntry {
   localChanges: Map<string, number>;
 }
 
+/** A user's cache entry as written to CACHE_DIR */
+interface SavedEntry {
+  version: typeof CACHE_FORMAT_VERSION;
+  lastFetched: number;
+  notebooks: Array<[string, RawJoplinItem]>;
+  notes: Array<[string, RawJoplinItem]>;
+  tags: Array<[string, RawJoplinItem]>;
+  noteTags: NoteTagLink[];
+  resources: Array<[string, ResourceMetadata]>;
+  itemTimestamps: Array<[string, number]>;
+  syncInfoUpdatedTime: number | null;
+  deltaCursor: string | null;
+  encryptedItemIds: string[];
+  masterKeyIds: string[];
+  unreadableItems: string[];
+}
+
 /**
  * In-memory note cache service.
  * Maintains session-isolated caches of deserialized Joplin items with TTL auto-refreshing.
@@ -107,6 +219,30 @@ export interface CacheEntry {
 export class NoteCacheService {
   private caches: Map<string, CacheEntry> = new Map();
   private lastIdleSweep = 0;
+  /**
+   * Joplin user of each session that logged in, by session hash. Only used with CACHE_DIR: the
+   * sessions of one user then share one cache entry, which is also kept on disk, so a new login
+   * or a restart does not have to read the whole account again.
+   */
+  private sessionUsers = new Map<string, string>(
+    Object.entries(readCacheFile<Record<string, string>>(SESSIONS_FILE) ?? {})
+  );
+
+  /** Cache key of a session: its user's shared entry when known, else the session itself */
+  private keyOf(sessionId: string): string {
+    const userId = this.sessionUsers.get(hashSession(sessionId));
+    return userId ? userKey(userId) : sessionId;
+  }
+
+  /**
+   * Records which Joplin user a session belongs to (at login), so it shares that user's cache.
+   * Does nothing without CACHE_DIR, where every session keeps its own cache.
+   */
+  public bindSession(sessionId: string, userId: string): void {
+    if (!config.cacheDir || !/^[A-Za-z0-9_-]+$/.test(userId)) return;
+    this.sessionUsers.set(hashSession(sessionId), userId);
+    writeCacheFile(SESSIONS_FILE, Object.fromEntries(this.sessionUsers));
+  }
 
   /**
    * Retrieves or initializes the cache entry for a given session
@@ -114,9 +250,10 @@ export class NoteCacheService {
   private getOrCreateEntry(sessionId: string): CacheEntry {
     const now = Date.now();
     if (now - this.lastIdleSweep >= IDLE_SWEEP_INTERVAL_MS) this.evictIdleCaches(now);
-    let entry = this.caches.get(sessionId);
+    const key = this.keyOf(sessionId);
+    let entry = this.caches.get(key);
     if (!entry) {
-      entry = {
+      entry = this.loadEntry(key) ?? {
         lastFetched: 0,
         lastAccessed: now,
         fetchPromise: null,
@@ -128,15 +265,64 @@ export class NoteCacheService {
         resources: new Map(),
         itemTimestamps: new Map(),
         syncInfoUpdatedTime: null,
+        deltaCursor: null,
         encryptedItemIds: new Set(),
         masterKeyIds: new Set(),
         unreadableItems: new Set(),
         localChanges: new Map(),
       };
-      this.caches.set(sessionId, entry);
+      this.caches.set(key, entry);
     }
     entry.lastAccessed = now;
     return entry;
+  }
+
+  /** Reads a user's entry saved by `saveEntry`, null when there is none */
+  private loadEntry(key: string): CacheEntry | null {
+    if (!key.startsWith('user:')) return null;
+    const saved = readCacheFile<SavedEntry>(entryFile(key));
+    if (saved?.version !== CACHE_FORMAT_VERSION) return null;
+    console.log(`[NoteCache] Loaded saved cache: ${saved.notes.length} notes`);
+    return {
+      lastFetched: saved.lastFetched,
+      lastAccessed: Date.now(),
+      fetchPromise: null,
+      lastRefreshFailed: false,
+      notebooks: new Map(saved.notebooks),
+      notes: new Map(saved.notes),
+      tags: new Map(saved.tags),
+      noteTags: saved.noteTags,
+      resources: new Map(saved.resources),
+      itemTimestamps: new Map(saved.itemTimestamps),
+      syncInfoUpdatedTime: saved.syncInfoUpdatedTime,
+      deltaCursor: saved.deltaCursor,
+      encryptedItemIds: new Set(saved.encryptedItemIds),
+      masterKeyIds: new Set(saved.masterKeyIds),
+      unreadableItems: new Set(saved.unreadableItems),
+      localChanges: new Map(),
+    };
+  }
+
+  /** Writes a user's entry to CACHE_DIR; per-session entries are never saved */
+  private saveEntry(sessionId: string, entry: CacheEntry): void {
+    const key = this.keyOf(sessionId);
+    if (!key.startsWith('user:')) return;
+    const saved: SavedEntry = {
+      version: CACHE_FORMAT_VERSION,
+      lastFetched: entry.lastFetched,
+      notebooks: [...entry.notebooks],
+      notes: [...entry.notes],
+      tags: [...entry.tags],
+      noteTags: entry.noteTags,
+      resources: [...entry.resources],
+      itemTimestamps: [...entry.itemTimestamps],
+      syncInfoUpdatedTime: entry.syncInfoUpdatedTime,
+      deltaCursor: entry.deltaCursor,
+      encryptedItemIds: [...entry.encryptedItemIds],
+      masterKeyIds: [...entry.masterKeyIds],
+      unreadableItems: [...entry.unreadableItems],
+    };
+    writeCacheFile(entryFile(key), saved);
   }
 
   /**
@@ -159,7 +345,7 @@ export class NoteCacheService {
 
   /** Whether a session currently has a cache entry (for tests and diagnostics) */
   public hasCache(sessionId: string): boolean {
-    return this.caches.has(sessionId);
+    return this.caches.has(this.keyOf(sessionId));
   }
 
   /**
@@ -219,7 +405,7 @@ export class NoteCacheService {
    * Never rejects. Lets callers and tests wait for a background refresh.
    */
   public async whenIdle(sessionId: string): Promise<void> {
-    const pending = this.caches.get(sessionId)?.fetchPromise;
+    const pending = this.caches.get(this.keyOf(sessionId))?.fetchPromise;
     if (pending) await pending.catch(() => undefined);
   }
 
@@ -227,6 +413,26 @@ export class NoteCacheService {
    * Internal routine to synchronize items with Joplin Server
    */
   private async refreshCacheInternal(sessionId: string, entry: CacheEntry): Promise<void> {
+    if (entry.deltaCursor !== null) {
+      try {
+        await this.refreshFromDelta(sessionId, entry);
+        return;
+      } catch (err) {
+        if (!needsRelisting(err)) throw err;
+        console.log('[NoteCache] Delta cursor no longer valid, listing all items');
+        entry.deltaCursor = null;
+      }
+    }
+
+    // Where the delta feed stands before the listing, so the next refresh replays whatever changes
+    // while it runs. Stays null when the server has no delta feed: every refresh then re-lists.
+    let deltaCursor: string | null = null;
+    try {
+      deltaCursor = (await joplinApi.getDelta(sessionId, '')).cursor;
+    } catch (err) {
+      if (!(err instanceof JoplinNotFoundError)) throw err;
+    }
+
     console.log(`[NoteCache] Synchronizing cache for session ${sessionId.substring(0, 8)}...`);
     const startTime = Date.now();
 
@@ -265,7 +471,31 @@ export class NoteCacheService {
       }
     }
 
-    // 2. Fetch new or updated items in batches of 10 concurrent requests
+    await this.fetchItems(sessionId, entry, itemsToFetch, listingStartedAt);
+
+    for (const [name, time] of entry.localChanges) {
+      if (time < listingStartedAt) entry.localChanges.delete(name);
+    }
+
+    entry.lastFetched = Date.now();
+    entry.deltaCursor = deltaCursor;
+    this.saveEntry(sessionId, entry);
+    console.log(
+      `[NoteCache] Synced session in ${Date.now() - startTime}ms. ` +
+        `Notebooks: ${entry.notebooks.size}, Notes: ${entry.notes.size}, Tags: ${entry.tags.size}`
+    );
+  }
+
+  /**
+   * Reads and applies the given items, 10 requests at a time. Content written or deleted by Joplin
+   * Web after `listingStartedAt` is kept over what was fetched.
+   */
+  private async fetchItems(
+    sessionId: string,
+    entry: CacheEntry,
+    itemsToFetch: Array<{ name: string; updated_time: number }>,
+    listingStartedAt: number
+  ): Promise<void> {
     const batchSize = 10;
     for (let i = 0; i < itemsToFetch.length; i += batchSize) {
       const batch = itemsToFetch.slice(i, i + batchSize);
@@ -311,15 +541,8 @@ export class NoteCacheService {
               }
 
               case JoplinItemType.Resource: { // 4 = Resource metadata
-                entry.resources.set(parsed.id, {
-                  id: parsed.id,
-                  title: parsed.title,
-                  mime: parsed.properties.mime || 'application/octet-stream',
-                  filename: parsed.properties.filename || '',
-                  fileExtension: parsed.properties.file_extension || '',
-                  size: Number(parsed.properties.size || 0),
-                  updatedTime: parsed.updatedTime,
-                });
+                const resource = resourceMetadataOf(parsed);
+                entry.resources.set(resource.id, resource);
                 break;
               }
 
@@ -335,15 +558,42 @@ export class NoteCacheService {
       );
     }
 
-    for (const [name, time] of entry.localChanges) {
-      if (time < listingStartedAt) entry.localChanges.delete(name);
-    }
+  }
 
+  /**
+   * Applies the changes since the last refresh from Joplin Server's delta feed: one request when
+   * nothing changed, instead of re-listing every item of the account.
+   */
+  private async refreshFromDelta(sessionId: string, entry: CacheEntry): Promise<void> {
+    const startedAt = Date.now();
+    const { changes, cursor } = await joplinApi.getDelta(sessionId, entry.deltaCursor ?? '');
+    const latest = new Map<string, JoplinDeltaChange>();
+    for (const change of changes) latest.set(change.item_name, change);
+
+    const itemsToFetch: Array<{ name: string; updated_time: number }> = [];
+    for (const [name, change] of latest) {
+      const deleted = change.type === DELTA_DELETED;
+      if (name === 'info.json') entry.syncInfoUpdatedTime = deleted ? null : change.updated_time;
+      if (!name.endsWith('.md')) continue;
+      if (!deleted) {
+        itemsToFetch.push({ name, updated_time: change.updated_time });
+        continue;
+      }
+      // Joplin Web wrote the item again after this refresh started: keep it
+      const localChange = entry.localChanges.get(name);
+      if (localChange === undefined || localChange < startedAt) this.forgetItem(entry, name.replace(/\.md$/i, ''));
+    }
+    await this.fetchItems(sessionId, entry, itemsToFetch, startedAt);
+
+    for (const [name, time] of entry.localChanges) {
+      if (time < startedAt) entry.localChanges.delete(name);
+    }
+    entry.deltaCursor = cursor;
     entry.lastFetched = Date.now();
-    console.log(
-      `[NoteCache] Synced session in ${Date.now() - startTime}ms. ` +
-        `Notebooks: ${entry.notebooks.size}, Notes: ${entry.notes.size}, Tags: ${entry.tags.size}`
-    );
+    if (latest.size > 0) {
+      console.log(`[NoteCache] Applied ${latest.size} change(s) in ${Date.now() - startedAt}ms`);
+      this.saveEntry(sessionId, entry);
+    }
   }
 
   /**
@@ -357,6 +607,11 @@ export class NoteCacheService {
    * Clears the cache for a session (on logout, or when the session turned out to be invalid)
    */
   public clearCache(sessionId: string): void {
+    // A shared entry belongs to the user and stays for their other sessions; only this link goes
+    if (this.sessionUsers.delete(hashSession(sessionId))) {
+      writeCacheFile(SESSIONS_FILE, Object.fromEntries(this.sessionUsers));
+      return;
+    }
     if (this.caches.delete(sessionId)) {
       console.log(`[NoteCache] Cleared cache for session ${sessionId.substring(0, 8)}...`);
     }
@@ -389,15 +644,8 @@ export class NoteCacheService {
     } else if (item.type_ === JoplinItemType.Tag) {
       entry.tags.set(item.id, item);
     } else if (item.type_ === JoplinItemType.Resource) {
-      entry.resources.set(item.id, {
-        id: item.id,
-        title: item.title,
-        mime: item.properties.mime || 'application/octet-stream',
-        filename: item.properties.filename || '',
-        fileExtension: item.properties.file_extension || '',
-        size: Number(item.properties.size || 0),
-        updatedTime: item.updatedTime,
-      });
+      const resource = resourceMetadataOf(item);
+      entry.resources.set(resource.id, resource);
     } else if (item.type_ === JoplinItemType.NoteTag) {
       const noteId = item.properties.note_id || '';
       const tagId = item.properties.tag_id || '';
@@ -753,8 +1001,9 @@ export class NoteCacheService {
 
   /**
    * Searches active notes (trashed ones are excluded). The query syntax is parsed by
-   * `parseSearchQuery`: all words/phrases must appear in the title or body, plus optional
-   * `tag:`, `notebook:` (including sub-notebooks), `type:` and `iscompleted:` filters.
+   * `parseSearchQuery`: all words/phrases must appear in the title, body or linked attachments' OCR
+   * text (`ocr_status: 2`), plus optional `tag:`, `notebook:` (including sub-notebooks), `type:` and
+   * `iscompleted:` filters.
    *
    * @param sessionId Active session ID
    * @param query Search query string
@@ -816,13 +1065,46 @@ export class NoteCacheService {
         if (!parsed.tags.every(hasTag) || parsed.excludedTags.some(hasTag)) continue;
       }
 
+      const encrypted = isEncrypted(note);
       const title = note.title || '';
       const body = note.body || '';
       const titleLower = title.toLowerCase();
       const bodyLower = body.toLowerCase();
 
-      const contains = (term: string) => titleLower.includes(term) || bodyLower.includes(term);
-      if (!parsed.terms.every(contains) || parsed.excludedTerms.some(contains)) continue;
+      if (parsed.excludedTerms.some((term) => titleLower.includes(term) || bodyLower.includes(term))) {
+        continue;
+      }
+
+      const unmatchedTerms = parsed.terms.filter((term) => !titleLower.includes(term) && !bodyLower.includes(term));
+      if (encrypted && unmatchedTerms.length > 0) {
+        continue;
+      }
+
+      let excludedByAttachment = false;
+      const attachmentOcrs: Array<{ normalized: string; lower: string }> = [];
+      if (!encrypted && (unmatchedTerms.length > 0 || parsed.excludedTerms.length > 0)) {
+        for (const resId of extractLinkedResourceIds(body)) {
+          const ocrText = entry.resources.get(resId)?.ocrText;
+          if (!ocrText) continue;
+          const normalized = normalizeOcrText(ocrText);
+          if (!normalized) continue;
+          const lower = normalized.toLowerCase();
+          if (parsed.excludedTerms.some((term) => lower.includes(term))) {
+            excludedByAttachment = true;
+            break;
+          }
+          attachmentOcrs.push({ normalized, lower });
+        }
+      }
+      if (excludedByAttachment) continue;
+
+      if (
+        unmatchedTerms.length > 0 &&
+        (attachmentOcrs.length === 0 ||
+          !unmatchedTerms.every((term) => attachmentOcrs.some(({ lower }) => lower.includes(term))))
+      ) {
+        continue;
+      }
 
       const titleHits = parsed.terms.filter((term) => titleLower.includes(term)).length;
       // Earliest occurrence of any term in the body, for the snippet
@@ -839,6 +1121,7 @@ export class NoteCacheService {
       const inBody = matchIdx !== -1;
 
       let snippet = '';
+      let matchedIn: 'attachment' | undefined;
       if (inBody) {
         const start = Math.max(0, matchIdx - 60);
         const end = Math.min(body.length, matchIdx + matchLength + 60);
@@ -846,11 +1129,32 @@ export class NoteCacheService {
         snippet = `${start > 0 ? '...' : ''}${notePreview(rawSnippet, markupLanguageOf(note.properties), 150)}${
           end < body.length ? '...' : ''
         }`;
+      } else if (!inTitle && parsed.terms.length > 0) {
+        for (const { normalized } of attachmentOcrs) {
+          const ocrSnippet = buildOcrSnippet(normalized, parsed.terms);
+          if (ocrSnippet) {
+            snippet = ocrSnippet;
+            matchedIn = 'attachment';
+            break;
+          }
+        }
       }
 
-      // Title matches receive higher priority
+      // Title matches receive highest priority, followed by body, then attachment OCR
       const bodyHits = parsed.terms.filter((term) => bodyLower.includes(term)).length;
-      const relevanceScore = titleHits * 100 + bodyHits * 10;
+      const attachmentHits =
+        attachmentOcrs.length > 0
+          ? parsed.terms.filter((term) => attachmentOcrs.some(({ lower }) => lower.includes(term))).length
+          : 0;
+      const relevanceScore = titleHits * 100 + bodyHits * 10 + attachmentHits;
+
+      const matches: SearchResult['matches'] = {
+        inTitle,
+        inBody,
+        ...(matchedIn ? { matchedIn } : {}),
+        snippet,
+        terms: parsed.terms,
+      };
 
       results.push({
         id: note.id,
@@ -864,13 +1168,8 @@ export class NoteCacheService {
         todoCompleted: Boolean(note.todoCompleted),
         todoDue: note.todoDue,
         isConflict: false,
-        encrypted: isEncrypted(note),
-        matches: {
-          inTitle,
-          inBody,
-          snippet,
-          terms: parsed.terms,
-        },
+        encrypted,
+        matches,
         relevanceScore,
       });
     }
@@ -884,6 +1183,49 @@ export class NoteCacheService {
     });
 
     return results.map(({ relevanceScore, ...item }) => item);
+  }
+
+  /**
+   * Returns the concatenated OCR text (`ocr_status: 2`) of attachments linked from a note (`:/id`),
+   * in link order and joined by blank lines. Returns an empty string when the note is missing,
+   * encrypted, or has no OCR text.
+   *
+   * @param sessionId Active session ID
+   * @param noteId Note ID
+   * @param options Optional cap `maxChars` on total returned characters
+   */
+  public async getNoteAttachmentText(
+    sessionId: string,
+    noteId: string,
+    options: { maxChars?: number } = {}
+  ): Promise<string> {
+    const entry = await this.ensureFresh(sessionId);
+    const maxChars = options.maxChars;
+    if (maxChars !== undefined && (Number.isNaN(maxChars) || maxChars <= 0)) {
+      return '';
+    }
+    const note = entry.notes.get(noteId);
+    if (!note || isEncrypted(note) || !note.body) return '';
+
+    const parts: string[] = [];
+    let total = 0;
+    for (const resId of extractLinkedResourceIds(note.body)) {
+      const ocr = entry.resources.get(resId)?.ocrText?.trim();
+      if (!ocr) continue;
+      if (maxChars === undefined) {
+        parts.push(ocr);
+        continue;
+      }
+      const sep = parts.length > 0 ? '\n\n' : '';
+      const remaining = maxChars - total - sep.length;
+      if (remaining <= 0) break;
+      const slice = ocr.slice(0, remaining);
+      if (!slice) break;
+      parts.push(slice);
+      total += sep.length + slice.length;
+      if (total >= maxChars) break;
+    }
+    return parts.join('\n\n');
   }
 
   /**

@@ -6,12 +6,16 @@ import { fileURLToPath } from 'url';
 dotenv.config();
 
 export interface AppConfig {
+  /** Interface/IP to bind (undefined listens on Node's default) */
+  host?: string;
   port: number;
   joplinServerUrl: string;
   /** Allowed cross-origin callers; false means same-origin only (no CORS headers) */
   corsOrigin: string | string[] | false;
   nodeEnv: string;
   cacheTtlMs: number;
+  /** Directory the note caches are kept in across restarts (CACHE_DIR), null keeps them in memory only */
+  cacheDir: string | null;
   authCacheTtlMs: number;
   clientDistPath: string;
   /** Value for Express' "trust proxy" setting; false means X-Forwarded-* headers are ignored */
@@ -171,11 +175,13 @@ const defaultClientDistPath = fileURLToPath(new URL('../../client/dist', import.
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const nodeEnv = env.NODE_ENV || 'development';
   return {
+    host: env.HOST?.trim() || undefined,
     port: parseInt(env.PORT || '3001', 10),
     joplinServerUrl: parseJoplinServerUrl(env.JOPLIN_SERVER_URL),
     corsOrigin: parseCorsOrigin(env.CORS_ORIGIN, nodeEnv),
     nodeEnv,
     cacheTtlMs: parseInt(env.CACHE_TTL_MS || '30000', 10),
+    cacheDir: env.CACHE_DIR || null,
     authCacheTtlMs: parseInt(env.AUTH_CACHE_TTL_MS || '300000', 10),
     clientDistPath: defaultClientDistPath,
     trustProxy: parseTrustProxy(env.TRUST_PROXY),

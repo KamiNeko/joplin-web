@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { isEmptySearchQuery, matchesNamePattern, parseSearchQuery } from '../src/services/search-query.js';
+import {
+  buildOcrSnippet,
+  extractLinkedResourceIds,
+  isEmptySearchQuery,
+  matchesNamePattern,
+  normalizeOcrText,
+  parseSearchQuery,
+} from '../src/services/search-query.js';
 
 /**
  * Offline tests for the search query parser.
@@ -74,5 +81,40 @@ describe('matchesNamePattern', () => {
     assert.equal(matchesNamePattern('a.b', 'a.b'), true);
     assert.equal(matchesNamePattern('axb', 'a.b'), false);
     assert.equal(matchesNamePattern('C++ (notes)', 'c++*'), true);
+  });
+});
+
+describe('extractLinkedResourceIds', () => {
+  const idA = '0123456789abcdef0123456789abcdef';
+  const idB = 'fedcba9876543210fedcba9876543210';
+
+  test('extracts unique ids in link order from Markdown and HTML', () => {
+    const body = [
+      `See [scan](:/${idA.toUpperCase()} "Scan") and <img src=":/${idB}" alt="Receipt">.`,
+      `Repeated [again](:/${idA}#page=2) and <a href=':/${idB}'>link</a>.`,
+    ].join('\n');
+    assert.deepEqual(extractLinkedResourceIds(body), [idA, idB]);
+  });
+
+  test('ignores malformed ids, longer hex strings and regular URLs', () => {
+    const body = `https://example.com/${idA} :/${idA}f :/short [x](:/${idB})`;
+    assert.deepEqual(extractLinkedResourceIds(body), [idB]);
+    assert.deepEqual(extractLinkedResourceIds('Plain note without resource links'), []);
+  });
+});
+
+describe('OCR normalization and snippets', () => {
+  test('collapses wrapped lines into single spaces', () => {
+    assert.equal(normalizeOcrText('  ACME\r\n  Hardware\n\n  Total:   $42.00 \n'), 'ACME Hardware Total: $42.00');
+  });
+
+  test('cuts a clean snippet around the earliest match and snaps word boundaries', () => {
+    const text = `${'prefixword '.repeat(12)}Dedicated Backup Storage Renewal ${'suffixword '.repeat(12)}`;
+    const snippet = buildOcrSnippet(normalizeOcrText(text), ['renewal', 'backup']);
+    assert.ok(snippet);
+    assert.ok(snippet.startsWith('...'));
+    assert.ok(snippet.endsWith('...'));
+    assert.ok(snippet.includes('Backup Storage Renewal'));
+    assert.equal(buildOcrSnippet('Nothing here', ['invoice']), null);
   });
 });

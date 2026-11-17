@@ -6,6 +6,7 @@ import { demoId, signIn, uniqueWord } from "./helpers";
 async function openReadingList(page: Page) {
   await page.getByRole("complementary").first().getByRole("button", { name: /^Reading List/ }).click();
   await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-reading")}(/|$)`));
+  await expect(page.getByRole("heading", { level: 2, name: "Reading List" })).toBeVisible();
   await expect(page.getByText("Book Notes: Deep Work")).toBeVisible();
 }
 
@@ -80,7 +81,7 @@ test("creates, edits, tags, finds, trashes and restores a note", async ({ page }
   await page.getByLabel("Note title").fill(title);
   await page.locator(".cm-content").click();
   await page.keyboard.type(`Written by the smoke test: ${word}`);
-  await page.getByRole("button", { name: "Done" }).click();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
   await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
   await expect(page.locator(".prose-content").getByText(`Written by the smoke test: ${word}`)).toBeVisible();
 
@@ -149,6 +150,16 @@ test("selects multiple notes, moves them in bulk and undoes the move", async ({ 
   await expect(sidebar.getByRole("button", { name: /^Recipes\s*, 2 notes$/ })).toBeVisible();
 });
 
+test("finds a note via its attachment OCR text", async ({ page }) => {
+  await signIn(page);
+  await page.getByRole("searchbox", { name: "Search notes" }).fill("Backup Storage");
+  await expect(page.getByText("1 found")).toBeVisible();
+  await expect(page.getByText("Found in attachment:")).toBeVisible();
+  await page.getByRole("button", { name: /2024_03_11\.pdf/ }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "2024_03_11.pdf" })).toBeVisible();
+  await page.getByRole("button", { name: "Clear search" }).first().click();
+});
+
 test("attaches a file to a note", async ({ page }) => {
   const word = uniqueWord("attach");
   await signIn(page);
@@ -163,7 +174,7 @@ test("attaches a file to a note", async ({ page }) => {
   });
   // The placeholder becomes a link to the new resource
   await expect(page.locator(".cm-content")).toContainText(new RegExp(`\\[${word}\\.txt\\]\\(:/[0-9a-f]{32}\\)`));
-  await page.getByRole("button", { name: "Done" }).click();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
 
   // The rendered note links the attachment; clicking it downloads the uploaded file
   const download = page.waitForEvent("download");
