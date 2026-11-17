@@ -1,9 +1,9 @@
 /**
  * Parser for the search syntax (a subset of Joplin desktop's):
  *
- * - `shopping list`: every word must appear in the title or body (any order, case-insensitive)
+ * - `shopping list`: every word must appear in the title, body or linked attachments' OCR text (any order, case-insensitive)
  * - `"shopping list"`: an exact phrase
- * - `-word`, `-"some phrase"`: the note must not contain it
+ * - `-word`, `-"some phrase"`: the note (including linked attachment OCR) must not contain it
  * - `tag:name`, `tag:"two words"`: the note has this tag (several `tag:` filters must all match)
  * - `notebook:name`: the note is in a notebook with this title or in one of its sub-notebooks
  *   (several `notebook:` filters match any of them)
@@ -15,9 +15,9 @@
 
 /** A parsed search query; all text values are lower-cased */
 export interface ParsedSearchQuery {
-  /** Words and phrases that must all appear in the title or body */
+  /** Words and phrases that must all appear in the title, body or linked attachments' OCR text */
   terms: string[];
-  /** Words and phrases that must not appear in the title or body */
+  /** Words and phrases that must not appear in the title, body or linked attachments' OCR text */
   excludedTerms: string[];
   /** Tag title patterns that must all be present */
   tags: string[];
@@ -164,4 +164,79 @@ export function matchesNamePattern(title: string, pattern: string): boolean {
     's'
   );
   return regex.test(lower);
+}
+
+const RESOURCE_LINK_RE = /(?:^|[\s("'<=]):\/([0-9a-fA-F]{32})(?![0-9a-fA-F])/g;
+
+/**
+ * Extracts linked Joplin item IDs (`:/<32-hex>`) from a Markdown or HTML note body in link
+ * order, without duplicates. Callers resolve IDs against cached resources so note-to-note links
+ * are ignored.
+ */
+export function extractLinkedResourceIds(body: string): string[] {
+  if (!body || !body.includes(':/')) return [];
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const match of body.matchAll(RESOURCE_LINK_RE)) {
+    const id = match[1].toLowerCase();
+    if (!seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Collapses whitespace in OCR text so wrapped lines match phrase queries and form clean snippets.
+ */
+export function normalizeOcrText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Cuts a short single-line snippet from normalized OCR text centered around the earliest matching
+ * term, snapping to word boundaries when possible without clipping the match. Returns null when no
+ * term appears in `normalizedOcr`.
+ */
+export function buildOcrSnippet(normalizedOcr: string, terms: string[]): string | null {
+  if (!normalizedOcr || terms.length === 0) return null;
+  const lower = normalizedOcr.toLowerCase();
+  let matchIdx = -1;
+  let matchLength = 0;
+
+  if (lower.length === normalizedOcr.length) {
+    for (const term of terms) {
+      if (!term) continue;
+      const idx = lower.indexOf(term);
+      if (idx !== -1 && (matchIdx === -1 || idx < matchIdx)) {
+        matchIdx = idx;
+        matchLength = term.length;
+      }
+    }
+  } else {
+    for (const term of terms) {
+      if (!term) continue;
+      const m = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').exec(normalizedOcr);
+      if (m && (matchIdx === -1 || m.index < matchIdx)) {
+        matchIdx = m.index;
+        matchLength = m[0].length;
+      }
+    }
+  }
+  if (matchIdx === -1) return null;
+
+  let start = Math.max(0, matchIdx - 60);
+  if (start > 0 && normalizedOcr[start - 1] !== ' ') {
+    const nextSpace = normalizedOcr.indexOf(' ', start);
+    if (nextSpace !== -1 && nextSpace < matchIdx) start = nextSpace + 1;
+  }
+
+  let end = Math.min(normalizedOcr.length, matchIdx + matchLength + 60);
+  if (end < normalizedOcr.length && normalizedOcr[end] !== ' ') {
+    const prevSpace = normalizedOcr.lastIndexOf(' ', end);
+    if (prevSpace >= matchIdx + matchLength) end = prevSpace;
+  }
+
+  return `${start > 0 ? '...' : ''}${normalizedOcr.slice(start, end)}${end < normalizedOcr.length ? '...' : ''}`;
 }

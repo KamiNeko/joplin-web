@@ -4,9 +4,11 @@ import { config } from './config.js';
 const app = createApp(config);
 
 // Start server
-export const server = app.listen(config.port, () => {
+const onListening = () => {
   console.log('====================================================');
-  console.log(` Joplin Web Backend Server running on port ${config.port}`);
+  console.log(
+    ` Joplin Web Backend Server running on ${config.host ? `${config.host}:${config.port}` : `port ${config.port}`}`
+  );
   console.log(` Version: ${config.appVersion}${config.gitSha ? ` (${config.gitSha.slice(0, 7)})` : ''}`);
   console.log(` Mode: ${config.nodeEnv}`);
   console.log(` Joplin Server: ${config.joplinServerUrl}`);
@@ -14,7 +16,11 @@ export const server = app.listen(config.port, () => {
   console.log(` Public URL: ${config.publicUrl ?? '(not set)'}`);
   console.log(` Trust proxy: ${JSON.stringify(config.trustProxy)}`);
   console.log('====================================================');
-});
+};
+
+export const server = config.host
+  ? app.listen(config.port, config.host, onListening)
+  : app.listen(config.port, onListening);
 
 // Graceful shutdown handling
 const shutdown = (signal: string) => {
