@@ -147,7 +147,28 @@ describe('reading', () => {
     assert.deepEqual(matches.terms, ['passport', 'biometric']);
     assert.equal(matches.inTitle, true);
     assert.equal(matches.inBody, true);
+    assert.equal(matches.matchedIn, undefined);
     assert.match(matches.snippet, /biometric/);
+  });
+
+  test('search finds notes by attachment OCR text and marks OCR-only matches', async () => {
+    const res = await api('/api/search?q=%22Backup%20Storage%22%20420.00');
+    assert.equal(res.status, 200);
+    assert.equal(res.data.length, 1);
+    assert.equal(res.data[0].id, demoId('note-scanned-invoice'));
+    assert.equal(res.data[0].title, '2024_03_11.pdf');
+    assert.deepEqual(res.data[0].matches.inTitle, false);
+    assert.deepEqual(res.data[0].matches.inBody, false);
+    assert.equal(res.data[0].matches.matchedIn, 'attachment');
+    assert.deepEqual(res.data[0].matches.terms, ['backup storage', '420.00']);
+    assert.match(res.data[0].matches.snippet, /Backup Storage/);
+
+    // Combining a title term and an attachment term clears matchedIn (not OCR-only)
+    const mixed = await api('/api/search?q=2024_03_11%20Storage');
+    assert.equal(mixed.status, 200);
+    assert.equal(mixed.data.length, 1);
+    assert.equal(mixed.data[0].matches.inTitle, true);
+    assert.equal(mixed.data[0].matches.matchedIn, undefined);
   });
 
   test('search filters by tag, notebook (with sub-notebooks), type and completion', async () => {

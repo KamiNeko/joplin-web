@@ -2,7 +2,7 @@ import React from "react";
 import { SearchResult } from "@/lib/types";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Search, FileText, X } from "lucide-react";
+import { Search, FileText, Paperclip, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/format";
@@ -147,6 +147,7 @@ export function SearchResults({
               // Use snippet matches if available from API
               const snippetMatch = note.matches?.snippet;
               const displaySnippet = snippetMatch || note.preview;
+              const matchedInAttachment = note.matches?.matchedIn === "attachment" && Boolean(snippetMatch);
               const terms = note.matches?.terms ?? [];
 
               return (
@@ -195,6 +196,12 @@ export function SearchResults({
 
                   {displaySnippet && (
                     <p className="text-xs text-muted-foreground line-clamp-2 leading-relaxed">
+                      {matchedInAttachment && (
+                        <span className="font-medium text-foreground/75">
+                          <Paperclip className="inline h-3 w-3 mr-1 align-[-1px]" aria-hidden="true" />
+                          Found in attachment:{" "}
+                        </span>
+                      )}
                       <HighlightedText text={displaySnippet} terms={terms} />
                     </p>
                   )}

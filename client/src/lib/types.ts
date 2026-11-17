@@ -114,6 +114,8 @@ export interface SearchResult extends NoteListItem {
   matches?: {
     inTitle: boolean;
     inBody: boolean;
+    /** Set to "attachment" when the terms matched only in linked attachments' OCR text */
+    matchedIn?: "attachment";
     snippet?: string;
     /** Lower-cased words and phrases the note matched (empty for filter-only queries) */
     terms?: string[];

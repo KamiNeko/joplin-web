@@ -4,7 +4,14 @@ import { join } from 'node:path';
 import { config } from '../config.js';
 import { JoplinApiError, JoplinNotFoundError, joplinApi } from './joplin-api.js';
 import { deserialize, markupLanguageOf, notePreview } from './serializer.js';
-import { isEmptySearchQuery, matchesNamePattern, parseSearchQuery } from './search-query.js';
+import {
+  buildOcrSnippet,
+  extractLinkedResourceIds,
+  isEmptySearchQuery,
+  matchesNamePattern,
+  normalizeOcrText,
+  parseSearchQuery,
+} from './search-query.js';
 import { trashedTogether } from './trash.js';
 import {
   JoplinDeltaChange,
@@ -121,6 +128,40 @@ const noteThumbnail = (
 };
 
 /**
+ * Copies a string out of any V8 SlicedString backing buffer so keeping resource metadata in
+ * memory never retains the full deserialized `.md` string (which can include large `ocr_details`).
+ */
+function detachString(value: string): string {
+  return value.length === 0 ? '' : Buffer.from(value, 'utf8').toString('utf8');
+}
+
+/**
+ * Extracts `ocr_text` only when OCR completed (`ocr_status: 2`) on a readable resource item.
+ */
+function ocrTextOf(item: RawJoplinItem): string {
+  if (isEncrypted(item) || item.properties.ocr_status !== '2') return '';
+  const raw = item.properties.ocr_text;
+  return raw && raw.trim() ? detachString(raw) : '';
+}
+
+/** Builds a detached `ResourceMetadata` record from a deserialized resource item */
+function resourceMetadataOf(item: RawJoplinItem): ResourceMetadata {
+  return {
+    id: detachString(item.id),
+    title: detachString(item.title),
+    mime: detachString(item.properties.mime || 'application/octet-stream'),
+    filename: detachString(item.properties.filename || ''),
+    fileExtension: detachString(item.properties.file_extension || ''),
+    size: Number(item.properties.size || 0),
+    updatedTime: item.updatedTime,
+    ocrText: ocrTextOf(item),
+  };
+}
+
+/** On-disk cache format version; bumped whenever `SavedEntry` changes so old caches rebuild */
+const CACHE_FORMAT_VERSION = 2 as const;
+
+/**
  * How a caller wants the cache refreshed, see `NoteCacheService.ensureFresh`
  */
 export type RefreshMode = 'stale-ok' | 'fresh' | 'force';
@@ -176,7 +217,7 @@ export interface CacheEntry {
 
 /** A user's cache entry as written to CACHE_DIR */
 interface SavedEntry {
-  version: 1;
+  version: typeof CACHE_FORMAT_VERSION;
   lastFetched: number;
   notebooks: Array<[string, RawJoplinItem]>;
   notes: Array<[string, RawJoplinItem]>;
@@ -260,7 +301,7 @@ export class NoteCacheService {
   private loadEntry(key: string): CacheEntry | null {
     if (!key.startsWith('user:')) return null;
     const saved = readCacheFile<SavedEntry>(entryFile(key));
-    if (saved?.version !== 1) return null;
+    if (saved?.version !== CACHE_FORMAT_VERSION) return null;
     console.log(`[NoteCache] Loaded saved cache: ${saved.notes.length} notes`);
     return {
       lastFetched: saved.lastFetched,
@@ -287,7 +328,7 @@ export class NoteCacheService {
     const key = this.keyOf(sessionId);
     if (!key.startsWith('user:')) return;
     const saved: SavedEntry = {
-      version: 1,
+      version: CACHE_FORMAT_VERSION,
       lastFetched: entry.lastFetched,
       notebooks: [...entry.notebooks],
       notes: [...entry.notes],
@@ -520,15 +561,8 @@ export class NoteCacheService {
               }
 
               case JoplinItemType.Resource: { // 4 = Resource metadata
-                entry.resources.set(parsed.id, {
-                  id: parsed.id,
-                  title: parsed.title,
-                  mime: parsed.properties.mime || 'application/octet-stream',
-                  filename: parsed.properties.filename || '',
-                  fileExtension: parsed.properties.file_extension || '',
-                  size: Number(parsed.properties.size || 0),
-                  updatedTime: parsed.updatedTime,
-                });
+                const resource = resourceMetadataOf(parsed);
+                entry.resources.set(resource.id, resource);
                 break;
               }
 
@@ -630,15 +664,8 @@ export class NoteCacheService {
     } else if (item.type_ === JoplinItemType.Tag) {
       entry.tags.set(item.id, item);
     } else if (item.type_ === JoplinItemType.Resource) {
-      entry.resources.set(item.id, {
-        id: item.id,
-        title: item.title,
-        mime: item.properties.mime || 'application/octet-stream',
-        filename: item.properties.filename || '',
-        fileExtension: item.properties.file_extension || '',
-        size: Number(item.properties.size || 0),
-        updatedTime: item.updatedTime,
-      });
+      const resource = resourceMetadataOf(item);
+      entry.resources.set(resource.id, resource);
     } else if (item.type_ === JoplinItemType.NoteTag) {
       const noteId = item.properties.note_id || '';
       const tagId = item.properties.tag_id || '';
@@ -995,8 +1022,9 @@ export class NoteCacheService {
 
   /**
    * Searches active notes (trashed ones are excluded). The query syntax is parsed by
-   * `parseSearchQuery`: all words/phrases must appear in the title or body, plus optional
-   * `tag:`, `notebook:` (including sub-notebooks), `type:` and `iscompleted:` filters.
+   * `parseSearchQuery`: all words/phrases must appear in the title, body or linked attachments' OCR
+   * text (`ocr_status: 2`), plus optional `tag:`, `notebook:` (including sub-notebooks), `type:` and
+   * `iscompleted:` filters.
    *
    * @param sessionId Active session ID
    * @param query Search query string
@@ -1058,13 +1086,46 @@ export class NoteCacheService {
         if (!parsed.tags.every(hasTag) || parsed.excludedTags.some(hasTag)) continue;
       }
 
+      const encrypted = isEncrypted(note);
       const title = note.title || '';
       const body = note.body || '';
       const titleLower = title.toLowerCase();
       const bodyLower = body.toLowerCase();
 
-      const contains = (term: string) => titleLower.includes(term) || bodyLower.includes(term);
-      if (!parsed.terms.every(contains) || parsed.excludedTerms.some(contains)) continue;
+      if (parsed.excludedTerms.some((term) => titleLower.includes(term) || bodyLower.includes(term))) {
+        continue;
+      }
+
+      const unmatchedTerms = parsed.terms.filter((term) => !titleLower.includes(term) && !bodyLower.includes(term));
+      if (encrypted && unmatchedTerms.length > 0) {
+        continue;
+      }
+
+      let excludedByAttachment = false;
+      const attachmentOcrs: Array<{ normalized: string; lower: string }> = [];
+      if (!encrypted && (unmatchedTerms.length > 0 || parsed.excludedTerms.length > 0)) {
+        for (const resId of extractLinkedResourceIds(body)) {
+          const ocrText = entry.resources.get(resId)?.ocrText;
+          if (!ocrText) continue;
+          const normalized = normalizeOcrText(ocrText);
+          if (!normalized) continue;
+          const lower = normalized.toLowerCase();
+          if (parsed.excludedTerms.some((term) => lower.includes(term))) {
+            excludedByAttachment = true;
+            break;
+          }
+          attachmentOcrs.push({ normalized, lower });
+        }
+      }
+      if (excludedByAttachment) continue;
+
+      if (
+        unmatchedTerms.length > 0 &&
+        (attachmentOcrs.length === 0 ||
+          !unmatchedTerms.every((term) => attachmentOcrs.some(({ lower }) => lower.includes(term))))
+      ) {
+        continue;
+      }
 
       const titleHits = parsed.terms.filter((term) => titleLower.includes(term)).length;
       // Earliest occurrence of any term in the body, for the snippet
@@ -1081,6 +1142,7 @@ export class NoteCacheService {
       const inBody = matchIdx !== -1;
 
       let snippet = '';
+      let matchedIn: 'attachment' | undefined;
       if (inBody) {
         const start = Math.max(0, matchIdx - 60);
         const end = Math.min(body.length, matchIdx + matchLength + 60);
@@ -1088,11 +1150,32 @@ export class NoteCacheService {
         snippet = `${start > 0 ? '...' : ''}${notePreview(rawSnippet, markupLanguageOf(note.properties), 150)}${
           end < body.length ? '...' : ''
         }`;
+      } else if (!inTitle && parsed.terms.length > 0) {
+        for (const { normalized } of attachmentOcrs) {
+          const ocrSnippet = buildOcrSnippet(normalized, parsed.terms);
+          if (ocrSnippet) {
+            snippet = ocrSnippet;
+            matchedIn = 'attachment';
+            break;
+          }
+        }
       }
 
-      // Title matches receive higher priority
+      // Title matches receive highest priority, followed by body, then attachment OCR
       const bodyHits = parsed.terms.filter((term) => bodyLower.includes(term)).length;
-      const relevanceScore = titleHits * 100 + bodyHits * 10;
+      const attachmentHits =
+        attachmentOcrs.length > 0
+          ? parsed.terms.filter((term) => attachmentOcrs.some(({ lower }) => lower.includes(term))).length
+          : 0;
+      const relevanceScore = titleHits * 100 + bodyHits * 10 + attachmentHits;
+
+      const matches: SearchResult['matches'] = {
+        inTitle,
+        inBody,
+        ...(matchedIn ? { matchedIn } : {}),
+        snippet,
+        terms: parsed.terms,
+      };
 
       results.push({
         id: note.id,
@@ -1106,13 +1189,8 @@ export class NoteCacheService {
         todoCompleted: Boolean(note.todoCompleted),
         todoDue: note.todoDue,
         isConflict: false,
-        encrypted: isEncrypted(note),
-        matches: {
-          inTitle,
-          inBody,
-          snippet,
-          terms: parsed.terms,
-        },
+        encrypted,
+        matches,
         relevanceScore,
       });
     }
@@ -1126,6 +1204,49 @@ export class NoteCacheService {
     });
 
     return results.map(({ relevanceScore, ...item }) => item);
+  }
+
+  /**
+   * Returns the concatenated OCR text (`ocr_status: 2`) of attachments linked from a note (`:/id`),
+   * in link order and joined by blank lines. Returns an empty string when the note is missing,
+   * encrypted, or has no OCR text.
+   *
+   * @param sessionId Active session ID
+   * @param noteId Note ID
+   * @param options Optional cap `maxChars` on total returned characters
+   */
+  public async getNoteAttachmentText(
+    sessionId: string,
+    noteId: string,
+    options: { maxChars?: number } = {}
+  ): Promise<string> {
+    const entry = await this.ensureFresh(sessionId);
+    const maxChars = options.maxChars;
+    if (maxChars !== undefined && (Number.isNaN(maxChars) || maxChars <= 0)) {
+      return '';
+    }
+    const note = entry.notes.get(noteId);
+    if (!note || isEncrypted(note) || !note.body) return '';
+
+    const parts: string[] = [];
+    let total = 0;
+    for (const resId of extractLinkedResourceIds(note.body)) {
+      const ocr = entry.resources.get(resId)?.ocrText?.trim();
+      if (!ocr) continue;
+      if (maxChars === undefined) {
+        parts.push(ocr);
+        continue;
+      }
+      const sep = parts.length > 0 ? '\n\n' : '';
+      const remaining = maxChars - total - sep.length;
+      if (remaining <= 0) break;
+      const slice = ocr.slice(0, remaining);
+      if (!slice) break;
+      parts.push(slice);
+      total += sep.length + slice.length;
+      if (total >= maxChars) break;
+    }
+    return parts.join('\n\n');
   }
 
   /**

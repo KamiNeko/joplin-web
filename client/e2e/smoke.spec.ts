@@ -127,6 +127,16 @@ test("creates, edits, tags, finds, trashes and restores a note", async ({ page }
   await expect(page.getByText(title).first()).toBeVisible();
 });
 
+test("finds a note via its attachment OCR text", async ({ page }) => {
+  await signIn(page);
+  await page.getByRole("searchbox", { name: "Search notes" }).fill("Backup Storage");
+  await expect(page.getByText("1 found")).toBeVisible();
+  await expect(page.getByText("Found in attachment:")).toBeVisible();
+  await page.getByRole("button", { name: /2024_03_11\.pdf/ }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "2024_03_11.pdf" })).toBeVisible();
+  await page.getByRole("button", { name: "Clear search" }).first().click();
+});
+
 test("attaches a file to a note", async ({ page }) => {
   const word = uniqueWord("attach");
   await signIn(page);

@@ -6,6 +6,7 @@ import { buildDemoItems, buildEncryptedDemoItems, DEMO_EMAIL, DEMO_PASSWORD } fr
  * Nothing leaves your machine; all changes live in memory until the process stops.
  *
  *   MOCK_JOPLIN_PORT  mock Joplin Server port (default 22300)
+ *   HOST              bind address for Joplin Web backend (optional)
  *   PORT              Joplin Web backend port (default 3001)
  *   DEMO_E2EE=1       an account with end-to-end encryption on (read-only in Joplin Web)
  */
