@@ -92,6 +92,8 @@ export interface NoteListItem {
   isConflict: boolean;
   /** Stored end-to-end encrypted (`encryption_applied: 1`): title and content are unreadable here */
   encrypted: boolean;
+  /** First image or PDF attachment the body links to, shown as the note's thumbnail in lists */
+  thumbnail?: { resourceId: string; kind: 'image' | 'pdf' };
 }
 
 /**

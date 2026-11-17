@@ -49,6 +49,8 @@ export interface NoteListItem {
   encrypted?: boolean;
   /** To-do due date in Unix ms; 0 or missing when none is set */
   todoDue?: number;
+  /** First image or PDF attachment the body links to, shown as the card's thumbnail */
+  thumbnail?: { resourceId: string; kind: "image" | "pdf" };
 }
 
 /**

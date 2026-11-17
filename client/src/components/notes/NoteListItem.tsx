@@ -1,4 +1,7 @@
+import { useEffect, useRef, useState } from "react";
 import { NoteListItem as NoteListItemType, Tag } from "@/lib/types";
+import { getResourceUrl } from "@/lib/api";
+import { getCachedPdfThumbnail, getPdfThumbnail } from "@/lib/pdf-thumbnail";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { formatRelativeTime, noteDisplayTitle } from "@/lib/format";
@@ -16,6 +19,70 @@ interface NoteListItemProps {
   onClick?: () => void;
   /** Toggles a to-do's completion; the checkbox is read-only when omitted */
   onToggleTodo?: () => void;
+}
+
+/**
+ * Evernote-style card thumbnail: an image as is (the browser lazy-loads it), a PDF as its first page,
+ * rendered once the card comes near the viewport. Hidden when it can't be loaded.
+ */
+function NoteThumbnail({ resourceId, kind }: NonNullable<NoteListItemType["thumbnail"]>) {
+  const ref = useRef<HTMLSpanElement>(null);
+  // Load result for one resource; a null url means it failed
+  const [result, setResult] = useState<{ resourceId: string; url: string | null } | null>(null);
+  const own = result?.resourceId === resourceId ? result : null;
+  const url = own
+    ? own.url
+    : kind === "image"
+      ? getResourceUrl(resourceId)
+      : getCachedPdfThumbnail(resourceId)?.url;
+
+  useEffect(() => {
+    if (kind !== "pdf" || getCachedPdfThumbnail(resourceId)) return;
+    let cancelled = false;
+    const load = () =>
+      getPdfThumbnail(resourceId)
+        .then((thumb) => thumb.url, () => null)
+        .then((thumbUrl) => !cancelled && setResult({ resourceId, url: thumbUrl }));
+    const element = ref.current;
+    if (!element || typeof IntersectionObserver === "undefined") {
+      void load();
+      return () => {
+        cancelled = true;
+      };
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          observer.disconnect();
+          void load();
+        }
+      },
+      { rootMargin: "200px" }
+    );
+    observer.observe(element);
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+    };
+  }, [kind, resourceId]);
+
+  if (url === null) return null;
+  return (
+    <span ref={ref} className="block h-16 w-14 shrink-0 overflow-hidden rounded-md border border-border/60 bg-white">
+      {url ? (
+        <img
+          src={url}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          onError={() => setResult({ resourceId, url: null })}
+          className="block h-full w-full object-cover object-top"
+        />
+      ) : (
+        <span className="block h-full w-full animate-pulse bg-muted" />
+      )}
+    </span>
+  );
 }
 
 export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteListItemProps) {
@@ -95,16 +162,21 @@ export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteList
         )}
       </div>
 
-      {/* Preview Snippet */}
-      {note.encrypted ? (
-        <p className="text-xs text-muted-foreground italic">End-to-end encrypted, can't be shown here</p>
-      ) : note.preview ? (
-        <p className="text-xs text-muted-foreground line-clamp-2 leading-relaxed">
-          {note.preview}
-        </p>
-      ) : (
-        <p className="text-xs text-muted-foreground italic">Empty note</p>
-      )}
+      {/* Preview Snippet, with the first image or PDF beside it */}
+      <div className="flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          {note.encrypted ? (
+            <p className="text-xs text-muted-foreground italic">End-to-end encrypted, can't be shown here</p>
+          ) : note.preview ? (
+            <p className="text-xs text-muted-foreground line-clamp-2 leading-relaxed">
+              {note.preview}
+            </p>
+          ) : (
+            <p className="text-xs text-muted-foreground italic">Empty note</p>
+          )}
+        </div>
+        {note.thumbnail && !note.encrypted && <NoteThumbnail {...note.thumbnail} />}
+      </div>
 
       {due > 0 && (
         <p

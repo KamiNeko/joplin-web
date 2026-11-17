@@ -3,6 +3,12 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { NoteListItem } from "./NoteListItem";
 import { formatRelativeTime } from "@/lib/format";
 
+const pdfThumbnail = vi.hoisted(() => ({
+  getCachedPdfThumbnail: vi.fn(() => null),
+  getPdfThumbnail: vi.fn(async () => ({ url: "blob:page1", pageCount: 2, width: 612, height: 792 })),
+}));
+vi.mock("@/lib/pdf-thumbnail", () => pdfThumbnail);
+
 const NOW = new Date("2026-06-15T12:00:00Z").getTime();
 
 const baseNote = {
@@ -114,5 +120,31 @@ describe("formatRelativeTime", () => {
     expect(formatRelativeTime(undefined)).toBe("");
     expect(formatRelativeTime(0)).toBe("");
     expect(formatRelativeTime("not a date")).toBe("");
+  });
+
+  describe("thumbnail", () => {
+    const RES = "fedcba9876543210fedcba9876543210";
+    const thumb = (container: HTMLElement) => container.querySelector("img");
+
+    it("shows an image attachment straight from the API, and hides it when it fails to load", () => {
+      const { container } = render(<NoteListItem note={{ ...baseNote, thumbnail: { resourceId: RES, kind: "image" } }} />);
+      expect(thumb(container)?.getAttribute("src")).toBe(`/api/resources/${RES}`);
+      expect(thumb(container)?.getAttribute("loading")).toBe("lazy");
+      fireEvent.error(thumb(container)!);
+      expect(thumb(container)).toBeNull();
+    });
+
+    it("renders a PDF's first page", async () => {
+      vi.useRealTimers();
+      const { container } = render(<NoteListItem note={{ ...baseNote, thumbnail: { resourceId: RES, kind: "pdf" } }} />);
+      await vi.waitFor(() => expect(thumb(container)?.getAttribute("src")).toBe("blob:page1"));
+      expect(pdfThumbnail.getPdfThumbnail).toHaveBeenCalledWith(RES);
+    });
+
+    it("shows none for an encrypted note", () => {
+      const note = { ...baseNote, encrypted: true, thumbnail: { resourceId: RES, kind: "image" as const } };
+      const { container } = render(<NoteListItem note={note} />);
+      expect(thumb(container)).toBeNull();
+    });
   });
 });

@@ -1,8 +1,8 @@
 import type { DocumentInitParameters, PDFDocumentProxy } from "pdfjs-dist/types/src/display/api";
 import { fetchResourceBytes, onClearResourceCache } from "./api";
 
-/** Target display width on phones (largest collapsed card width); desktop cards scale down cleanly. */
-const THUMBNAIL_TARGET_WIDTH = 360;
+/** Rendered width in CSS pixels (times devicePixelRatio): note-list cards show it at 56 px */
+const THUMBNAIL_TARGET_WIDTH = 120;
 const MAX_CANVAS_DIMENSION = 4096;
 const MAX_DEVICE_PIXEL_RATIO = 3;
 
@@ -61,6 +61,25 @@ onClearResourceCache(clearPdfThumbnailCache);
  */
 export function getCachedPdfThumbnail(resourceId: string): PdfThumbnail | null {
   return resolvedThumbnails.get(resourceId) ?? null;
+}
+
+// ponytail: FIFO limit, cards scrolled past still render; prioritise visible ones if a long scroll feels slow
+const MAX_CONCURRENT_RENDERS = 2;
+let activeRenders = 0;
+const renderQueue: Array<() => void> = [];
+
+/** Runs `task` once fewer than MAX_CONCURRENT_RENDERS renders are in flight (each downloads a whole PDF) */
+async function limited<T>(task: () => Promise<T>): Promise<T> {
+  if (activeRenders >= MAX_CONCURRENT_RENDERS) {
+    await new Promise<void>((resolve) => renderQueue.push(resolve));
+  }
+  activeRenders += 1;
+  try {
+    return await task();
+  } finally {
+    activeRenders -= 1;
+    renderQueue.shift()?.();
+  }
 }
 
 async function renderFirstPage(resourceId: string): Promise<PdfThumbnail> {
@@ -147,7 +166,7 @@ export function getPdfThumbnail(resourceId: string): Promise<PdfThumbnail> {
   let pending = pendingThumbnails.get(resourceId);
   if (!pending) {
     const generation = cacheGeneration;
-    pending = renderFirstPage(resourceId)
+    pending = limited(() => renderFirstPage(resourceId))
       .then((thumb) => {
         if (generation !== cacheGeneration) {
           if (thumb.url.startsWith("blob:")) URL.revokeObjectURL(thumb.url);
