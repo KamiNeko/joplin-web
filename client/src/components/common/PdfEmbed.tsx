@@ -17,7 +17,8 @@ interface PdfEmbedProps {
  */
 export function PdfEmbed({ resourceId, fileName }: PdfEmbedProps) {
   const [downloading, setDownloading] = useState(false);
-  const url = getResourceUrl(resourceId);
+  // Own cache key: copies cached (immutable, 1 day) while PDFs were still sent with `sandbox` render blank
+  const url = `${getResourceUrl(resourceId)}?view=pdf`;
   const showViewer = typeof navigator === "undefined" || navigator.pdfViewerEnabled !== false;
 
   const handleDownload = async () => {

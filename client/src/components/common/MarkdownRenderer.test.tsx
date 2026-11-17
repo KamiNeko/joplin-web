@@ -137,13 +137,13 @@ describe("PDF attachments", () => {
     const container = renderMarkdown(content, html);
     const iframe = container.querySelector("iframe");
     expect(iframe).not.toBeNull();
-    expect(iframe?.getAttribute("src")).toBe(`/api/resources/${RES_ID}`);
+    expect(iframe?.getAttribute("src")).toBe(`/api/resources/${RES_ID}?view=pdf`);
     expect(iframe?.getAttribute("title")).toBe(name);
     expect(iframe?.getAttribute("loading")).toBe("lazy");
     expect(screen.getByText(name)).toBeTruthy();
 
     const openLink = screen.getByRole("link", { name: "Open" });
-    expect(openLink.getAttribute("href")).toBe(`/api/resources/${RES_ID}`);
+    expect(openLink.getAttribute("href")).toBe(`/api/resources/${RES_ID}?view=pdf`);
     expect(openLink.getAttribute("target")).toBe("_blank");
     expect(openLink.getAttribute("rel")).toBe("noopener noreferrer");
 
@@ -156,7 +156,7 @@ describe("PDF attachments", () => {
     const container = renderMarkdown(`[mobile.pdf](:/${RES_ID})`);
     expect(container.querySelector("iframe")).toBeNull();
     expect(screen.getByText("mobile.pdf")).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Open" }).getAttribute("href")).toBe(`/api/resources/${RES_ID}`);
+    expect(screen.getByRole("link", { name: "Open" }).getAttribute("href")).toBe(`/api/resources/${RES_ID}?view=pdf`);
 
     fireEvent.click(screen.getByRole("button", { name: "Download" }));
     await waitFor(() => expect(downloads).toEqual(["mobile.pdf"]));
