@@ -355,6 +355,28 @@ describe('security', () => {
     const res = await api(`/api/resources/${id}`);
     assert.equal(res.headers.get('content-type'), 'image/png');
     assert.match(res.headers.get('content-disposition') ?? '', /^inline; filename="pixel\.png"/);
+    assert.match(res.headers.get('content-security-policy') ?? '', /\bsandbox\b/);
+  });
+
+  test('serves PDF attachments inline without sandbox and allows only same-origin framing', async () => {
+    const id = await upload('report.pdf', 'application/pdf', '%PDF-1.4\n%');
+    const res = await api(`/api/resources/${id}`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'application/pdf');
+    assert.match(res.headers.get('content-disposition') ?? '', /^inline; filename="report\.pdf"/);
+    assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(res.headers.get('x-frame-options'), 'SAMEORIGIN');
+    const csp = res.headers.get('content-security-policy') ?? '';
+    assert.match(csp, /default-src 'none'/);
+    assert.match(csp, /frame-ancestors 'self'/);
+    assert.doesNotMatch(csp, /\bsandbox\b/);
+
+    // Sniffed PDF uploads (when upstream omits type) get the same inline type and CSP
+    const sniffedId = await upload('scan', 'application/octet-stream', '%PDF-1.7\n');
+    const sniffedRes = await api(`/api/resources/${sniffedId}`);
+    assert.equal(sniffedRes.headers.get('content-type'), 'application/pdf');
+    assert.match(sniffedRes.headers.get('content-disposition') ?? '', /^inline; filename="scan"/);
+    assert.doesNotMatch(sniffedRes.headers.get('content-security-policy') ?? '', /\bsandbox\b/);
   });
 
   test('encodes attachment file names safely in Content-Disposition', async () => {
@@ -371,11 +393,20 @@ describe('security', () => {
   });
 
   test('normalizes malformed or unknown resource types', async () => {
-    const { resourceResponseType } = await import('../src/routes/resources.js');
+    const { resourceCsp, resourceResponseType } = await import('../src/routes/resources.js');
+    assert.deepEqual(resourceResponseType('application/pdf'), { contentType: 'application/pdf', inline: true });
     assert.deepEqual(resourceResponseType('video/mp4'), { contentType: 'video/mp4', inline: true });
     assert.deepEqual(resourceResponseType('IMAGE/PNG; charset=x'), { contentType: 'image/png', inline: true });
     assert.deepEqual(resourceResponseType('audio/x\r\nX-Evil: 1'), { contentType: 'application/octet-stream', inline: false });
     assert.deepEqual(resourceResponseType(undefined), { contentType: 'application/octet-stream', inline: false });
+
+    assert.equal(
+      resourceCsp('APPLICATION/PDF; charset=binary'),
+      "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; frame-ancestors 'self'"
+    );
+    assert.match(resourceCsp('image/svg+xml'), /\bsandbox\b/);
+    assert.match(resourceCsp('image/png'), /\bsandbox\b/);
+    assert.match(resourceCsp('application/octet-stream'), /\bsandbox\b/);
   });
 
   test('validates resource ids', async () => {
