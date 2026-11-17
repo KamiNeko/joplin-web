@@ -162,3 +162,29 @@ test("navigates on a phone between menu, list and note @phone", async ({ page })
   await expect(page.getByRole("textbox", { name: "Filter this list" })).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-travel")}$`));
 });
+
+test("a long notebook name truncates and keeps its note count inside the sidebar", async ({ page }) => {
+  await signIn(page);
+  // Cookie-authenticated writes need the page's Origin, like the browser sends (CSRF check)
+  const headers = { Origin: new URL(page.url()).origin };
+  const prefix = uniqueWord("long");
+  const created = await page.request.post("/api/notebooks", {
+    headers,
+    data: { title: `${prefix} ${"with a very long notebook name ".repeat(4)}` },
+  });
+  expect(created.ok()).toBeTruthy();
+  const { id } = await created.json();
+  const note = await page.request.post("/api/notes", { headers, data: { title: "In a long notebook", parentId: id } });
+  expect(note.ok()).toBeTruthy();
+  await page.reload();
+
+  const sidebar = page.locator("aside").first();
+  const label = sidebar.getByRole("button", { name: new RegExp(`^${prefix}`) });
+  const count = label.locator("xpath=..").locator(':scope > [aria-hidden="true"]');
+  await expect(count).toHaveText("1");
+  const [countBox, sidebarBox] = await Promise.all([count.boundingBox(), sidebar.boundingBox()]);
+  // The count stays clear of the sidebar's padding and divider instead of being pushed under them
+  expect(countBox!.x + countBox!.width).toBeLessThanOrEqual(sidebarBox!.x + sidebarBox!.width - 12);
+
+  await page.request.delete(`/api/notebooks/${id}`, { headers });
+});

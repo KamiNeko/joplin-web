@@ -142,6 +142,20 @@ const DOWNLOAD_ONLY_TYPES = new Set(['image/svg+xml']);
 const MIME_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
 
 /**
+ * Builds the Content-Security-Policy header for an attachment served from our origin.
+ * Everything except PDF stays sandboxed so browsers never run scripts in user-uploaded files;
+ * PDFs omit `sandbox` because Chrome and Firefox refuse to render a PDF in a sandboxed document,
+ * while `frame-ancestors 'self'` prevents other origins from framing them.
+ */
+export function resourceCsp(contentType: string): string {
+  const type = contentType.split(';')[0].trim().toLowerCase();
+  if (type === 'application/pdf') {
+    return "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; frame-ancestors 'self'";
+  }
+  return "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox";
+}
+
+/**
  * Decides how an attachment is served: its Content-Type and whether it may be shown inline.
  * Unknown or malformed types (resource metadata can come from any Joplin client) become
  * application/octet-stream.
@@ -216,7 +230,7 @@ router.get('/:id', async (req, res) => {
     res.setHeader('Cache-Control', 'private, max-age=86400, immutable');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     // Attachments are user content served from our origin: never let them run scripts
-    res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox");
+    res.setHeader('Content-Security-Policy', resourceCsp(contentType));
     res.setHeader('Content-Disposition', contentDisposition(inline ? 'inline' : 'attachment', downloadName));
 
     res.status(200).send(buffer);

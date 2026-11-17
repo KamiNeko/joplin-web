@@ -104,10 +104,11 @@ describe("links to other notes", () => {
     expect(await screen.findByText(`Opened note ${NOTE_ID}`)).toBeTruthy();
   });
 
-  it("downloads the attachment when the id is not a note", async () => {
-    renderMarkdown(`[report.pdf](:/${RES_ID})`);
-    fireEvent.click(screen.getByRole("button", { name: "report.pdf" }));
-    await waitFor(() => expect(downloads).toEqual(["report.pdf"]));
+  it("downloads non-PDF attachments as the old button when the id is not a note", async () => {
+    renderMarkdown(`[notes.txt](:/${RES_ID})`);
+    expect(document.querySelector("iframe")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "notes.txt" }));
+    await waitFor(() => expect(downloads).toEqual(["notes.txt"]));
     expect(screen.queryByText(/Opened note/)).toBeNull();
   });
 
@@ -124,6 +125,47 @@ describe("links to other notes", () => {
     const link = screen.getByRole("link", { name: "Joplin" });
     expect(link.getAttribute("target")).toBe("_blank");
     expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+  });
+});
+
+describe("PDF attachments", () => {
+  it.each([
+    ["Markdown", `[11042026235350.pdf](:/${RES_ID})`, "11042026235350.pdf", false],
+    ["uppercase .PDF", `[REPORT.PDF](:/${RES_ID.toUpperCase()})`, "REPORT.PDF", false],
+    ["HTML note", `<a href=":/${RES_ID}">clip.pdf</a>`, "clip.pdf", true],
+  ])("renders %s PDF links as an inline iframe with Open and Download actions", async (_kind, content, name, html) => {
+    const container = renderMarkdown(content, html);
+    const iframe = container.querySelector("iframe");
+    expect(iframe).not.toBeNull();
+    expect(iframe?.getAttribute("src")).toBe(`/api/resources/${RES_ID}`);
+    expect(iframe?.getAttribute("title")).toBe(name);
+    expect(iframe?.getAttribute("loading")).toBe("lazy");
+    expect(screen.getByText(name)).toBeTruthy();
+
+    const openLink = screen.getByRole("link", { name: "Open" });
+    expect(openLink.getAttribute("href")).toBe(`/api/resources/${RES_ID}`);
+    expect(openLink.getAttribute("target")).toBe("_blank");
+    expect(openLink.getAttribute("rel")).toBe("noopener noreferrer");
+
+    fireEvent.click(screen.getByRole("button", { name: "Download" }));
+    await waitFor(() => expect(downloads).toEqual([name]));
+  });
+
+  it("omits the iframe when navigator.pdfViewerEnabled is false", async () => {
+    vi.stubGlobal("navigator", { ...navigator, pdfViewerEnabled: false });
+    const container = renderMarkdown(`[mobile.pdf](:/${RES_ID})`);
+    expect(container.querySelector("iframe")).toBeNull();
+    expect(screen.getByText("mobile.pdf")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Open" }).getAttribute("href")).toBe(`/api/resources/${RES_ID}`);
+
+    fireEvent.click(screen.getByRole("button", { name: "Download" }));
+    await waitFor(() => expect(downloads).toEqual(["mobile.pdf"]));
+  });
+
+  it("keeps the button when .pdf is not at the end of the label", () => {
+    const container = renderMarkdown(`[report.pdf.bak](:/${RES_ID})`);
+    expect(container.querySelector("iframe")).toBeNull();
+    expect(screen.getByRole("button", { name: "report.pdf.bak" })).toBeTruthy();
   });
 });
 
