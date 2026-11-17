@@ -456,16 +456,42 @@ export function getResourceIdFromUrl(src: string | undefined): string | null {
 
 // Resources are immutable, so each one is downloaded once per session
 const resourceObjectUrls = new Map<string, Promise<string>>();
+const resourceCacheClearers = new Set<() => void>();
 
 /**
- * Downloads a resource with the session cookie.
+ * Registers a cache-cleanup callback to run alongside `clearResourceCache()` (e.g. on logout).
  */
-async function fetchResourceBlob(resourceId: string): Promise<Blob> {
-  const response = await fetch(`${API_BASE_URL}/api/resources/${resourceId}`, SESSION_FETCH_OPTIONS);
+export function onClearResourceCache(clearer: () => void): () => void {
+  resourceCacheClearers.add(clearer);
+  return () => {
+    resourceCacheClearers.delete(clearer);
+  };
+}
+
+/**
+ * Fetches a resource response with the session cookie.
+ */
+async function fetchResource(resourceId: string, query = ""): Promise<Response> {
+  const response = await fetch(`${API_BASE_URL}/api/resources/${resourceId}${query}`, SESSION_FETCH_OPTIONS);
   if (!response.ok) {
     throw new ApiError(response.status, `Could not load resource (HTTP ${response.status})`);
   }
-  return response.blob();
+  return response;
+}
+
+/**
+ * Downloads a resource as a Blob with the session cookie.
+ */
+async function fetchResourceBlob(resourceId: string): Promise<Blob> {
+  return (await fetchResource(resourceId)).blob();
+}
+
+/**
+ * Fetches a resource's raw bytes with the session cookie. An optional query string (such as
+ * `"?view=pdf"`) lets callers share the browser cache key of an inline view.
+ */
+export async function fetchResourceBytes(resourceId: string, query = ""): Promise<Uint8Array> {
+  return new Uint8Array(await (await fetchResource(resourceId, query)).arrayBuffer());
 }
 
 function readAsDataUrl(blob: Blob): Promise<string> {
@@ -515,6 +541,9 @@ export function clearResourceCache(): void {
       .catch(() => undefined);
   }
   resourceObjectUrls.clear();
+  for (const clearer of resourceCacheClearers) {
+    clearer();
+  }
 }
 
 /**

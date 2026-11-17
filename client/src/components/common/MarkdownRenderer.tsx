@@ -9,6 +9,7 @@ import { Check, Copy, ExternalLink } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ApiError, downloadResource, getNote, getResourceIdFromUrl, getResourceUrl } from "@/lib/api";
+import { PdfEmbed } from "./PdfEmbed";
 import { ResourceImage } from "./ResourceImage";
 import { cn } from "@/lib/utils";
 import type { TaskLocation } from "@/lib/tasks";
@@ -403,6 +404,10 @@ export function MarkdownRenderer({ content, className, html = false, onToggleTas
               const match = JOPLIN_ITEM_HREF.exec(href);
               if (!match) return <span>{children}</span>;
               const [, itemId, fragment] = match;
+              const label = textContent(children).trim();
+              if (/\.pdf$/i.test(label)) {
+                return <PdfEmbed resourceId={itemId} fileName={label} />;
+              }
               return (
                 <button
                   type="button"
