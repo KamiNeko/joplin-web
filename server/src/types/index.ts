@@ -165,6 +165,8 @@ export interface ResourceMetadata {
   fileExtension: string;
   size: number;
   updatedTime: number;
+  /** Extracted OCR text (`ocr_text`), kept only when `ocr_status` is 2 (done) */
+  ocrText: string;
 }
 
 /**
@@ -200,6 +202,8 @@ export interface SearchResult extends NoteListItem {
   matches: {
     inTitle: boolean;
     inBody: boolean;
+    /** Set to `'attachment'` when terms matched only inside linked attachments' OCR text */
+    matchedIn?: 'attachment';
     snippet?: string;
     /** Lower-cased words and phrases the note matched, for highlighting (empty for filter-only queries) */
     terms: string[];

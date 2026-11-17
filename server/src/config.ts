@@ -6,6 +6,8 @@ import { fileURLToPath } from 'url';
 dotenv.config();
 
 export interface AppConfig {
+  /** Interface/IP to bind (undefined listens on Node's default) */
+  host?: string;
   port: number;
   joplinServerUrl: string;
   /** Allowed cross-origin callers; false means same-origin only (no CORS headers) */
@@ -173,6 +175,7 @@ const defaultClientDistPath = fileURLToPath(new URL('../../client/dist', import.
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const nodeEnv = env.NODE_ENV || 'development';
   return {
+    host: env.HOST?.trim() || undefined,
     port: parseInt(env.PORT || '3001', 10),
     joplinServerUrl: parseJoplinServerUrl(env.JOPLIN_SERVER_URL),
     corsOrigin: parseCorsOrigin(env.CORS_ORIGIN, nodeEnv),
