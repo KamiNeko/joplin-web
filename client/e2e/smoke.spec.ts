@@ -122,6 +122,33 @@ test("creates, edits, tags, finds, trashes and restores a note", async ({ page }
   await expect(page.getByText(title).first()).toBeVisible();
 });
 
+test("selects multiple notes, moves them in bulk and undoes the move", async ({ page }) => {
+  await signIn(page);
+  const sidebar = page.getByRole("complementary").first();
+
+  await sidebar.getByRole("button", { name: /^Recipes/ }).click();
+  await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-recipes")}(/|$)`));
+  await expect(page.getByRole("heading", { level: 2, name: "Recipes" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 3, name: "Weeknight Miso Ramen", exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await page.getByRole("checkbox", { name: "Select Weeknight Miso Ramen" }).click();
+  await page.getByRole("checkbox", { name: "Select Sourdough Starter Schedule" }).click();
+  await expect(page.getByText("2 selected")).toBeVisible();
+
+  await page.getByRole("button", { name: "Move to…" }).click();
+  await page.getByRole("list", { name: "Destination" }).getByRole("button", { name: "Projects" }).click();
+
+  await expect(page.getByText("Moved 2 notes")).toBeVisible();
+  await expect(page.getByText("This notebook is empty")).toBeVisible();
+
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(page.getByText("Moved back 2 notes")).toBeVisible();
+  await expect(page.getByRole("heading", { level: 3, name: "Weeknight Miso Ramen", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 3, name: "Sourdough Starter Schedule", exact: true })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: /^Recipes\s*, 2 notes$/ })).toBeVisible();
+});
+
 test("attaches a file to a note", async ({ page }) => {
   const word = uniqueWord("attach");
   await signIn(page);
