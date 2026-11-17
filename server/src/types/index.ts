@@ -213,6 +213,43 @@ export interface SearchResult extends NoteListItem {
 }
 
 /**
+ * Item payload inside POST /api/notes/batch
+ */
+export interface BatchNoteItem {
+  id: string;
+  /** updatedTime the client based its change on; mismatched timestamps report status "conflict" */
+  baseUpdatedTime?: number;
+  /** Optional per-item destination notebook id (overrides top-level parentId; used by undo & auto-organize) */
+  parentId?: string;
+  /** Optional per-item title update (used by undo & auto-organize) */
+  title?: string;
+}
+
+/**
+ * Request body for POST /api/notes/batch
+ */
+export interface BatchNoteRequest {
+  items: BatchNoteItem[];
+  parentId?: string;
+  addTags?: string[];
+  removeTags?: string[];
+  trash?: boolean;
+  restore?: boolean;
+}
+
+/**
+ * Per-note outcome returned by POST /api/notes/batch
+ */
+export interface BatchNoteResult {
+  id: string;
+  status: 'ok' | 'conflict' | 'error';
+  updatedTime?: number;
+  error?: string;
+  /** Tag titles newly linked to this note during addTags (omits tags the note already had) */
+  addedTags?: string[];
+}
+
+/**
  * Session verification response
  */
 export interface SessionInfo {

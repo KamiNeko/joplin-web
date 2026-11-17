@@ -1,4 +1,6 @@
 import {
+  BatchNoteRequest,
+  BatchNoteResult,
   Notebook,
   NoteListItem,
   Note,
@@ -399,6 +401,19 @@ export async function deleteNote(id: string, permanent = false): Promise<void> {
  */
 export async function restoreNote(id: string): Promise<Note> {
   return request<Note>(`/api/notes/${id}/restore`, { method: "POST" });
+}
+
+/** Maximum items sent in one POST /api/notes/batch request (matches server cap). */
+export const BATCH_CHUNK_SIZE = 1000;
+
+/**
+ * Applies a bulk update to up to 1000 notes; returns one outcome entry per item.
+ */
+export async function batchUpdateNotes(payload: BatchNoteRequest): Promise<BatchNoteResult[]> {
+  return request<BatchNoteResult[]>("/api/notes/batch", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 /**

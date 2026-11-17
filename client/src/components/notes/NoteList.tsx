@@ -1,9 +1,21 @@
-import { useState, useMemo, useEffect, useRef } from "react";
-import { NoteListItem as NoteListItemType } from "@/lib/types";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { NoteListItem as NoteListItemType, Notebook } from "@/lib/types";
 import { NoteListItem } from "./NoteListItem";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ArrowDownUp, CheckSquare, FileQuestion, FileText, Loader2, Plus, Search } from "lucide-react";
+import {
+  ArrowDownUp,
+  CheckSquare,
+  FileQuestion,
+  FileText,
+  FolderInput,
+  ListChecks,
+  Loader2,
+  Plus,
+  Search,
+  Tag as TagIcon,
+  Trash2,
+} from "lucide-react";
 import { Input } from "@/components/ui/input";
 import {
   DropdownMenu,
@@ -15,8 +27,15 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
 import { QueryError, StaleDataHint } from "@/components/common/QueryError";
+import { NotebookPicker } from "@/components/notebooks/NotebookPicker";
+import { TagAutocompleteInput } from "@/components/tags/TagAutocompleteInput";
+import { NoteSelection, SelectionModifiers, useNoteSelection } from "@/hooks/use-note-selection";
+import { BulkUpdateProgress } from "@/hooks/use-mutations";
+
+export const NOTE_LIST_PAGE_SIZE = 100;
 
 interface NoteListProps {
   notes?: NoteListItemType[];
@@ -42,6 +61,19 @@ interface NoteListProps {
   onToggleTodo?: (id: string, completed: boolean) => void;
   /** Content above the notes (e.g. trashed notebooks), given the current filter text */
   renderLeading?: (filterText: string) => React.ReactNode;
+  /** Notebooks shown in the bulk "Move to…" picker */
+  notebooks?: Notebook[];
+  /** Multi-selection controller owned by NotesPage (falls back to local state when omitted) */
+  selection?: NoteSelection;
+  /** Enables selection mode toggle in the header (disabled in Trash / read-only) */
+  canSelect?: boolean;
+  /** Enables "Add tag…" in the bulk bar (disabled on Conflicts where tags are read-only) */
+  canBulkTag?: boolean;
+  onBulkMove?: (notes: NoteListItemType[], notebookId: string, notebookTitle: string) => void;
+  onBulkAddTag?: (notes: NoteListItemType[], tagTitle: string) => void;
+  onBulkTrash?: (notes: NoteListItemType[]) => void;
+  isBulkPending?: boolean;
+  bulkProgress?: BulkUpdateProgress | null;
 }
 
 type SortField = "updated" | "created" | "title";
@@ -114,10 +146,38 @@ export function NoteList({
   isCreating = false,
   onToggleTodo,
   renderLeading,
+  notebooks = [],
+  selection: selectionProp,
+  canSelect = true,
+  canBulkTag = true,
+  onBulkMove,
+  onBulkAddTag,
+  onBulkTrash,
+  isBulkPending = false,
+  bulkProgress = null,
 }: NoteListProps) {
   const [filterText, setFilterText] = useState("");
   const [sort, setSort] = useState<SortChoice>(loadSort);
   const { field: sortField, order: sortOrder } = sort;
+  const [renderLimit, setRenderLimit] = useState(NOTE_LIST_PAGE_SIZE);
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [moveFilter, setMoveFilter] = useState("");
+  const [tagOpen, setTagOpen] = useState(false);
+  const [tagValue, setTagValue] = useState("");
+
+  const localSelection = useNoteSelection();
+  const activeSelection = selectionProp ?? localSelection;
+  const { isSelecting, selectedIds, toggleSelectionMode, selectAll, exitSelectionMode, handleItemAction } =
+    activeSelection;
+
+  // Reset the progressive slice when the local filter changes (synchronously during render)
+  const [prevFilterText, setPrevFilterText] = useState(filterText);
+  if (filterText !== prevFilterText) {
+    setPrevFilterText(filterText);
+    if (renderLimit !== NOTE_LIST_PAGE_SIZE) {
+      setRenderLimit(NOTE_LIST_PAGE_SIZE);
+    }
+  }
 
   const updateSort = (next: SortChoice) => {
     setSort(next);
@@ -157,6 +217,122 @@ export function NoteList({
     if (!selectedNoteId && filteredAndSortedNotes[0]) onOpenFirst(filteredAndSortedNotes[0].id);
   }, [isLoading, onOpenFirst, selectedNoteId, filteredAndSortedNotes]);
 
+  const orderedIds = useMemo(() => filteredAndSortedNotes.map((n) => n.id), [filteredAndSortedNotes]);
+  const orderedIdsRef = useRef<string[]>(orderedIds);
+  useEffect(() => {
+    orderedIdsRef.current = orderedIds;
+  }, [orderedIds]);
+
+  const activeIndex = selectedNoteId
+    ? filteredAndSortedNotes.findIndex((n) => n.id === selectedNoteId)
+    : -1;
+  const visibleCount = Math.min(
+    filteredAndSortedNotes.length,
+    Math.max(renderLimit, activeIndex >= 0 ? activeIndex + 1 : 0)
+  );
+  const visibleNotes = useMemo(
+    () => filteredAndSortedNotes.slice(0, visibleCount),
+    [filteredAndSortedNotes, visibleCount]
+  );
+
+  const selectedNotes = useMemo(
+    () => notes.filter((n) => selectedIds.has(n.id)),
+    [notes, selectedIds]
+  );
+  const selectedCount = selectedNotes.length;
+
+  // Close popovers automatically when nothing is selected or selection mode ends
+  const [prevShowBar, setPrevShowBar] = useState(selectedCount > 0);
+  const showBar = isSelecting && selectedCount > 0;
+  if (showBar !== prevShowBar) {
+    setPrevShowBar(showBar);
+    if (!showBar) {
+      if (moveOpen) setMoveOpen(false);
+      if (moveFilter) setMoveFilter("");
+      if (tagOpen) setTagOpen(false);
+      if (tagValue) setTagValue("");
+    }
+  }
+
+  // Esc exits selection mode once any open action popover has closed
+  useEffect(() => {
+    if (!isSelecting) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented || isBulkPending || moveOpen || tagOpen) return;
+      const target = e.target;
+      if (target instanceof Element) {
+        if (
+          target.closest("[role='dialog'], [role='alertdialog'], [role='menu'], .cm-editor, textarea, [contenteditable='true']")
+        ) {
+          return;
+        }
+        if (target.tagName === "INPUT" && target.getAttribute("aria-label") !== "Filter this list") {
+          return;
+        }
+      }
+      e.preventDefault();
+      exitSelectionMode();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isSelecting, isBulkPending, moveOpen, tagOpen, exitSelectionMode]);
+
+  const handleActivateItem = useCallback(
+    (id: string, modifiers: SelectionModifiers) => {
+      if (!canSelect) {
+        onSelectNote(id);
+        return;
+      }
+      const outcome = handleItemAction(id, modifiers, orderedIdsRef.current);
+      if (outcome === "open") {
+        onSelectNote(id);
+      }
+    },
+    [canSelect, handleItemAction, onSelectNote]
+  );
+
+  const handleToggleTodoById = useCallback(
+    (id: string, completed: boolean) => {
+      onToggleTodo?.(id, completed);
+    },
+    [onToggleTodo]
+  );
+
+  const uniformCurrentNotebookId = useMemo(() => {
+    if (selectedNotes.length === 0) return null;
+    if (selectedNotes.some((n) => n.isConflict)) return null;
+    const first = selectedNotes[0].parentId || selectedNotes[0].notebookId;
+    if (!first) return null;
+    return selectedNotes.every((n) => (n.parentId || n.notebookId) === first) ? first : null;
+  }, [selectedNotes]);
+
+  const commonTagIds = useMemo<ReadonlySet<string> | undefined>(() => {
+    if (selectedNotes.length === 0) return undefined;
+    const getTagIds = (item: NoteListItemType) =>
+      (item as NoteListItemType & { tags?: ReadonlyArray<{ id: string }> }).tags;
+    const firstTags = getTagIds(selectedNotes[0]);
+    if (!firstTags || firstTags.length === 0) return undefined;
+    const intersection = new Set<string>(firstTags.map((t) => t.id));
+    for (let i = 1; i < selectedNotes.length; i++) {
+      const nextTags = getTagIds(selectedNotes[i]);
+      if (!nextTags || nextTags.length === 0) return undefined;
+      const nextIds = new Set(nextTags.map((t) => t.id));
+      for (const id of intersection) {
+        if (!nextIds.has(id)) intersection.delete(id);
+      }
+      if (intersection.size === 0) return undefined;
+    }
+    return intersection;
+  }, [selectedNotes]);
+
+  const submitTag = (rawTitle: string) => {
+    const trimmed = rawTitle.trim();
+    if (!trimmed) return;
+    setTagOpen(false);
+    setTagValue("");
+    onBulkAddTag?.(selectedNotes, trimmed);
+  };
+
   const changeSortField = (field: SortField) => {
     if (field === sortField) return;
     // Titles read naturally A-Z, dates newest first
@@ -165,12 +341,13 @@ export function NoteList({
 
   const sortDescription = `${SORT_FIELD_LABELS[sortField]}, ${orderLabel(sortField, sortOrder)}`;
   const isFiltering = filterText.trim().length > 0;
+  const showSelectToggle = canSelect && !isLoading && !error && (notes.length > 0 || isSelecting);
 
   return (
     <div className="flex flex-col h-full bg-background border-r border-border">
-      {/* Top bar with Title & Sort */}
-      <div className="px-4 py-3.5 border-b border-border space-y-2.5">
-        <div className="flex items-center justify-between">
+      {/* Top bar with Title, Select toggle, Sort & New */}
+      <div className="px-4 py-3.5 border-b border-border space-y-2.5 shrink-0">
+        <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5">
           <div className="min-w-0">
             <h2 className="text-base font-bold text-foreground truncate">{title}</h2>
             {subtitle && (
@@ -178,11 +355,26 @@ export function NoteList({
             )}
           </div>
 
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-1 ml-auto shrink-0">
             {!isLoading && !error && (
-              <span className="text-xs text-muted-foreground font-mono">
+              <span className="text-xs text-muted-foreground font-mono mr-0.5">
                 {filteredAndSortedNotes.length} {filteredAndSortedNotes.length === 1 ? "note" : "notes"}
               </span>
+            )}
+
+            {showSelectToggle && (
+              <Button
+                type="button"
+                variant={isSelecting ? "secondary" : "ghost"}
+                size="sm"
+                onClick={toggleSelectionMode}
+                aria-pressed={isSelecting}
+                disabled={isBulkPending}
+                className="h-7 px-2 text-xs gap-1"
+              >
+                <ListChecks className="h-3.5 w-3.5" aria-hidden="true" />
+                Select
+              </Button>
             )}
 
             <DropdownMenu>
@@ -257,10 +449,48 @@ export function NoteList({
             className="h-8 pl-8 text-xs bg-muted/40 border-border/40 focus-visible:ring-primary/70"
           />
         </div>
+
+        {isSelecting && (
+          <div className="flex items-center justify-between gap-2 pt-0.5" role="region" aria-label="Selection controls">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 px-2.5 text-xs"
+              disabled={filteredAndSortedNotes.length === 0 || isBulkPending}
+              onClick={() => selectAll(orderedIds)}
+            >
+              Select all ({filteredAndSortedNotes.length})
+            </Button>
+            {selectedCount === 0 && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+                disabled={isBulkPending}
+                onClick={exitSelectionMode}
+              >
+                Cancel
+              </Button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Content Area */}
-      <ScrollArea className="flex-1 p-3">
+      <ScrollArea
+        className="flex-1 min-h-0 p-3 [&>[data-radix-scroll-area-viewport]>div]:block!"
+        onScrollCapture={(e) => {
+          const el = e.target as HTMLElement;
+          if (
+            visibleCount < filteredAndSortedNotes.length &&
+            el.scrollHeight - el.scrollTop - el.clientHeight < 200
+          ) {
+            setRenderLimit((prev) => Math.max(prev, visibleCount) + NOTE_LIST_PAGE_SIZE);
+          }
+        }}
+      >
         {isStale && !isLoading && !error && (
           <StaleDataHint className="px-1 pb-2" onRetry={onRetry} isRetrying={isRetrying} />
         )}
@@ -309,18 +539,199 @@ export function NoteList({
           </div>
         ) : (
           <div className="space-y-2 pb-6">
-            {filteredAndSortedNotes.map((note) => (
+            {visibleNotes.map((note) => (
               <NoteListItem
                 key={note.id}
                 note={note}
-                isActive={selectedNoteId === note.id}
-                onClick={() => onSelectNote(note.id)}
-                onToggleTodo={onToggleTodo ? () => onToggleTodo(note.id, !note.todoCompleted) : undefined}
+                isActive={!isSelecting && selectedNoteId === note.id}
+                selectionMode={isSelecting}
+                isSelected={isSelecting && selectedIds.has(note.id)}
+                onActivate={handleActivateItem}
+                onToggleTodoById={onToggleTodo ? handleToggleTodoById : undefined}
               />
             ))}
+            {visibleCount < filteredAndSortedNotes.length && (
+              <div className="pt-2 text-center">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 text-xs text-muted-foreground hover:text-foreground"
+                  onClick={() => setRenderLimit((prev) => Math.max(prev, visibleCount) + NOTE_LIST_PAGE_SIZE)}
+                >
+                  Show more ({filteredAndSortedNotes.length - visibleCount} remaining)
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </ScrollArea>
+
+      {/* Sticky Bulk Action Bar */}
+      {showBar && (
+        <div
+          role="region"
+          aria-label="Bulk actions"
+          className="sticky bottom-0 z-10 shrink-0 border-t border-border bg-card/95 backdrop-blur-xs px-3 py-2.5 shadow-sm"
+        >
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-xs font-semibold text-foreground whitespace-nowrap">
+                {selectedCount} selected
+              </span>
+              {isBulkPending && (
+                <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground font-mono truncate">
+                  <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
+                  {bulkProgress && bulkProgress.total > 0
+                    ? `${bulkProgress.completed} / ${bulkProgress.total}`
+                    : "Working…"}
+                </span>
+              )}
+            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground shrink-0"
+              disabled={isBulkPending}
+              onClick={exitSelectionMode}
+            >
+              Cancel
+            </Button>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Popover
+              open={moveOpen}
+              onOpenChange={(open) => {
+                setMoveOpen(open);
+                if (!open) setMoveFilter("");
+              }}
+            >
+              <PopoverTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={isBulkPending}
+                  className="h-8 gap-1.5 px-2.5 text-xs flex-1 min-w-[5.25rem]"
+                >
+                  <FolderInput className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  Move to…
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent
+                side="top"
+                align="start"
+                sideOffset={8}
+                collisionPadding={12}
+                onCloseAutoFocus={(e) => {
+                  if (document.activeElement?.closest("[role='dialog']")) {
+                    e.preventDefault();
+                  }
+                }}
+                className="w-72 max-w-[calc(100vw-1.5rem)] p-3"
+              >
+                <p className="mb-2 text-xs font-medium text-muted-foreground">
+                  Move {selectedCount} {selectedCount === 1 ? "note" : "notes"} to
+                </p>
+                <NotebookPicker
+                  notebooks={notebooks}
+                  currentId={uniformCurrentNotebookId}
+                  filter={moveFilter}
+                  onFilterChange={setMoveFilter}
+                  autoFocusFilter
+                  listClassName="max-h-52"
+                  disabled={isBulkPending}
+                  onSelect={(notebookId, notebookTitle) => {
+                    setMoveOpen(false);
+                    setMoveFilter("");
+                    onBulkMove?.(selectedNotes, notebookId, notebookTitle);
+                  }}
+                />
+              </PopoverContent>
+            </Popover>
+
+            {canBulkTag && (
+              <Popover
+                open={tagOpen}
+                onOpenChange={(open) => {
+                  setTagOpen(open);
+                  if (!open) setTagValue("");
+                }}
+              >
+                <PopoverTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={isBulkPending}
+                    className="h-8 gap-1.5 px-2.5 text-xs flex-1 min-w-[5.25rem]"
+                  >
+                    <TagIcon className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    Add tag…
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent
+                  side="top"
+                  align="center"
+                  sideOffset={8}
+                  collisionPadding={12}
+                  onCloseAutoFocus={(e) => {
+                    if (document.activeElement?.closest("[role='dialog']")) {
+                      e.preventDefault();
+                    }
+                  }}
+                  className="w-72 max-w-[calc(100vw-1.5rem)] p-3"
+                >
+                  <p className="mb-2 text-xs font-medium text-muted-foreground">
+                    Add tag to {selectedCount} {selectedCount === 1 ? "note" : "notes"}
+                  </p>
+                  <div className="flex items-start gap-1.5">
+                    <div className="flex-1 min-w-0">
+                      <TagAutocompleteInput
+                        excludeTagIds={commonTagIds}
+                        value={tagValue}
+                        onValueChange={setTagValue}
+                        onSubmit={submitTag}
+                        onCancel={() => {
+                          setTagOpen(false);
+                          setTagValue("");
+                        }}
+                        isPending={isBulkPending}
+                        inlineList
+                        autoFocus
+                        inputClassName="h-8 w-full rounded-md border-input px-2.5 text-sm"
+                      />
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="h-8 px-2.5 text-xs shrink-0"
+                      disabled={isBulkPending || !tagValue.trim()}
+                      onClick={() => submitTag(tagValue)}
+                    >
+                      Add
+                    </Button>
+                  </div>
+                </PopoverContent>
+              </Popover>
+            )}
+
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={isBulkPending}
+              onClick={() => onBulkTrash?.(selectedNotes)}
+              className="h-8 gap-1.5 px-2.5 text-xs text-destructive border-destructive/30 hover:bg-destructive/10 hover:text-destructive flex-1 min-w-[6.5rem]"
+            >
+              <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              Move to trash
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

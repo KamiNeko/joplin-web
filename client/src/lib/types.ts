@@ -123,6 +123,39 @@ export interface SearchResult extends NoteListItem {
 }
 
 /**
+ * Item payload inside POST /api/notes/batch.
+ */
+export interface BatchNoteItem {
+  id: string;
+  baseUpdatedTime?: number;
+  parentId?: string;
+  title?: string;
+}
+
+/**
+ * Request body for POST /api/notes/batch.
+ */
+export interface BatchNoteRequest {
+  items: BatchNoteItem[];
+  parentId?: string;
+  addTags?: string[];
+  removeTags?: string[];
+  trash?: boolean;
+  restore?: boolean;
+}
+
+/**
+ * Per-note result returned by POST /api/notes/batch.
+ */
+export interface BatchNoteResult {
+  id: string;
+  status: "ok" | "conflict" | "error";
+  updatedTime?: number;
+  error?: string;
+  addedTags?: string[];
+}
+
+/**
  * Login response payload from API. The session itself is set as an httpOnly cookie.
  */
 export interface LoginResponse {
