@@ -54,6 +54,7 @@ In short: choose Joplin Web if you want quick, install-free access to your notes
 | | |
 | :--- | :--- |
 | 📚 **Notebooks** | Browse nested notebooks; create, rename, move (into another notebook or to the top level) and delete them. |
+| ☑️ **Bulk actions** | Multi-select notes (checkboxes, `Shift`-range, `Ctrl/Cmd`-click or *Select all*) to move them between notebooks, add tags or move them to the trash in bulk, with one-click *Undo*. |
 | 📝 **Markdown editor** | CodeMirror editor with *Edit*, *Split* and *Preview* modes, autosave and `Ctrl+S`. Formatting toolbar (also on phones) and shortcuts: `Ctrl+B` bold, `Ctrl+I` italic, `Ctrl+E` code, `Ctrl+K` link. Links to other notes via a search picker or *Copy Markdown link*. |
 | ✨ **Rich rendering** | GitHub-flavored Markdown: tables, task lists, syntax-highlighted code blocks, plus Joplin's extensions: math (KaTeX), Mermaid diagrams, `==highlight==`, `++insert++`, `~sub~` and `^sup^`. HTML notes (e.g. from the Web Clipper) are shown as sanitized HTML. |
 | 🖼️ **Images & attachments** | Shows Joplin resources inline. Drop, paste or attach files to upload them. |

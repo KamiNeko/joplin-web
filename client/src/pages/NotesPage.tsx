@@ -10,8 +10,10 @@ import { TrashedNotebooks } from "@/components/notebooks/TrashedNotebooks";
 import { useTags } from "@/hooks/use-tags";
 import { useNotes, useNote, useConflictNotes } from "@/hooks/use-notes";
 import { useSearch } from "@/hooks/use-search";
-import { useCreateNote, useUpdateNote } from "@/hooks/use-mutations";
+import { BulkUpdateProgress, useBulkUpdateNotes, useCreateNote, useUpdateNote } from "@/hooks/use-mutations";
+import { useNoteSelection } from "@/hooks/use-note-selection";
 import { findNotebookById, flattenNotebooks } from "@/lib/notebooks";
+import { BatchNoteItem, BatchNoteResult, NoteListItem } from "@/lib/types";
 import { toast } from "sonner";
 import { noteDisplayTitle } from "@/lib/format";
 import { useWriteState } from "@/hooks/use-write-state";
@@ -39,6 +41,25 @@ function scopeUrl(scope: ListScope, noteId?: string | null): string {
     default:
       return `/notes${note}`;
   }
+}
+
+function summarizeBulkResults(results: BatchNoteResult[]) {
+  const ok: BatchNoteResult[] = [];
+  const conflicts: BatchNoteResult[] = [];
+  const errors: BatchNoteResult[] = [];
+  for (const r of results) {
+    if (r.status === "ok") ok.push(r);
+    else if (r.status === "conflict") conflicts.push(r);
+    else errors.push(r);
+  }
+  return { ok, conflicts, errors };
+}
+
+function formatBulkSkips(conflictsCount: number, errorsCount: number): string {
+  const parts: string[] = [];
+  if (conflictsCount > 0) parts.push(`${conflictsCount} skipped: changed elsewhere`);
+  if (errorsCount > 0) parts.push(`${errorsCount} failed`);
+  return parts.length > 0 ? `, ${parts.join(", ")}` : "";
 }
 
 /**
@@ -76,8 +97,10 @@ export function NotesPage() {
   const [searchQuery, setSearchQuery] = useState<string>("");
   // Note that should open in the editor (set right after creating it)
   const [editIntentNoteId, setEditIntentNoteId] = useState<string | null>(null);
+  const [bulkProgress, setBulkProgress] = useState<BulkUpdateProgress | null>(null);
   const createNote = useCreateNote();
   const updateNote = useUpdateNote();
+  const bulkUpdate = useBulkUpdateNotes();
   // An account with end-to-end encryption is read-only: no editing, creating, tagging or uploads
   const { readOnly, reason: readOnlyReason } = useWriteState();
 
@@ -99,6 +122,14 @@ export function NotesPage() {
   const { data: fullNote, isLoading: isLoadingNote, error: noteError } = noteQuery;
   const searchQueryResult = useSearch(searchQuery);
   const { data: searchResults, isLoading: isLoadingSearch, debouncedQuery } = searchQueryResult;
+
+  const isSearchActive = debouncedQuery.length >= 2;
+  // Remount the list per scope so its filter doesn't carry over to another notebook or tag
+  // (the sort choice is stored separately and stays)
+  const listKey =
+    selectedNotebookId ??
+    (selectedTagId ? `tag:${selectedTagId}` : isTrashSelected ? "trash" : isConflictsSelected ? "conflicts" : "all");
+  const selection = useNoteSelection({ scopeKey: `${listKey}:${isSearchActive ? "search" : "list"}` });
 
   // When the page is opened on a plain /notes/:id URL, show that note's notebook in the list
   // (first load only, so picking a note from "All Notes" doesn't switch the list)
@@ -206,12 +237,172 @@ export function NotesPage() {
     navigate(scopeUrl(scope), { replace: true });
   };
 
-  const isSearchActive = debouncedQuery.length >= 2;
-  // Remount the list per scope so its filter doesn't carry over to another notebook or tag
-  // (the sort choice is stored separately and stays)
-  const listKey =
-    selectedNotebookId ??
-    (selectedTagId ? `tag:${selectedTagId}` : isTrashSelected ? "trash" : isConflictsSelected ? "conflicts" : "all");
+  const runUndoBatch = async (
+    payload: { items: BatchNoteItem[]; removeTags?: string[]; restore?: boolean },
+    successVerb: (count: number, noun: string) => string
+  ) => {
+    try {
+      const results = await bulkUpdate.mutateAsync({ ...payload, onProgress: setBulkProgress });
+      const { ok, conflicts, errors } = summarizeBulkResults(results);
+      const skips = formatBulkSkips(conflicts.length, errors.length);
+      if (ok.length > 0) {
+        const noun = ok.length === 1 ? "note" : "notes";
+        const notify = conflicts.length > 0 || errors.length > 0 ? toast.warning : toast.success;
+        notify(`${successVerb(ok.length, noun)}${skips}`);
+      } else if (conflicts.length > 0 && errors.length === 0) {
+        toast.warning(`Nothing undone, ${conflicts.length} skipped: changed elsewhere`);
+      } else {
+        toast.error(`Could not undo action${skips}`, { description: errors[0]?.error });
+      }
+    } catch (err) {
+      toast.error("Could not undo action", { description: err instanceof Error ? err.message : undefined });
+    } finally {
+      setBulkProgress(null);
+    }
+  };
+
+  const handleBulkMove = async (targetNotes: NoteListItem[], notebookId: string, notebookTitle: string) => {
+    const previousParents = new Map<string, string>(
+      targetNotes.map((n) => [n.id, n.parentId || n.notebookId || ""])
+    );
+    try {
+      const results = await bulkUpdate.mutateAsync({
+        items: targetNotes.map((n) => ({ id: n.id, baseUpdatedTime: n.updatedTime })),
+        parentId: notebookId,
+        onProgress: setBulkProgress,
+      });
+      const { ok, conflicts, errors } = summarizeBulkResults(results);
+      const skips = formatBulkSkips(conflicts.length, errors.length);
+      if (ok.length > 0) {
+        selection.exitSelectionMode();
+        if (isConflictsSelected && selectedNoteId && ok.some((r) => r.id === selectedNoteId)) {
+          handleNoteRemoved();
+        }
+        const undoItems: BatchNoteItem[] = [];
+        for (const r of ok) {
+          const prevParent = previousParents.get(r.id);
+          if (!prevParent) continue;
+          undoItems.push({
+            id: r.id,
+            ...(r.updatedTime !== undefined ? { baseUpdatedTime: r.updatedTime } : {}),
+            parentId: prevParent,
+          });
+        }
+        const noun = ok.length === 1 ? "note" : "notes";
+        const notify = conflicts.length > 0 || errors.length > 0 ? toast.warning : toast.success;
+        notify(`Moved ${ok.length} ${noun}${skips}`, {
+          description: `to "${notebookTitle}"`,
+          action:
+            undoItems.length > 0
+              ? {
+                  label: "Undo",
+                  onClick: () =>
+                    void runUndoBatch({ items: undoItems }, (count, n) => `Moved back ${count} ${n}`),
+                }
+              : undefined,
+        });
+      } else if (conflicts.length > 0 && errors.length === 0) {
+        toast.warning(`No notes moved, ${conflicts.length} skipped: changed elsewhere`);
+      } else {
+        toast.error(`Could not move notes${skips}`, { description: errors[0]?.error });
+      }
+    } catch (err) {
+      toast.error("Could not move notes", { description: err instanceof Error ? err.message : undefined });
+    } finally {
+      setBulkProgress(null);
+    }
+  };
+
+  const handleBulkAddTag = async (targetNotes: NoteListItem[], tagTitle: string) => {
+    try {
+      const results = await bulkUpdate.mutateAsync({
+        items: targetNotes.map((n) => ({ id: n.id, baseUpdatedTime: n.updatedTime })),
+        addTags: [tagTitle],
+        onProgress: setBulkProgress,
+      });
+      const { ok, conflicts, errors } = summarizeBulkResults(results);
+      const skips = formatBulkSkips(conflicts.length, errors.length);
+      if (ok.length > 0) {
+        selection.exitSelectionMode();
+        const newlyTagged = ok.filter((r) => (r.addedTags?.length ?? 0) > 0);
+        const canonicalTag = newlyTagged[0]?.addedTags?.[0] ?? tagTitle;
+        const alreadyTaggedCount = ok.length - newlyTagged.length;
+        const notify = conflicts.length > 0 || errors.length > 0 ? toast.warning : toast.success;
+        if (newlyTagged.length > 0) {
+          const noun = newlyTagged.length === 1 ? "note" : "notes";
+          const undoItems: BatchNoteItem[] = newlyTagged.map((r) => ({
+            id: r.id,
+            ...(r.updatedTime !== undefined ? { baseUpdatedTime: r.updatedTime } : {}),
+          }));
+          notify(`Added #${canonicalTag} to ${newlyTagged.length} ${noun}${skips}`, {
+            description:
+              alreadyTaggedCount > 0 ? `${alreadyTaggedCount} already had #${canonicalTag}` : undefined,
+            action: {
+              label: "Undo",
+              onClick: () =>
+                void runUndoBatch(
+                  { items: undoItems, removeTags: [canonicalTag] },
+                  (count, n) => `Removed #${canonicalTag} from ${count} ${n}`
+                ),
+            },
+          });
+        } else {
+          const noun = ok.length === 1 ? "note" : "notes";
+          notify(`#${tagTitle} is already on ${ok.length} ${noun}${skips}`);
+        }
+      } else if (conflicts.length > 0 && errors.length === 0) {
+        toast.warning(`No notes tagged, ${conflicts.length} skipped: changed elsewhere`);
+      } else {
+        toast.error(`Could not tag notes${skips}`, { description: errors[0]?.error });
+      }
+    } catch (err) {
+      toast.error("Could not tag notes", { description: err instanceof Error ? err.message : undefined });
+    } finally {
+      setBulkProgress(null);
+    }
+  };
+
+  const handleBulkTrash = async (targetNotes: NoteListItem[]) => {
+    try {
+      const results = await bulkUpdate.mutateAsync({
+        items: targetNotes.map((n) => ({ id: n.id, baseUpdatedTime: n.updatedTime })),
+        trash: true,
+        onProgress: setBulkProgress,
+      });
+      const { ok, conflicts, errors } = summarizeBulkResults(results);
+      const skips = formatBulkSkips(conflicts.length, errors.length);
+      if (ok.length > 0) {
+        selection.exitSelectionMode();
+        if (selectedNoteId && ok.some((r) => r.id === selectedNoteId)) {
+          handleNoteRemoved();
+        }
+        const undoItems: BatchNoteItem[] = ok.map((r) => ({
+          id: r.id,
+          ...(r.updatedTime !== undefined ? { baseUpdatedTime: r.updatedTime } : {}),
+        }));
+        const noun = ok.length === 1 ? "note" : "notes";
+        const notify = conflicts.length > 0 || errors.length > 0 ? toast.warning : toast.success;
+        notify(`Moved ${ok.length} ${noun} to trash${skips}`, {
+          action: {
+            label: "Undo",
+            onClick: () =>
+              void runUndoBatch(
+                { items: undoItems, restore: true },
+                (count, n) => `Restored ${count} ${n} from trash`
+              ),
+          },
+        });
+      } else if (conflicts.length > 0 && errors.length === 0) {
+        toast.warning(`No notes moved to trash, ${conflicts.length} skipped: changed elsewhere`);
+      } else {
+        toast.error(`Could not move notes to trash${skips}`, { description: errors[0]?.error });
+      }
+    } catch (err) {
+      toast.error("Could not move notes to trash", { description: err instanceof Error ? err.message : undefined });
+    } finally {
+      setBulkProgress(null);
+    }
+  };
 
   const emptyState = isTrashSelected
     ? trashedNotebooks?.length
@@ -292,6 +483,15 @@ export function NotesPage() {
             <NoteList
               key={listKey}
               notes={notes || []}
+              notebooks={notebooks}
+              selection={selection}
+              canSelect={!readOnly && !isTrashSelected}
+              canBulkTag={!isConflictsSelected}
+              onBulkMove={handleBulkMove}
+              onBulkAddTag={handleBulkAddTag}
+              onBulkTrash={handleBulkTrash}
+              isBulkPending={bulkUpdate.isPending}
+              bulkProgress={bulkProgress}
               isLoading={isLoadingNotes}
               // Keep showing a list that loaded before; only a list that never loaded is an error
               error={notes ? null : notesQuery.error}
