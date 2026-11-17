@@ -7,7 +7,16 @@ import { resetConnection } from "@/lib/connection";
 import { FetchCall, jsonResponse, mockFetch } from "@/test/fetch-mock";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 
+const pdfjsMock = vi.hoisted(() => ({
+  GlobalWorkerOptions: { workerSrc: "" },
+  VerbosityLevel: { ERRORS: 0 },
+  getDocument: vi.fn(),
+}));
+vi.mock("pdfjs-dist", () => pdfjsMock);
+vi.mock("pdfjs-dist/build/pdf.worker.min.mjs?url", () => ({ default: "/assets/pdf.worker.min.mjs" }));
+
 const RES_ID = "0123456789abcdef0123456789abcdef";
+const RES_ID_2 = "11111111111111111111111111111111";
 const NOTE_ID = "fedcba9876543210fedcba9876543210";
 const GONE_ID = "a".repeat(32);
 
@@ -31,24 +40,55 @@ function renderMarkdown(content: string, html = false) {
 let calls: FetchCall[];
 let downloads: string[];
 
+function mockPdfDocument(numPages = 12, width = 612, height = 792) {
+  const destroy = vi.fn(async () => undefined);
+  const cleanup = vi.fn(async () => undefined);
+  const renderPage = vi.fn(() => ({ promise: Promise.resolve() }));
+  const getPage = vi.fn(async () => ({
+    getViewport: ({ scale }: { scale: number }) => ({ width: width * scale, height: height * scale }),
+    render: renderPage,
+    cleanup: vi.fn(),
+  }));
+  pdfjsMock.getDocument.mockReturnValue({
+    promise: Promise.resolve({ numPages, getPage, cleanup }),
+    destroy,
+  });
+  return { destroy, cleanup, renderPage, getPage };
+}
+
 beforeEach(() => {
   resetConnection();
   clearResourceCache();
   downloads = [];
-  // jsdom has no object URLs
+  pdfjsMock.getDocument.mockReset();
+  mockPdfDocument();
+  // jsdom has no object URLs or 2D canvas implementation
   URL.createObjectURL = vi.fn(() => "blob:resource");
   URL.revokeObjectURL = vi.fn();
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
+    () => ({ fillStyle: "", fillRect: vi.fn() }) as unknown as RenderingContext
+  );
+  vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation((callback) => {
+    callback(new Blob(["thumb"], { type: "image/png" }));
+  });
   vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
-    downloads.push(this.download);
+    if (this.hasAttribute("download")) downloads.push(this.download);
   });
   calls = mockFetch(({ path }) => {
-    if (path === `/api/resources/${RES_ID}`) {
+    if (path === `/api/resources/${RES_ID}` || path === `/api/resources/${RES_ID_2}`) {
       return new Response(new Blob(["png"], { type: "image/png" }), { headers: { "Content-Type": "image/png" } });
     }
-    if (path === `/api/resources/${NOTE_ID}`) return jsonResponse({ error: "Not found" }, 404);
+    if (path === `/api/resources/${RES_ID}?view=pdf` || path === `/api/resources/${RES_ID_2}?view=pdf`) {
+      return new Response(new Uint8Array([0x25, 0x50, 0x44, 0x46]), { headers: { "Content-Type": "application/pdf" } });
+    }
+    if (path === `/api/resources/${NOTE_ID}` || path === `/api/resources/${NOTE_ID}?view=pdf`) {
+      return jsonResponse({ error: "Not found" }, 404);
+    }
     if (path === `/api/notes/${NOTE_ID}`) return jsonResponse({ id: NOTE_ID, title: "Other", body: "" });
     if (path === `/api/notes/${RES_ID}` || path === `/api/notes/${GONE_ID}`) return jsonResponse({ error: "Not found" }, 404);
-    if (path === `/api/resources/${GONE_ID}`) return jsonResponse({ error: "Not found" }, 404);
+    if (path === `/api/resources/${GONE_ID}` || path === `/api/resources/${GONE_ID}?view=pdf`) {
+      return jsonResponse({ error: "Not found" }, 404);
+    }
     return undefined;
   });
 });
@@ -133,33 +173,168 @@ describe("PDF attachments", () => {
     ["Markdown", `[11042026235350.pdf](:/${RES_ID})`, "11042026235350.pdf", false],
     ["uppercase .PDF", `[REPORT.PDF](:/${RES_ID.toUpperCase()})`, "REPORT.PDF", false],
     ["HTML note", `<a href=":/${RES_ID}">clip.pdf</a>`, "clip.pdf", true],
-  ])("renders %s PDF links as an inline iframe with Open and Download actions", async (_kind, content, name, html) => {
-    const container = renderMarkdown(content, html);
-    const iframe = container.querySelector("iframe");
-    expect(iframe).not.toBeNull();
-    expect(iframe?.getAttribute("src")).toBe(`/api/resources/${RES_ID}?view=pdf`);
-    expect(iframe?.getAttribute("title")).toBe(name);
-    expect(iframe?.getAttribute("loading")).toBe("lazy");
-    expect(screen.getByText(name)).toBeTruthy();
+  ])(
+    "renders %s PDF links as a collapsed thumbnail card that expands on click and collapses back",
+    async (_kind, content, name, html) => {
+      const { destroy } = mockPdfDocument(12, 612, 792);
+      const container = renderMarkdown(content, html);
 
-    const openLink = screen.getByRole("link", { name: "Open" });
-    expect(openLink.getAttribute("href")).toBe(`/api/resources/${RES_ID}?view=pdf`);
-    expect(openLink.getAttribute("target")).toBe("_blank");
-    expect(openLink.getAttribute("rel")).toBe("noopener noreferrer");
+      // Collapsed initially: no iframe, shows skeleton then rendered thumbnail + page count
+      expect(container.querySelector("iframe")).toBeNull();
+      expect(screen.getByText(name)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Download" }));
-    await waitFor(() => expect(downloads).toEqual([name]));
+      const thumbImg = (await screen.findByRole("img", { name: `${name} — page 1 preview` })) as HTMLImageElement;
+      expect(thumbImg.getAttribute("src")).toBe("blob:resource");
+      expect(thumbImg.getAttribute("width")).toBe("612");
+      expect(thumbImg.getAttribute("height")).toBe("792");
+      expect(screen.getByText("12 pages")).toBeTruthy();
+      expect(pdfjsMock.GlobalWorkerOptions.workerSrc).toBe("/assets/pdf.worker.min.mjs");
+      expect(pdfjsMock.getDocument).toHaveBeenCalledWith(
+        expect.objectContaining({ isEvalSupported: false, useWasm: false })
+      );
+      expect(destroy).toHaveBeenCalled();
+      expect(calls.some((c) => c.path === `/api/resources/${RES_ID}?view=pdf`)).toBe(true);
+
+      const openLink = screen.getByRole("link", { name: "Open" });
+      expect(openLink.getAttribute("href")).toBe(`/api/resources/${RES_ID}?view=pdf`);
+      expect(openLink.getAttribute("target")).toBe("_blank");
+      expect(openLink.getAttribute("rel")).toBe("noopener noreferrer");
+
+      // Clicking the thumbnail expands to the inline iframe
+      fireEvent.click(thumbImg);
+      const iframe = container.querySelector("iframe");
+      expect(iframe).not.toBeNull();
+      expect(iframe?.getAttribute("src")).toBe(`/api/resources/${RES_ID}?view=pdf`);
+      expect(iframe?.getAttribute("title")).toBe(name);
+      expect(iframe?.getAttribute("loading")).toBe("lazy");
+
+      // Collapse returns to the thumbnail card
+      fireEvent.click(screen.getByRole("button", { name: "Collapse" }));
+      expect(container.querySelector("iframe")).toBeNull();
+      expect(screen.getByRole("img", { name: `${name} — page 1 preview` })).toBeTruthy();
+
+      // Preview button also expands to the iframe
+      fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+      expect(container.querySelector("iframe")).not.toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Collapse" }));
+      expect(container.querySelector("iframe")).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "Download" }));
+      await waitFor(() => expect(downloads).toEqual([name]));
+    }
+  );
+
+  it("formats singular page count and memoizes thumbnails per resource id", async () => {
+    mockPdfDocument(1, 595, 842);
+    const { unmount } = render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter>
+          <MarkdownRenderer content={`[single.pdf](:/${RES_ID})`} />
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+    await screen.findByRole("img", { name: "single.pdf — page 1 preview" });
+    expect(screen.getByText("1 page")).toBeTruthy();
+    expect(calls.filter((c) => c.path === `/api/resources/${RES_ID}?view=pdf`)).toHaveLength(1);
+    expect(pdfjsMock.getDocument).toHaveBeenCalledTimes(1);
+    unmount();
+
+    // Switching back to a note with the same PDF reuses the session cache without re-fetching
+    renderMarkdown(`[single.pdf](:/${RES_ID})`);
+    expect(screen.getByRole("img", { name: "single.pdf — page 1 preview" }).getAttribute("src")).toBe("blob:resource");
+    expect(screen.getByText("1 page")).toBeTruthy();
+    expect(calls.filter((c) => c.path === `/api/resources/${RES_ID}?view=pdf`)).toHaveLength(1);
+    expect(pdfjsMock.getDocument).toHaveBeenCalledTimes(1);
+
+    // Logout / clearResourceCache() revokes the thumbnail blob URL and forgets the memoized result
+    cleanup();
+    clearResourceCache();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:resource");
+    renderMarkdown(`[single.pdf](:/${RES_ID})`);
+    await screen.findByRole("img", { name: "single.pdf — page 1 preview" });
+    expect(pdfjsMock.getDocument).toHaveBeenCalledTimes(2);
+    expect(calls.filter((c) => c.path === `/api/resources/${RES_ID}?view=pdf`)).toHaveLength(2);
   });
 
-  it("omits the iframe when navigator.pdfViewerEnabled is false", async () => {
+  it("renders the thumbnail and links to a new tab when navigator.pdfViewerEnabled is false", async () => {
     vi.stubGlobal("navigator", { ...navigator, pdfViewerEnabled: false });
     const container = renderMarkdown(`[mobile.pdf](:/${RES_ID})`);
+    const thumbImg = await screen.findByRole("img", { name: "mobile.pdf — page 1 preview" });
+    expect(screen.getByText("12 pages")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Preview" })).toBeNull();
+
+    const thumbLink = thumbImg.closest("a");
+    expect(thumbLink).not.toBeNull();
+    expect(thumbLink?.getAttribute("href")).toBe(`/api/resources/${RES_ID}?view=pdf`);
+    expect(thumbLink?.getAttribute("target")).toBe("_blank");
+    expect(thumbLink?.getAttribute("rel")).toBe("noopener noreferrer");
+
+    fireEvent.click(thumbLink!);
     expect(container.querySelector("iframe")).toBeNull();
-    expect(screen.getByText("mobile.pdf")).toBeTruthy();
     expect(screen.getByRole("link", { name: "Open" }).getAttribute("href")).toBe(`/api/resources/${RES_ID}?view=pdf`);
 
     fireEvent.click(screen.getByRole("button", { name: "Download" }));
     await waitFor(() => expect(downloads).toEqual(["mobile.pdf"]));
+  });
+
+  it("falls back to an icon card when PDF parsing fails (corrupt or encrypted)", async () => {
+    const destroy = vi.fn(async () => undefined);
+    const rejected = Promise.reject(new Error("Invalid PDF structure"));
+    rejected.catch(() => undefined);
+    pdfjsMock.getDocument.mockReturnValue({ promise: rejected, destroy });
+
+    const container = renderMarkdown(`[encrypted.pdf](:/${RES_ID})`);
+    expect(await screen.findByText("PDF attachment")).toBeTruthy();
+    expect(screen.getByText("encrypted.pdf")).toBeTruthy();
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("iframe")).toBeNull();
+    expect(destroy).toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Preview" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Open" }).getAttribute("href")).toBe(`/api/resources/${RES_ID}?view=pdf`);
+    expect(screen.getByRole("button", { name: "Download" })).toBeTruthy();
+  });
+
+  it.each([
+    ["404 attachment", GONE_ID, "missing.pdf"],
+    ["link that points to a note", NOTE_ID, "notes.pdf"],
+  ])("falls back to an icon card on %s without throwing", async (_kind, id, name) => {
+    const container = renderMarkdown(`[${name}](:/${id})`);
+    expect(await screen.findByText("PDF attachment")).toBeTruthy();
+    expect(screen.getByText(name)).toBeTruthy();
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("iframe")).toBeNull();
+    expect(screen.getByRole("link", { name: "Open" }).getAttribute("href")).toBe(`/api/resources/${id}?view=pdf`);
+    expect(screen.getByRole("button", { name: "Download" })).toBeTruthy();
+  });
+
+  it("defers downloading and rendering until the card enters near the viewport", async () => {
+    const observers: Array<{ target: Element; callback: IntersectionObserverCallback }> = [];
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        private callback: IntersectionObserverCallback;
+        constructor(callback: IntersectionObserverCallback) {
+          this.callback = callback;
+        }
+        observe(target: Element) {
+          observers.push({ target, callback: this.callback });
+        }
+        disconnect() {}
+        unobserve() {}
+      }
+    );
+
+    renderMarkdown(`[first.pdf](:/${RES_ID})\n\n[second.pdf](:/${RES_ID_2})`);
+    expect(screen.getByRole("img", { name: "Loading first.pdf" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "Loading second.pdf" })).toBeTruthy();
+    expect(calls).toHaveLength(0);
+    expect(pdfjsMock.getDocument).not.toHaveBeenCalled();
+
+    // Scroll only the first card into view
+    observers[0].callback([{ isIntersecting: true, target: observers[0].target } as IntersectionObserverEntry], {} as IntersectionObserver);
+    await screen.findByRole("img", { name: "first.pdf — page 1 preview" });
+    expect(calls.map((c) => c.path)).toEqual([`/api/resources/${RES_ID}?view=pdf`]);
+    expect(screen.getByRole("img", { name: "Loading second.pdf" })).toBeTruthy();
   });
 
   it("keeps the button when .pdf is not at the end of the label", () => {
