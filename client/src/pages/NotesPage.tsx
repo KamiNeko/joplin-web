@@ -132,12 +132,14 @@ export function NotesPage() {
 
   const noteTitle = fullNote ? noteDisplayTitle(fullNote) : undefined;
 
+  // Side by side (md and up) a list opens its top note; on phones the list replaces the note
+  const isSideBySide = Boolean(window.matchMedia?.("(min-width: 768px)").matches);
+
   // Handlers only navigate; the selection follows from the URL
   const showList = (next: ListScope) => {
     setSearchQuery("");
-    // Side by side (md and up) the open note stays open; on phones the list replaces it
-    const keepNote =
-      next.kind !== "trash" && next.kind !== "conflicts" && window.matchMedia?.("(min-width: 768px)").matches;
+    // Picking the list that is already shown keeps its open note
+    const keepNote = isSideBySide && scopeUrl(next) === scopeUrl(scope);
     navigate(scopeUrl(next, keepNote ? selectedNoteId : null));
   };
 
@@ -302,6 +304,8 @@ export function NotesPage() {
               emptyDescription={emptyState.description}
               selectedNoteId={selectedNoteId}
               onSelectNote={handleSelectNote}
+              // Replace, so Back goes straight to the previous list and note
+              onOpenFirst={isSideBySide ? (id) => navigate(scopeUrl(scope, id), { replace: true }) : undefined}
               title={notebookTitle || "All Notes"}
               onCreateNote={
                 isTrashSelected || isConflictsSelected || readOnly || currentNotebook?.encrypted ? undefined : handleCreateNote

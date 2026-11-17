@@ -142,17 +142,29 @@ describe("NotesPage", () => {
     expect(await screen.findByText("Notebook notes")).toBeTruthy();
   });
 
-  it("switches to a notebook from the sidebar and keeps the open note on desktop", async () => {
+  it("switches to a notebook from the sidebar and opens its top note on desktop", async () => {
     const calls = mockNotesApi();
     renderPage(`/notes/${notes[0].id}?tag=${planning.id}`);
     await viewerTitle("Roadmap");
 
     fireEvent.click(await sidebar().findByRole("button", { name: "Personal, 1 note" }));
 
-    await waitFor(() => expect(location()).toBe(`/notebooks/${personal.id}/notes/${notes[0].id}`));
+    await waitFor(() => expect(location()).toBe(`/notebooks/${personal.id}/notes/${notes[2].id}`));
+    expect(await viewerTitle("Lisbon trip")).toBeTruthy();
     expect(await noteRow("Lisbon trip")).toBeTruthy();
     expect(screen.queryByText("Meeting minutes", { selector: "h3" })).toBeNull();
     expect(calls.some((c) => c.path === `/api/notes?notebookId=${personal.id}`)).toBe(true);
+  });
+
+  it("keeps the open note when the shown notebook is picked again", async () => {
+    mockNotesApi();
+    renderPage(`/notebooks/${work.id}/notes/${notes[1].id}`);
+    await viewerTitle("Meeting minutes");
+
+    fireEvent.click(await sidebar().findByRole("button", { name: "Work, 2 notes" }));
+
+    await waitFor(() => expect(location()).toBe(`/notebooks/${work.id}/notes/${notes[1].id}`));
+    expect(await viewerTitle("Meeting minutes")).toBeTruthy();
   });
 
   it("filters by tag from the URL and from a tag on the open note", async () => {

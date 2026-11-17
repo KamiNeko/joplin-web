@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { NoteListItem as NoteListItemType } from "@/lib/types";
 import { NoteListItem } from "./NoteListItem";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -29,6 +29,8 @@ interface NoteListProps {
   isRetrying?: boolean;
   selectedNoteId?: string | null;
   onSelectNote: (id: string) => void;
+  /** Called once with the top note when the list first loads with no note open (opens it, like Evernote) */
+  onOpenFirst?: (id: string) => void;
   title?: string;
   subtitle?: string;
   /** Empty-state text for this list (e.g. "Trash is empty") */
@@ -103,6 +105,7 @@ export function NoteList({
   isRetrying = false,
   selectedNoteId,
   onSelectNote,
+  onOpenFirst,
   title = "Notes",
   subtitle,
   emptyTitle = "No notes yet",
@@ -145,6 +148,14 @@ export function NoteList({
 
     return result;
   }, [notes, filterText, sortField, sortOrder]);
+
+  // Once per list (it remounts per notebook/tag), so closing the note doesn't reopen one
+  const openedFirst = useRef(false);
+  useEffect(() => {
+    if (openedFirst.current || isLoading || !onOpenFirst) return;
+    openedFirst.current = true;
+    if (!selectedNoteId && filteredAndSortedNotes[0]) onOpenFirst(filteredAndSortedNotes[0].id);
+  }, [isLoading, onOpenFirst, selectedNoteId, filteredAndSortedNotes]);
 
   const changeSortField = (field: SortField) => {
     if (field === sortField) return;
