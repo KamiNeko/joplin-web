@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Folder, Info, Loader2, Search, Sparkles } from "lucide-react";
+import { AlertTriangle, Folder, History, Info, Loader2, Search, Sparkles } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -11,7 +11,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { flattenNotebooks } from "@/lib/notebooks";
-import { Notebook } from "@/lib/types";
+import { Notebook, OrganizeJobSummary } from "@/lib/types";
 
 interface StartOrganizeDialogProps {
   open: boolean;
@@ -21,12 +21,20 @@ interface StartOrganizeDialogProps {
   /** Default excluded target notebook when all selected notes share one parent notebook */
   defaultExcludedNotebookId?: string | null;
   isPending?: boolean;
+  previousJobsCount?: number;
+  onViewJobs?: () => void;
+  runningJob?: OrganizeJobSummary | null;
+  conflictRunningJobId?: string | null;
+  conflictMessage?: string | null;
+  onViewRunningJob?: (jobId: string) => void;
+  onCancelAndStart?: (runningJobId: string, excludeNotebookIds: string[]) => void;
   onConfirm: (excludeNotebookIds: string[]) => void;
 }
 
 /**
  * Confirmation dialog shown before starting an Auto-organize LLM job.
- * Lets the user choose destination notebooks to exclude and discloses what data is sent to the AI provider.
+ * Lets the user choose destination notebooks to exclude, discloses what data is sent to the AI
+ * provider, links to previous jobs, and warns if another job is currently running.
  */
 export function StartOrganizeDialog({
   open,
@@ -35,6 +43,13 @@ export function StartOrganizeDialog({
   notebooks,
   defaultExcludedNotebookId = null,
   isPending = false,
+  previousJobsCount = 0,
+  onViewJobs,
+  runningJob = null,
+  conflictRunningJobId = null,
+  conflictMessage = null,
+  onViewRunningJob,
+  onCancelAndStart,
   onConfirm,
 }: StartOrganizeDialogProps) {
   const [excludedIds, setExcludedIds] = useState<Set<string>>(() =>
@@ -73,23 +88,70 @@ export function StartOrganizeDialog({
   };
 
   const noun = selectedCount === 1 ? "note" : "notes";
+  const effectiveRunningJobId = conflictRunningJobId ?? runningJob?.id ?? null;
+  const runningProcessed = runningJob ? runningJob.progress.done + runningJob.progress.failed : 0;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Sparkles className="h-4 w-4 text-primary shrink-0" aria-hidden="true" />
-            <span>
-              Auto-organize {selectedCount} {noun}
-            </span>
-          </DialogTitle>
+          <div className="flex flex-wrap items-center justify-between gap-2 pr-6">
+            <DialogTitle className="flex items-center gap-2">
+              <Sparkles className="h-4 w-4 text-primary shrink-0" aria-hidden="true" />
+              <span>
+                Auto-organize {selectedCount} {noun}
+              </span>
+            </DialogTitle>
+            {previousJobsCount > 0 && onViewJobs && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={isPending}
+                onClick={onViewJobs}
+                className="h-7 px-2.5 text-xs gap-1.5"
+              >
+                <History className="h-3.5 w-3.5" aria-hidden="true" />
+                Previous jobs ({previousJobsCount})
+              </Button>
+            )}
+          </div>
           <DialogDescription>
             Suggest cleaner English titles, destination notebooks, and tags. Nothing changes until you review and apply.
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
+          {effectiveRunningJobId && (
+            <div
+              role="alert"
+              className="flex items-start gap-2.5 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs text-foreground"
+            >
+              <AlertTriangle className="h-4 w-4 text-warning shrink-0 mt-0.5" aria-hidden="true" />
+              <div className="flex-1 min-w-0 space-y-1.5">
+                <p className="font-medium">Another Auto-organize job is currently running.</p>
+                <p className="text-muted-foreground">
+                  {conflictMessage ||
+                    (runningJob
+                      ? `Progress: ${runningProcessed} / ${runningJob.progress.total} notes analysed. Only one job runs at a time.`
+                      : "Only one job runs at a time. Cancel the running job before starting a new one.")}
+                </p>
+                {onViewRunningJob && (
+                  <Button
+                    type="button"
+                    variant="link"
+                    size="sm"
+                    disabled={isPending}
+                    onClick={() => onViewRunningJob(effectiveRunningJobId)}
+                    className="h-auto p-0 text-xs text-primary"
+                  >
+                    View running job
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="space-y-2">
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs font-medium text-foreground">
@@ -166,15 +228,28 @@ export function StartOrganizeDialog({
           <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={isPending}>
             Cancel
           </Button>
-          <Button
-            type="button"
-            disabled={isPending || selectedCount === 0}
-            onClick={() => onConfirm([...excludedIds])}
-            className="gap-1.5"
-          >
-            {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-            Start organizing ({selectedCount})
-          </Button>
+          {effectiveRunningJobId && onCancelAndStart ? (
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={isPending || selectedCount === 0}
+              onClick={() => onCancelAndStart(effectiveRunningJobId, [...excludedIds])}
+              className="gap-1.5"
+            >
+              {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              Cancel the running job and start
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              disabled={isPending || selectedCount === 0}
+              onClick={() => onConfirm([...excludedIds])}
+              className="gap-1.5"
+            >
+              {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              Start organizing ({selectedCount})
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

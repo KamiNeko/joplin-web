@@ -173,6 +173,7 @@ test("selects multiple notes, runs Auto-organize, applies and undoes", async ({ 
 
   await expect(page).toHaveURL(/\/organize\/[0-9a-f]+$/);
   await expect(page.getByText("Analysed 2 / 2")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Very high (>= 0.85) (1)" })).toBeVisible();
 
   // High-confidence OCR invoice starts ticked; low-confidence reference note starts unticked
   await expect(page.getByRole("checkbox", { name: "Select 2024_03_11.pdf" })).toBeChecked();
@@ -191,6 +192,10 @@ test("selects multiple notes, runs Auto-organize, applies and undoes", async ({ 
   await expect(page.getByText("Reverted 1 note")).toBeVisible();
   await expect(sidebar.getByRole("button", { name: /^Work\s*, 2 notes$/ })).toBeVisible();
   await expect(sidebar.getByRole("button", { name: /^Projects\s*, 2 notes$/ })).toBeVisible();
+
+  await page.getByRole("link", { name: "All jobs" }).click();
+  await expect(page).toHaveURL(/\/organize$/);
+  await expect(page.getByRole("heading", { name: "Auto-organize jobs" })).toBeVisible();
 
   await sidebar.getByRole("button", { name: /^Work\s*, 2 notes$/ }).click();
   await expect(page.getByText("2024_03_11.pdf").first()).toBeVisible();

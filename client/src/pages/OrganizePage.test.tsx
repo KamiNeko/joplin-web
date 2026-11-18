@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { Route, Routes } from "react-router-dom";
 import { toast } from "sonner";
-import { Notebook, OrganizeJobResponse, Tag } from "@/lib/types";
+import { Notebook, OrganizeJobResponse, OrganizeJobSummary, Tag } from "@/lib/types";
 import { jsonResponse, mockFetch } from "@/test/fetch-mock";
 import { LocationProbe, renderWithProviders } from "@/test/render";
 import { OrganizePage } from "./OrganizePage";
@@ -104,16 +104,17 @@ function stubMatchMedia(isDesktop: boolean) {
   );
 }
 
-function renderOrganizePage(jobId = "job1234567890abcdef1234567890ab") {
+function renderOrganizePage(route = "/organize/job1234567890abcdef1234567890ab") {
   return renderWithProviders(
     <>
       <Routes>
+        <Route path="/organize" element={<OrganizePage />} />
         <Route path="/organize/:jobId" element={<OrganizePage />} />
         <Route path="/notebooks/:notebookId/notes/:id" element={<div>Opened note route</div>} />
       </Routes>
       <LocationProbe />
     </>,
-    { route: `/organize/${jobId}` }
+    { route: route.startsWith("/") ? route : `/organize/${route}` }
   );
 }
 
@@ -302,5 +303,249 @@ describe("OrganizePage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(infoSpy).toHaveBeenCalledWith("Auto-organize cancelled"));
     expect(calls.some((c) => c.method === "DELETE" && c.path === `/api/organize/jobs/${jobState.id}`)).toBe(true);
+  });
+
+  it("filters Very high (>= 0.85), keeps >= 0.7 pre-ticked, and switches selection with Select all very-high", async () => {
+    const jobState = makeJob({
+      progress: { total: 3, done: 3, failed: 0 },
+      items: [
+        {
+          ...makeJob().items[0],
+          noteId: id("d"),
+          currentTitle: "Very High Note",
+          suggestion: {
+            title: "2024-03-11 HSBC – Statement",
+            notebookId: id("3"),
+            tags: ["statement"],
+            confidence: 0.92,
+            documentDate: "2024-03-11",
+            reason: "Clear match.",
+          },
+        },
+        {
+          noteId: id("e"),
+          currentTitle: "Moderate High Note",
+          currentNotebookId: id("1"),
+          currentNotebookPath: "Pending to sort",
+          updatedTime: 1002,
+          status: "done",
+          suggestion: {
+            title: "2024-03-12 Draft – Notes",
+            notebookId: id("4"),
+            tags: ["other"],
+            confidence: 0.74,
+            documentDate: "2024-03-12",
+            reason: "Probable match.",
+          },
+        },
+        {
+          ...makeJob().items[1],
+          noteId: id("g"),
+          currentTitle: "Low Note",
+          suggestion: {
+            title: "Low Note",
+            notebookId: id("4"),
+            tags: ["ideas"],
+            confidence: 0.51,
+            documentDate: null,
+            reason: "Uncertain.",
+          },
+        },
+      ],
+    });
+
+    mockFetch((call) => {
+      const url = new URL(call.path, "http://localhost");
+      if (url.pathname === "/api/notebooks") return jsonResponse(notebooks);
+      if (url.pathname === "/api/tags") return jsonResponse(tags);
+      if (url.pathname === `/api/organize/jobs/${jobState.id}` && call.method === "GET") {
+        return jsonResponse(jobState);
+      }
+      return undefined;
+    });
+
+    renderOrganizePage();
+
+    const table = await screen.findByRole("table", { name: "Organize suggestions" });
+    expect(screen.getByText("Very high 92%")).toBeTruthy();
+    expect(screen.getByText("High 74%")).toBeTruthy();
+    expect(screen.getByText("Low 51%")).toBeTruthy();
+
+    // >= 0.7 starts ticked (0.92 and 0.74)
+    expect((within(table).getByRole("checkbox", { name: "Select Very High Note" }) as HTMLInputElement).checked).toBe(
+      true
+    );
+    expect(
+      (within(table).getByRole("checkbox", { name: "Select Moderate High Note" }) as HTMLInputElement).checked
+    ).toBe(true);
+    expect((within(table).getByRole("checkbox", { name: "Select Low Note" }) as HTMLInputElement).checked).toBe(false);
+    expect(screen.getByRole("button", { name: "Apply selected (2)" })).toBeTruthy();
+
+    // "Select all very-high" narrows selection exclusively to >= 0.85
+    fireEvent.click(screen.getByRole("button", { name: "Select all very-high" }));
+    expect((within(table).getByRole("checkbox", { name: "Select Very High Note" }) as HTMLInputElement).checked).toBe(
+      true
+    );
+    expect(
+      (within(table).getByRole("checkbox", { name: "Select Moderate High Note" }) as HTMLInputElement).checked
+    ).toBe(false);
+    expect(screen.getByRole("button", { name: "Apply selected (1)" })).toBeTruthy();
+
+    // Filter to Very high (>= 0.85)
+    fireEvent.click(screen.getByRole("button", { name: "Very high (>= 0.85) (1)" }));
+    expect(within(table).getByDisplayValue("2024-03-11 HSBC – Statement")).toBeTruthy();
+    expect(within(table).queryByDisplayValue("2024-03-12 Draft – Notes")).toBeNull();
+    expect(within(table).queryByDisplayValue("Low Note")).toBeNull();
+  });
+
+  it("shows Retry failed (N) excluding skipped items and triggers POST /retry", async () => {
+    const successSpy = vi.spyOn(toast, "success").mockReturnValue("t-retry");
+
+    let jobState = makeJob({
+      progress: { total: 3, done: 1, failed: 2 },
+      retryableFailedCount: 1,
+      items: [
+        makeJob().items[0],
+        {
+          noteId: id("e"),
+          currentTitle: "Timed out invoice",
+          currentNotebookId: id("1"),
+          currentNotebookPath: "Pending to sort",
+          updatedTime: 1002,
+          status: "failed",
+          error: "AI provider returned HTTP 503",
+        },
+        {
+          noteId: id("f"),
+          currentTitle: "Duplicate scanned copy",
+          currentNotebookId: id("1"),
+          currentNotebookPath: "Pending to sort",
+          updatedTime: 1003,
+          status: "failed",
+          skipped: true,
+          error: "Duplicate copy (trashed)",
+        },
+      ],
+    });
+
+    const calls = mockFetch((call) => {
+      const url = new URL(call.path, "http://localhost");
+      if (url.pathname === "/api/notebooks") return jsonResponse(notebooks);
+      if (url.pathname === "/api/tags") return jsonResponse(tags);
+      if (url.pathname === `/api/organize/jobs/${jobState.id}` && call.method === "GET") {
+        return jsonResponse(jobState);
+      }
+      if (url.pathname === `/api/organize/jobs/${jobState.id}/retry` && call.method === "POST") {
+        jobState = makeJob({
+          ...jobState,
+          status: "running",
+          progress: { total: 3, done: 1, failed: 1 },
+          retryableFailedCount: 0,
+          items: [
+            jobState.items[0],
+            { ...jobState.items[1], status: "pending", error: undefined },
+            jobState.items[2],
+          ],
+        });
+        return jsonResponse({ id: jobState.id, status: "running", requeuedCount: 1 });
+      }
+      return undefined;
+    });
+
+    renderOrganizePage();
+
+    const retryBtn = await screen.findByRole("button", { name: "Retry failed (1)" });
+    expect(screen.getByText("Failed")).toBeTruthy();
+    expect(screen.getByText("Skipped")).toBeTruthy();
+
+    fireEvent.click(retryBtn);
+
+    await waitFor(() => expect(successSpy).toHaveBeenCalledWith("Retrying 1 failed note"));
+    expect(calls.some((c) => c.method === "POST" && c.path === `/api/organize/jobs/${jobState.id}/retry`)).toBe(true);
+    await waitFor(() => expect(screen.queryByRole("button", { name: /^Retry failed/ })).toBeNull());
+  });
+
+  it("lists jobs on /organize newest first and supports Cancel and Delete with confirmation", async () => {
+    const successSpy = vi.spyOn(toast, "success").mockReturnValue("t-del");
+    const infoSpy = vi.spyOn(toast, "info").mockReturnValue("t-cancel");
+
+    let jobsList: OrganizeJobSummary[] = [
+      {
+        id: "22222222222222222222222222222222",
+        status: "running",
+        progress: { total: 10, done: 4, failed: 0 },
+        appliedCount: 0,
+        usage: { promptTokens: 200, completionTokens: 50, totalTokens: 250 },
+        canUndo: false,
+        createdAt: 1_700_000_020_000,
+        updatedAt: 1_700_000_025_000,
+      },
+      {
+        id: "11111111111111111111111111111111",
+        status: "done",
+        progress: { total: 5, done: 5, failed: 0 },
+        appliedCount: 3,
+        usage: { promptTokens: 500, completionTokens: 120, totalTokens: 620 },
+        canUndo: true,
+        createdAt: 1_700_000_000_000,
+        updatedAt: 1_700_000_005_000,
+      },
+    ];
+
+    const calls = mockFetch((call) => {
+      const url = new URL(call.path, "http://localhost");
+      if (url.pathname === "/api/notebooks") return jsonResponse(notebooks);
+      if (url.pathname === "/api/tags") return jsonResponse(tags);
+      if (url.pathname === "/api/organize/jobs" && call.method === "GET") {
+        return jsonResponse({ jobs: jobsList });
+      }
+      if (
+        url.pathname === "/api/organize/jobs/22222222222222222222222222222222" &&
+        call.method === "DELETE" &&
+        !url.searchParams.get("remove")
+      ) {
+        jobsList = jobsList.map((j) =>
+          j.id === "22222222222222222222222222222222" ? { ...j, status: "cancelled" as const } : j
+        );
+        return jsonResponse({ id: "22222222222222222222222222222222", status: "cancelled" });
+      }
+      if (
+        url.pathname === "/api/organize/jobs/11111111111111111111111111111111" &&
+        call.method === "DELETE" &&
+        url.searchParams.get("remove") === "1"
+      ) {
+        jobsList = jobsList.filter((j) => j.id !== "11111111111111111111111111111111");
+        return jsonResponse({ id: "11111111111111111111111111111111", deleted: true });
+      }
+      return undefined;
+    });
+
+    renderOrganizePage("/organize");
+
+    expect(await screen.findByRole("heading", { name: "Auto-organize jobs" })).toBeTruthy();
+    const links = await screen.findAllByRole("link", { name: /^Job / });
+    expect(links.map((el) => el.textContent)).toEqual(["Job 22222222", "Job 11111111"]);
+    expect(screen.getByText(/3 applied/)).toBeTruthy();
+    expect(screen.getByText(/Undo available/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(infoSpy).toHaveBeenCalledWith("Auto-organize cancelled"));
+    expect(
+      calls.some(
+        (c) => c.method === "DELETE" && c.path === "/api/organize/jobs/22222222222222222222222222222222"
+      )
+    ).toBe(true);
+
+    const deleteButtons = screen.getAllByRole("button", { name: "Delete" });
+    fireEvent.click(deleteButtons[deleteButtons.length - 1]);
+    const confirmDialog = await screen.findByRole("dialog", { name: "Delete Auto-organize job?" });
+    fireEvent.click(within(confirmDialog).getByRole("button", { name: "Delete job" }));
+
+    await waitFor(() => expect(successSpy).toHaveBeenCalledWith("Auto-organize job deleted"));
+    expect(
+      calls.some(
+        (c) => c.method === "DELETE" && c.path === "/api/organize/jobs/11111111111111111111111111111111?remove=1"
+      )
+    ).toBe(true);
   });
 });
