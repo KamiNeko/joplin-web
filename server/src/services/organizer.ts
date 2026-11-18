@@ -645,6 +645,27 @@ export function normalizeOrganizeTag(raw: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
+/** An issuer tag is only suggested once that issuer appears in this many of a job's notes */
+export const MIN_ISSUER_TAG_NOTES = 3;
+
+/**
+ * Returns a predicate for the tags a job shows: document-type tags and tags that already exist in
+ * the account always, any other (issuer) tag only when it occurs in at least `minCount` of the job's
+ * suggestions, so a large backlog doesn't create one tag per one-off issuer. Counts grow while a job
+ * runs, so an issuer can appear once it recurs.
+ */
+export function recurringTagFilter(
+  items: ReadonlyArray<{ suggestion?: { tags: string[] } | null }>,
+  existingTags: ReadonlySet<string>,
+  minCount = MIN_ISSUER_TAG_NOTES
+): (tag: string) => boolean {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    for (const tag of new Set(item.suggestion?.tags ?? [])) counts.set(tag, (counts.get(tag) ?? 0) + 1);
+  }
+  return (tag) => ORGANIZE_DOCUMENT_TYPE_TAG_SET.has(tag) || existingTags.has(tag) || (counts.get(tag) ?? 0) >= minCount;
+}
+
 /**
  * Strictly validates and normalizes a model's JSON output. Unknown or excluded `notebookId`
  * values fall back to `currentNotebookId` with `confidence = 0`.
@@ -1675,6 +1696,12 @@ export class OrganizerService {
 
     const entry = noteCache.peekEntry(sessionId) ?? noteCache.loadSavedEntryByOwnerKey(ownerKey);
     const pathById = entry ? buildNotebookPaths(entry).pathById : null;
+    const existingTags = new Set(
+      entry
+        ? [...entry.tags.values()].filter((t) => !(t.deletedTime > 0)).map((t) => t.title.trim().toLowerCase())
+        : []
+    );
+    const keepTag = recurringTagFilter(job.items, existingTags);
 
     const slice = job.items.slice(offset, offset + limit).map((item): OrganizeJobItem => {
       const liveNote = entry?.notes.get(item.noteId);
@@ -1689,7 +1716,7 @@ export class OrganizerService {
         currentNotebookId,
         currentNotebookPath,
         updatedTime,
-        ...(item.suggestion ? { suggestion: { ...item.suggestion, tags: [...item.suggestion.tags] } } : {}),
+        ...(item.suggestion ? { suggestion: { ...item.suggestion, tags: item.suggestion.tags.filter(keepTag) } } : {}),
       };
     });
 
