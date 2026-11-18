@@ -16,6 +16,11 @@ services:
       # The container always listens on 3001; HOST_PORT only changes the published port
       PORT: "3001"
       JOPLIN_SERVER_URL: ${JOPLIN_SERVER_URL:?set JOPLIN_SERVER_URL in .env}
+      # Optional Auto-organize LLM settings (can also be set in .env; disabled unless both AI_BASE_URL and AI_MODEL are set)
+      # AI_BASE_URL: http://host.docker.internal:18317/v1
+      # AI_API_KEY: ""
+      # AI_MODEL: deepseek-flash
+      # AI_CONCURRENCY: "4"
     ports:
       # PORT is still honoured as the host port for one release cycle (deprecated, use HOST_PORT)
       - "${HOST_PORT:-${PORT:-3001}}:3001"
