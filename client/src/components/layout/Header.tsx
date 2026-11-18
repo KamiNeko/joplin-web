@@ -3,6 +3,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { SEARCH_SYNTAX_HINT } from "@/lib/ui-constants";
 import { ThemeToggle } from "@/components/common/ThemeToggle";
 import { AboutDialog } from "@/components/common/Dialogs";
+import { SecurityDialog } from "@/components/auth/SecurityDialog";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -20,6 +21,7 @@ import {
   LogOut,
   Menu,
   Search,
+  ShieldCheck,
   User,
   X,
 } from "lucide-react";
@@ -48,6 +50,7 @@ export function Header({
   const { logout, email } = useAuth();
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [securityOpen, setSecurityOpen] = useState(false);
 
   // Ctrl+K / Cmd+K focuses the search field (or opens the mobile menu that holds it). In the note
   // editor it inserts a link instead; the editor marks the event as handled then.
@@ -193,6 +196,10 @@ export function Header({
               </div>
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => setSecurityOpen(true)} className="cursor-pointer flex items-center gap-2">
+              <ShieldCheck className="h-3.5 w-3.5" />
+              <span>Security</span>
+            </DropdownMenuItem>
             <DropdownMenuItem onClick={() => setAboutOpen(true)} className="cursor-pointer flex items-center gap-2">
               <Info className="h-3.5 w-3.5" />
               <span>About Joplin Web</span>
@@ -206,6 +213,7 @@ export function Header({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        {securityOpen && <SecurityDialog open={securityOpen} onOpenChange={setSecurityOpen} />}
         <AboutDialog open={aboutOpen} onOpenChange={setAboutOpen} />
       </div>
     </header>
