@@ -17,6 +17,8 @@ import { BatchNoteItem, BatchNoteResult, NoteListItem } from "@/lib/types";
 import { toast } from "sonner";
 import { noteDisplayTitle } from "@/lib/format";
 import { useWriteState } from "@/hooks/use-write-state";
+import { useCreateOrganizeJob, useOrganizeStatus } from "@/hooks/use-organize";
+import { StartOrganizeDialog } from "@/components/organize/StartOrganizeDialog";
 
 /** The list shown in the middle column: everything, one notebook, one tag, the conflicts or the trash */
 type ListScope =
@@ -98,9 +100,15 @@ export function NotesPage() {
   // Note that should open in the editor (set right after creating it)
   const [editIntentNoteId, setEditIntentNoteId] = useState<string | null>(null);
   const [bulkProgress, setBulkProgress] = useState<BulkUpdateProgress | null>(null);
+  const [organizeTargets, setOrganizeTargets] = useState<{
+    notes: NoteListItem[];
+    defaultExcludedNotebookId: string | null;
+  } | null>(null);
   const createNote = useCreateNote();
   const updateNote = useUpdateNote();
   const bulkUpdate = useBulkUpdateNotes();
+  const { data: organizeStatus } = useOrganizeStatus();
+  const createOrganizeJob = useCreateOrganizeJob();
   // An account with end-to-end encryption is read-only: no editing, creating, tagging or uploads
   const { readOnly, reason: readOnlyReason } = useWriteState();
 
@@ -404,6 +412,27 @@ export function NotesPage() {
     }
   };
 
+  const handleStartOrganize = async (excludeNotebookIds: string[]) => {
+    if (!organizeTargets || organizeTargets.notes.length === 0) return;
+    try {
+      const { jobId } = await createOrganizeJob.mutateAsync({
+        noteIds: organizeTargets.notes.map((n) => n.id),
+        excludeNotebookIds,
+      });
+      setOrganizeTargets(null);
+      selection.exitSelectionMode();
+      navigate(`/organize/${jobId}`);
+    } catch (err) {
+      toast.error("Could not start Auto-organize", {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    }
+  };
+
+  const canAutoOrganize = Boolean(
+    organizeStatus?.enabled && !readOnly && !isTrashSelected && !isConflictsSelected
+  );
+
   const emptyState = isTrashSelected
     ? trashedNotebooks?.length
       ? { title: "No notes in the trash", description: undefined }
@@ -487,9 +516,13 @@ export function NotesPage() {
               selection={selection}
               canSelect={!readOnly && !isTrashSelected}
               canBulkTag={!isConflictsSelected}
+              canAutoOrganize={canAutoOrganize}
               onBulkMove={handleBulkMove}
               onBulkAddTag={handleBulkAddTag}
               onBulkTrash={handleBulkTrash}
+              onAutoOrganize={(selected, defaultExcludedNotebookId) =>
+                setOrganizeTargets({ notes: selected, defaultExcludedNotebookId })
+              }
               isBulkPending={bulkUpdate.isPending}
               bulkProgress={bulkProgress}
               isLoading={isLoadingNotes}
@@ -556,6 +589,19 @@ export function NotesPage() {
           />
         </div>
       </div>
+      <StartOrganizeDialog
+        open={Boolean(organizeTargets)}
+        onOpenChange={(open) => {
+          if (!open && !createOrganizeJob.isPending) {
+            setOrganizeTargets(null);
+          }
+        }}
+        selectedCount={organizeTargets?.notes.length ?? 0}
+        notebooks={notebooks ?? []}
+        defaultExcludedNotebookId={organizeTargets?.defaultExcludedNotebookId ?? null}
+        isPending={createOrganizeJob.isPending}
+        onConfirm={(excludeIds) => void handleStartOrganize(excludeIds)}
+      />
     </AppLayout>
   );
 }

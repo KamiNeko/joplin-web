@@ -4,6 +4,12 @@ import {
   Notebook,
   NoteListItem,
   Note,
+  OrganizeApplyItemInput,
+  OrganizeApplyResponse,
+  OrganizeJobResponse,
+  OrganizeJobStatus,
+  OrganizeStatus,
+  OrganizeUndoResponse,
   Tag,
   SearchResult,
   LoginResponse,
@@ -597,4 +603,78 @@ export async function downloadResource(resourceId: string, fileName: string): Pr
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+// ---------------------------------------------------------------------------
+// Auto-organize
+// ---------------------------------------------------------------------------
+
+/**
+ * Checks whether Auto-organize is configured and enabled on the server.
+ */
+export async function getOrganizeStatus(): Promise<OrganizeStatus> {
+  const data = await request<{ enabled?: unknown; model?: unknown } | null>("/api/organize/status");
+  const enabled = data?.enabled === true;
+  return {
+    enabled,
+    ...(enabled && typeof data?.model === "string" ? { model: data.model } : {}),
+  };
+}
+
+/**
+ * Starts a server-side Auto-organize job for the selected note IDs.
+ */
+export async function createOrganizeJob(payload: {
+  noteIds: string[];
+  excludeNotebookIds?: string[];
+}): Promise<{ jobId: string }> {
+  return request<{ jobId: string }>("/api/organize/jobs", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * Fetches job status, progress, token usage, and a page of note suggestions.
+ */
+export async function getOrganizeJob(
+  jobId: string,
+  params?: { offset?: number; limit?: number }
+): Promise<OrganizeJobResponse> {
+  const query = new URLSearchParams();
+  if (params?.offset !== undefined) query.set("offset", String(params.offset));
+  if (params?.limit !== undefined) query.set("limit", String(params.limit));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<OrganizeJobResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}${suffix}`);
+}
+
+/**
+ * Cancels an in-progress Auto-organize job.
+ */
+export async function cancelOrganizeJob(jobId: string): Promise<{ id: string; status: OrganizeJobStatus }> {
+  return request<{ id: string; status: OrganizeJobStatus }>(`/api/organize/jobs/${encodeURIComponent(jobId)}`, {
+    method: "DELETE",
+  });
+}
+
+/**
+ * Applies selected/edited suggestions from an organize job in bulk.
+ */
+export async function applyOrganizeJob(
+  jobId: string,
+  items: OrganizeApplyItemInput[]
+): Promise<OrganizeApplyResponse> {
+  return request<OrganizeApplyResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}/apply`, {
+    method: "POST",
+    body: JSON.stringify({ items }),
+  });
+}
+
+/**
+ * Reverts the last apply performed on this organize job (skipping notes changed since).
+ */
+export async function undoOrganizeJob(jobId: string): Promise<OrganizeUndoResponse> {
+  return request<OrganizeUndoResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}/undo`, {
+    method: "POST",
+  });
 }

@@ -128,6 +128,8 @@ export interface BatchNoteItem {
   baseUpdatedTime?: number;
   parentId?: string;
   title?: string;
+  addTags?: string[];
+  removeTags?: string[];
 }
 
 /**
@@ -158,4 +160,87 @@ export interface BatchNoteResult {
  */
 export interface LoginResponse {
   userId: string;
+}
+
+export interface OrganizeStatus {
+  enabled: boolean;
+  model?: string;
+}
+
+export type OrganizeJobStatus = "running" | "done" | "cancelled" | "failed";
+export type OrganizeItemStatus = "pending" | "running" | "done" | "failed";
+
+export interface OrganizeSuggestion {
+  title: string;
+  notebookId: string;
+  tags: string[];
+  confidence: number;
+  documentDate: string | null;
+  reason: string;
+}
+
+export interface OrganizeJobItem {
+  noteId: string;
+  currentTitle: string;
+  currentNotebookId: string;
+  currentNotebookPath: string;
+  updatedTime: number;
+  status: OrganizeItemStatus;
+  error?: string;
+  suggestion?: OrganizeSuggestion;
+  applied?: boolean;
+  applyStatus?: "ok" | "conflict" | "error";
+  applyError?: string;
+}
+
+export interface OrganizeUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+export interface OrganizeJobProgress {
+  total: number;
+  done: number;
+  failed: number;
+}
+
+export interface OrganizeJobResponse {
+  id: string;
+  status: OrganizeJobStatus;
+  error?: string;
+  excludeNotebookIds: string[];
+  progress: OrganizeJobProgress;
+  usage: OrganizeUsage;
+  offset: number;
+  limit: number;
+  totalItems: number;
+  canUndo: boolean;
+  createdAt: number;
+  updatedAt: number;
+  items: OrganizeJobItem[];
+}
+
+export interface OrganizeApplyItemInput {
+  noteId: string;
+  title?: string;
+  notebookId?: string;
+  addTags?: string[];
+  baseUpdatedTime?: number;
+}
+
+export interface OrganizeApplyResponse {
+  results: BatchNoteResult[];
+  appliedCount: number;
+  conflictCount: number;
+  errorCount: number;
+  canUndo: boolean;
+}
+
+export interface OrganizeUndoResponse {
+  results: BatchNoteResult[];
+  revertedCount: number;
+  conflictCount: number;
+  errorCount: number;
+  canUndo: boolean;
 }

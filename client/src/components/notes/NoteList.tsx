@@ -13,6 +13,7 @@ import {
   Loader2,
   Plus,
   Search,
+  Sparkles,
   Tag as TagIcon,
   Trash2,
 } from "lucide-react";
@@ -67,9 +68,12 @@ interface NoteListProps {
   canSelect?: boolean;
   /** Enables "Add tag…" in the bulk bar (disabled on Conflicts where tags are read-only) */
   canBulkTag?: boolean;
+  /** Enables "Auto-organize" in the bulk bar when server AI config is enabled */
+  canAutoOrganize?: boolean;
   onBulkMove?: (notes: NoteListItemType[], notebookId: string, notebookTitle: string) => void;
   onBulkAddTag?: (notes: NoteListItemType[], tagTitle: string) => void;
   onBulkTrash?: (notes: NoteListItemType[]) => void;
+  onAutoOrganize?: (notes: NoteListItemType[], defaultExcludedNotebookId: string | null) => void;
   isBulkPending?: boolean;
   bulkProgress?: BulkUpdateProgress | null;
 }
@@ -147,9 +151,11 @@ export function NoteList({
   selection: selectionProp,
   canSelect = true,
   canBulkTag = true,
+  canAutoOrganize = false,
   onBulkMove,
   onBulkAddTag,
   onBulkTrash,
+  onAutoOrganize,
   isBulkPending = false,
   bulkProgress = null,
 }: NoteListProps) {
@@ -705,6 +711,20 @@ export function NoteList({
                   </div>
                 </PopoverContent>
               </Popover>
+            )}
+
+            {canAutoOrganize && onAutoOrganize && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={isBulkPending}
+                onClick={() => onAutoOrganize(selectedNotes, uniformCurrentNotebookId)}
+                className="h-8 gap-1.5 px-2.5 text-xs flex-1 min-w-[6.75rem]"
+              >
+                <Sparkles className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
+                Auto-organize
+              </Button>
             )}
 
             <Button

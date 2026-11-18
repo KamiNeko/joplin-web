@@ -11,6 +11,7 @@ import { AuthProvider, useAuth } from "@/hooks/use-auth";
 import { ThemeProvider } from "@/components/common/ThemeProvider";
 import { LoginPage } from "@/pages/LoginPage";
 import { NotesPage } from "@/pages/NotesPage";
+import { OrganizePage } from "@/pages/OrganizePage";
 import { Toaster } from "@/components/ui/sonner";
 import { Loader2 } from "lucide-react";
 import { ApiError } from "@/lib/api";
@@ -148,6 +149,14 @@ export function App() {
                   element={
                     <ProtectedRoute>
                       <NotesPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/organize/:jobId"
+                  element={
+                    <ProtectedRoute>
+                      <OrganizePage />
                     </ProtectedRoute>
                   }
                 />
