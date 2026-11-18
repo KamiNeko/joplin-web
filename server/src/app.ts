@@ -7,6 +7,7 @@ import helmet from 'helmet';
 import path from 'path';
 
 import type { AppConfig } from './config.js';
+import { createAppAuthState } from './middleware/auth.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { createOriginCheck } from './middleware/origin-check.js';
 import { requestLogger } from './middleware/request-logger.js';
@@ -19,6 +20,8 @@ import { resourcesRouter } from './routes/resources.js';
 import { searchRouter } from './routes/search.js';
 import { tagsRouter } from './routes/tags.js';
 import { organizerService, OrganizerService } from './services/organizer.js';
+import { TwoFactorStore } from './services/two-factor-store.js';
+import { noteCache } from './services/note-cache.js';
 
 /**
  * Builds the Content-Security-Policy directives that differ from helmet's defaults.
@@ -48,6 +51,15 @@ export function createApp(config: AppConfig, deps: { organizer?: OrganizerServic
   if (organizer.isEnabled()) {
     organizer.resumeFromDiskOnStartup();
   }
+  // Every signed-in session joins its user's shared note cache (CACHE_DIR), whichever login path it took
+  const twoFactorStore = new TwoFactorStore(config.cacheDir, (sessionId, userId) =>
+    noteCache.bindSession(sessionId, userId)
+  );
+  if (config.require2fa) {
+    twoFactorStore.ensureAuthDir();
+  }
+  const authState = createAppAuthState();
+
   const app = express();
 
   // Behind a reverse proxy, req.ip/req.secure come from X-Forwarded-* only when configured
@@ -103,8 +115,26 @@ export function createApp(config: AppConfig, deps: { organizer?: OrganizerServic
   });
   app.use('/api/auth/login', authLimiter);
 
+  const twoFactorLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 30,
+    skip: (req) => req.method === 'GET',
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Too many two-factor authentication requests, please try again later.' },
+  });
+  app.use('/api/auth/2fa', twoFactorLimiter);
+
   // CSRF protection for cookie-authenticated writes
   app.use('/api/', createOriginCheck(config));
+
+  // Attach per-instance configuration, 2FA store, and session validation cache
+  app.use('/api/', (req, _res, next) => {
+    req.appConfig = config;
+    req.twoFactorStore = twoFactorStore;
+    req.authState = authState;
+    next();
+  });
 
   // Health check endpoint (public: build metadata only, never configuration or secrets)
   app.get('/api/health', (_req: Request, res: Response) => {
@@ -116,7 +146,7 @@ export function createApp(config: AppConfig, deps: { organizer?: OrganizerServic
   });
 
   // API Routes
-  app.use('/api/auth', createAuthRouter(config));
+  app.use('/api/auth', createAuthRouter(config, twoFactorStore));
   app.use('/api/account', accountRouter);
   app.use('/api/notebooks', notebooksRouter);
   app.use('/api/notes', notesRouter);

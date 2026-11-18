@@ -2,7 +2,23 @@ import type { IncomingMessage } from 'http';
 import morgan from 'morgan';
 
 /** Query parameters whose values must never reach the logs */
-const SENSITIVE_QUERY_PARAMS = new Set(['auth', 'token', 'session', 'sessionid', 'password', 'api_key', 'apikey']);
+const SENSITIVE_QUERY_PARAMS = new Set([
+  'auth',
+  'token',
+  'session',
+  'sessionid',
+  'password',
+  'api_key',
+  'apikey',
+  'totp',
+  'totpcode',
+  'code',
+  'recovery',
+  'recoverycode',
+  'secret',
+  'challenge',
+  'assertion',
+]);
 
 /**
  * Replaces the values of sensitive query parameters (session tokens, passwords) in a request URL,

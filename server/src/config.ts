@@ -44,6 +44,8 @@ export interface AppConfig {
   aiFake: boolean;
   /** Optional artificial per-note delay in ms when using the fake organizer (AI_FAKE_DELAY_MS) */
   aiFakeDelayMs: number;
+  /** Whether every login must pass a second factor (REQUIRE_2FA, default false) */
+  require2fa: boolean;
 }
 
 /**
@@ -213,16 +215,63 @@ export function parseRateLimitMax(raw: string | undefined): number {
   return parsePositiveInt('RATE_LIMIT_MAX', raw, 1000);
 }
 
+function parseCacheDir(raw: string | undefined): string | null {
+  const value = raw?.trim();
+  return value ? path.resolve(value) : null;
+}
+
+/**
+ * Whether WebAuthn passkeys are configured on the server. Requires PUBLIC_URL in production; in
+ * development/demo http://localhost origins are allowed.
+ */
+export function isWebAuthnConfigured(config: Pick<AppConfig, 'publicUrl' | 'nodeEnv'>): boolean {
+  return Boolean(config.publicUrl) || config.nodeEnv !== 'production';
+}
+
+/**
+ * Resolves the WebAuthn Relying Party ID and expected origin for the request.
+ * Uses PUBLIC_URL when configured; in non-production environments without PUBLIC_URL, allows only
+ * http://localhost origins (any port). Returns null when WebAuthn is not allowed for this request.
+ */
+export function resolveWebAuthnRp(
+  config: Pick<AppConfig, 'publicUrl' | 'nodeEnv'>,
+  requestOrigin: string | undefined
+): { rpId: string; expectedOrigin: string } | null {
+  if (config.publicUrl) {
+    const url = new URL(config.publicUrl);
+    return { rpId: url.hostname, expectedOrigin: url.origin };
+  }
+  if (config.nodeEnv !== 'production' && requestOrigin) {
+    let url: URL;
+    try {
+      url = new URL(requestOrigin);
+    } catch {
+      return null;
+    }
+    if (url.protocol === 'http:' && url.hostname === 'localhost' && !url.username && !url.password) {
+      return { rpId: 'localhost', expectedOrigin: url.origin };
+    }
+  }
+  return null;
+}
+
 // Resolved from this module, not process.cwd(): src/config.ts (tsx) and dist/config.js (compiled)
 // both sit two levels below the repo root, so this finds client/dist wherever the server is started.
 const defaultClientDistPath = fileURLToPath(new URL('../../client/dist', import.meta.url));
 
 /**
  * Builds the application config from environment variables. Throws ConfigError when
- * JOPLIN_SERVER_URL is missing or invalid.
+ * JOPLIN_SERVER_URL is missing or invalid, or when REQUIRE_2FA is enabled without CACHE_DIR.
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const nodeEnv = env.NODE_ENV || 'development';
+  const cacheDir = parseCacheDir(env.CACHE_DIR);
+  const require2fa = parseBoolean('REQUIRE_2FA', env.REQUIRE_2FA, false);
+  if (require2fa && !cacheDir) {
+    throw new ConfigError(
+      'REQUIRE_2FA is true, which requires CACHE_DIR to be set so two-factor authentication state persists across restarts.'
+    );
+  }
   return {
     host: env.HOST?.trim() || undefined,
     port: parseInt(env.PORT || '3001', 10),
@@ -230,7 +279,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     corsOrigin: parseCorsOrigin(env.CORS_ORIGIN, nodeEnv),
     nodeEnv,
     cacheTtlMs: parseInt(env.CACHE_TTL_MS || '30000', 10),
-    cacheDir: env.CACHE_DIR || null,
+    cacheDir,
     authCacheTtlMs: parseInt(env.AUTH_CACHE_TTL_MS || '300000', 10),
     clientDistPath: defaultClientDistPath,
     trustProxy: parseTrustProxy(env.TRUST_PROXY),
@@ -246,6 +295,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     aiConcurrency: parsePositiveInt('AI_CONCURRENCY', env.AI_CONCURRENCY, 4),
     aiFake: parseBoolean('AI_FAKE', env.AI_FAKE, false),
     aiFakeDelayMs: parseNonNegativeInt('AI_FAKE_DELAY_MS', env.AI_FAKE_DELAY_MS, 0),
+    require2fa,
   };
 }
 

@@ -45,6 +45,8 @@ export interface MockChange {
 export interface MockJoplinServer {
   url: string;
   items: Map<string, MockItem>;
+  /** Active session tokens on the mock Joplin Server */
+  sessions: Set<string>;
   /**
    * Makes the next `count` requests to /api/items answer with `status`, to simulate
    * Joplin Server failures (e.g. 500) in tests. Calls queue up in order.
@@ -123,6 +125,7 @@ export async function startMockJoplinServer(
   const handle: MockJoplinServer = {
     url: '',
     items,
+    sessions,
     failNextItemRequests: (status, count = 1) => {
       for (let i = 0; i < count; i++) failures.push(status);
     },

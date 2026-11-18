@@ -18,7 +18,19 @@ import {
   LoginResponse,
   TrashedNotebook,
   WriteState,
+  TwoFactorStatus,
+  PasskeyItem,
+  TrustedDeviceItem,
+  TotpSetupResponse,
+  TwoFactorCompleteResponse,
+  TwoFactorMethod,
 } from "./types";
+import type {
+  PublicKeyCredentialCreationOptionsJSON,
+  PublicKeyCredentialRequestOptionsJSON,
+  RegistrationResponseJSON,
+  AuthenticationResponseJSON,
+} from "@simplewebauthn/browser";
 import { changePendingWrites, recordNetworkError, recordResponse } from "./connection";
 
 /**
@@ -255,6 +267,188 @@ export async function checkSession(): Promise<SessionInfo | null> {
     if (err instanceof ApiError && err.status === 401) return null;
     throw err;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Two-Factor Authentication
+// ---------------------------------------------------------------------------
+
+export function isStepUpRequiredError(error: unknown): error is ApiError {
+  return (
+    error instanceof ApiError &&
+    error.status === 403 &&
+    Boolean((error.data as { stepUpRequired?: unknown } | undefined)?.stepUpRequired)
+  );
+}
+
+export function getStepUpMethodsFromError(error: unknown): TwoFactorMethod[] {
+  if (!(error instanceof ApiError)) return [];
+  const methods = (error.data as { methods?: unknown } | undefined)?.methods;
+  return Array.isArray(methods) ? (methods as TwoFactorMethod[]) : [];
+}
+
+export function isPendingExpiredError(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 401 &&
+    Boolean((error.data as { expired?: unknown } | undefined)?.expired)
+  );
+}
+
+export async function verifyTotpLogin(code: string, trustDevice: boolean): Promise<TwoFactorCompleteResponse> {
+  return request<TwoFactorCompleteResponse>("/api/auth/2fa/totp/verify", {
+    method: "POST",
+    body: JSON.stringify({ code, trustDevice }),
+    skipAuthRedirect: true,
+  });
+}
+
+export async function getPasskeyAuthOptions(): Promise<PublicKeyCredentialRequestOptionsJSON> {
+  return request<PublicKeyCredentialRequestOptionsJSON>("/api/auth/2fa/passkey/auth/options", {
+    method: "POST",
+    body: JSON.stringify({}),
+    skipAuthRedirect: true,
+  });
+}
+
+export async function verifyPasskeyLogin(
+  response: AuthenticationResponseJSON,
+  trustDevice: boolean
+): Promise<TwoFactorCompleteResponse> {
+  return request<TwoFactorCompleteResponse>("/api/auth/2fa/passkey/auth/verify", {
+    method: "POST",
+    body: JSON.stringify({ response, trustDevice }),
+    skipAuthRedirect: true,
+  });
+}
+
+export async function verifyRecoveryLogin(code: string, trustDevice: boolean): Promise<TwoFactorCompleteResponse> {
+  return request<TwoFactorCompleteResponse>("/api/auth/2fa/recovery/verify", {
+    method: "POST",
+    body: JSON.stringify({ code, trustDevice }),
+    skipAuthRedirect: true,
+  });
+}
+
+export async function setupTotp(skipAuthRedirect = false): Promise<TotpSetupResponse> {
+  return request<TotpSetupResponse>("/api/auth/2fa/totp/setup", {
+    method: "POST",
+    body: JSON.stringify({}),
+    skipAuthRedirect,
+  });
+}
+
+export async function confirmTotp(
+  code: string,
+  options: { trustDevice?: boolean; skipAuthRedirect?: boolean } = {}
+): Promise<TwoFactorCompleteResponse> {
+  return request<TwoFactorCompleteResponse>("/api/auth/2fa/totp/confirm", {
+    method: "POST",
+    body: JSON.stringify({ code, ...(options.trustDevice !== undefined ? { trustDevice: options.trustDevice } : {}) }),
+    skipAuthRedirect: options.skipAuthRedirect,
+  });
+}
+
+export async function getPasskeyRegisterOptions(
+  skipAuthRedirect = false
+): Promise<PublicKeyCredentialCreationOptionsJSON> {
+  return request<PublicKeyCredentialCreationOptionsJSON>("/api/auth/2fa/passkey/register/options", {
+    method: "POST",
+    body: JSON.stringify({}),
+    skipAuthRedirect,
+  });
+}
+
+export async function verifyPasskeyRegistration(
+  input: { response: RegistrationResponseJSON; name: string; trustDevice?: boolean },
+  skipAuthRedirect = false
+): Promise<TwoFactorCompleteResponse> {
+  return request<TwoFactorCompleteResponse>("/api/auth/2fa/passkey/register/verify", {
+    method: "POST",
+    body: JSON.stringify(input),
+    skipAuthRedirect,
+  });
+}
+
+export async function getTwoFactorStatus(): Promise<TwoFactorStatus> {
+  return request<TwoFactorStatus>("/api/auth/2fa/status");
+}
+
+export async function getPasskeys(): Promise<PasskeyItem[]> {
+  const res = await request<{ passkeys: PasskeyItem[] }>("/api/auth/2fa/passkeys");
+  return res.passkeys;
+}
+
+export async function renamePasskey(id: string, name: string): Promise<PasskeyItem> {
+  const res = await request<{ passkey: PasskeyItem }>(`/api/auth/2fa/passkeys/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify({ name }),
+  });
+  return res.passkey;
+}
+
+export async function deletePasskey(id: string): Promise<void> {
+  await request(`/api/auth/2fa/passkeys/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function removeTotp(): Promise<void> {
+  await request("/api/auth/2fa/totp", { method: "DELETE" });
+}
+
+export async function regenerateRecoveryCodes(): Promise<string[]> {
+  const res = await request<{ recoveryCodes: string[] }>("/api/auth/2fa/recovery/regenerate", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return res.recoveryCodes;
+}
+
+export async function getTrustedDevices(): Promise<TrustedDeviceItem[]> {
+  const res = await request<{ devices: TrustedDeviceItem[] }>("/api/auth/2fa/trusted-devices");
+  return res.devices;
+}
+
+export async function revokeAllTrustedDevices(): Promise<void> {
+  await request("/api/auth/2fa/trusted-devices", { method: "DELETE" });
+}
+
+export async function revokeTrustedDevice(id: string): Promise<void> {
+  await request(`/api/auth/2fa/trusted-devices/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function stepUpWithTotp(code: string): Promise<{ verified: boolean; stepUpExpiresAt: number }> {
+  return request<{ verified: boolean; stepUpExpiresAt: number }>("/api/auth/2fa/step-up/totp", {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  });
+}
+
+export async function getStepUpPasskeyOptions(): Promise<PublicKeyCredentialRequestOptionsJSON> {
+  return request<PublicKeyCredentialRequestOptionsJSON>("/api/auth/2fa/step-up/passkey/options", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function stepUpWithPasskey(
+  response: AuthenticationResponseJSON
+): Promise<{ verified: boolean; stepUpExpiresAt: number }> {
+  return request<{ verified: boolean; stepUpExpiresAt: number }>("/api/auth/2fa/step-up/passkey/verify", {
+    method: "POST",
+    body: JSON.stringify({ response }),
+  });
+}
+
+export async function stepUpWithRecovery(
+  code: string
+): Promise<{ verified: boolean; stepUpExpiresAt: number; recoveryCodesRemaining: number }> {
+  return request<{ verified: boolean; stepUpExpiresAt: number; recoveryCodesRemaining: number }>(
+    "/api/auth/2fa/step-up/recovery",
+    {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    }
+  );
 }
 
 /**

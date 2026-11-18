@@ -30,7 +30,7 @@ You already run Joplin Server to sync your notes. Joplin's desktop and mobile ap
 
 - 🏠 **Self-hosted, all the way.** One small Docker container next to your Joplin Server. No database, no third-party services.
 - 🔄 **Stays in sync.** Changes are written in Joplin's own sync format, so they show up in your desktop and mobile apps.
-- 🔐 **Uses your Joplin account.** Sign in with your Joplin Server email and password. Nothing is stored on the web server.
+- 🔐 **Uses your Joplin account.** Sign in with your Joplin Server email and password. Notes are never stored on the web server (only optional 2FA settings under `CACHE_DIR` when configured).
 
 Edits made in Joplin Web have been checked to show up correctly in the Joplin apps for Windows and Android.
 
@@ -67,6 +67,7 @@ In short: choose Joplin Web if you want quick, install-free access to your notes
 | 🔀 **Sync conflicts** | Conflict copies that Joplin desktop or mobile keep after a sync conflict are listed under *Conflicts* (only when there are any), not as duplicates in your notebooks, tags or search. Compare a copy with the original, then trash it or move it to a notebook to keep it. |
 | 🔄 **Refresh & connection status** | Changes from other devices load when you return to the tab or click *Refresh*. The sidebar shows whether the server is reachable and when data was last updated. |
 | 🛟 **No lost typing** | Unsaved text is kept on the device while offline or after the session expires, saves retry when the connection returns, and you can restore a draft later. |
+| 🔐 **Two-factor authentication** | Optional WebAuthn passkeys and authenticator apps (TOTP), single-use recovery codes, and 30-day trusted devices (with optional `REQUIRE_2FA` enforcement). |
 | 🌗 **Light & dark mode** | Switch themes with one click. |
 | 📱 **Responsive** | Works on phones and tablets as well as on the desktop. |
 
@@ -166,16 +167,26 @@ Set these as environment variables of the container. The repository's `docker-co
 | `CORS_ORIGIN` | *(none)* | Allowed origins for API calls (comma-separated). Only needed when the UI is served from another origin than the API; the single-container setup doesn't need it. Without Docker in development mode the default is `http://localhost:5173`. |
 | `RATE_LIMIT_MAX` | `1000` | Requests per client address and 15 minutes to the API. Behind a reverse proxy without `TRUST_PROXY` all users count as one address; set `TRUST_PROXY` (or raise this) if several people use the instance. |
 | `CACHE_TTL_MS` | `30000` | How long the note cache is used before it is re-synced with Joplin Server, in milliseconds. After that, reads still get the cached data (up to 10 × this value old) while the re-sync runs in the background. `0` re-syncs before every read. |
-| `CACHE_DIR` | unset | Directory for a note cache (and Auto-organize job history under `CACHE_DIR/organize/`) that all sessions of a Joplin user share and that survives restarts, so a new login or a restart doesn't read every item again (on a large account that first load takes minutes). Mount a volume there, e.g. `CACHE_DIR=/cache` with `-v joplin-web-cache:/cache`. It holds the notes in plain text, readable only by the container user. Unset: one in-memory cache per session. |
+| `CACHE_DIR` | *(not set)* | Persistent directory for server state: the per-user note caches (a restart or a new login doesn't re-read every note) and two-factor authentication data under `<CACHE_DIR>/auth/`. Required for 2FA and for `REQUIRE_2FA`. |
 | `AUTH_CACHE_TTL_MS` | `300000` | How long a validated session is trusted before it is checked again, in milliseconds. |
 | `AI_BASE_URL` | *(not set)* | Optional OpenAI-compatible Chat Completions base URL (e.g. `http://127.0.0.1:18317/v1`) for *Auto-organize*. Must be set together with `AI_MODEL`; leave unset to keep the feature off. |
 | `AI_API_KEY` | *(not set)* | Optional Bearer API key sent only to `AI_BASE_URL` (never returned to the browser or logged). |
 | `AI_MODEL` | *(not set)* | Chat model name sent to `AI_BASE_URL` (e.g. `deepseek-flash`). |
 | `AI_CONCURRENCY` | `4` | Maximum concurrent classification requests per Auto-organize job. |
+| `REQUIRE_2FA` | `false` | Require every login to pass a second factor (users without one must enroll during login). Refuses to start when `true` and `CACHE_DIR` is unset. |
 | `PORT` | `3001` | Port the server listens on when run without Docker. Leave it unset for the container; use `HOST_PORT` or the `-p` mapping instead. |
 
 > [!NOTE]
 > **Auto-organize privacy:** No note data leaves your server unless you both configure `AI_BASE_URL` + `AI_MODEL` and explicitly start an Auto-organize job. Each analysed note sends its title, link-stripped body text (up to ~2,000 chars), attachment filenames, extracted OCR text (up to ~6,000 chars), and up to 5 similar filed note titles/notebook paths (matched locally via attachment OCR), along with your notebook paths, sample note titles, and tag list, to the configured `AI_BASE_URL` provider. Review every suggestion before applying; the feature stays disabled on end-to-end encrypted (read-only) accounts and skips encrypted notes.
+
+### Two-factor authentication
+
+When `CACHE_DIR` is set, signed-in users can open **Security** in the user account menu to enroll a **passkey** (WebAuthn), an **authenticator app** (6-digit RFC 6238 TOTP), or both, view/regenerate 10 one-time **recovery codes**, and revoke 30-day **trusted devices**. Set `REQUIRE_2FA=true` to require every account to enroll and verify a second factor on sign-in.
+
+- **HTTPS and `PUBLIC_URL` for passkeys:** Browsers require a secure context for WebAuthn, and Joplin Web derives the WebAuthn Relying Party ID (`PUBLIC_URL` hostname) and expected origin from `PUBLIC_URL`. Set `PUBLIC_URL=https://...` in production to enable passkeys; only `http://localhost` works without `PUBLIC_URL` (for local development and demo mode). Authenticator apps (TOTP) work with or without `PUBLIC_URL`.
+- **Docker persistence:** The container runs as `node` (uid `1000`) with a read-only app filesystem. Mount a persistent volume at e.g. `/data/cache` owned by uid `1000` and set `CACHE_DIR=/data/cache`.
+- **API clients:** Non-browser clients (requests without an `Origin` header) can authenticate in a single request by including `totpCode` or `recoveryCode` in `POST /api/auth/login`.
+- **Resetting a locked-out user (admin):** If a user loses both their second factors and recovery codes, delete `<CACHE_DIR>/auth/<ownerKey>.json` on the host (where `<ownerKey>` is the Joplin Server `user_id` when it matches `^[A-Za-z0-9_-]{1,128}$`, or the lowercase SHA-256 hex digest of `user_id` otherwise). On next sign-in they can access the account (or re-enroll immediately when `REQUIRE_2FA=true`).
 
 ### Updating and versions
 

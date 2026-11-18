@@ -21,13 +21,21 @@ import { getConnectionSnapshot, resetConnection } from "@/lib/connection";
 import { onRemoteWrite, setCrossTabUser } from "@/lib/cross-tab";
 import { clearAllDrafts, draftOwner, setDraftOwner } from "@/lib/drafts";
 import { invalidateAllExceptUnsaved } from "./use-connection";
+import type { LoginResponse, TwoFactorChallenge } from "@/lib/types";
 
 export interface AuthContextType {
   isAuthenticated: boolean;
   email: string | null;
   isLoading: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<LoginResponse>;
   logout: () => Promise<void>;
+  /** Active two-factor challenge when login needs a second step or mandatory enrollment */
+  pendingChallenge: TwoFactorChallenge | null;
+  pendingEmail: string | null;
+  /** Promotes the client auth state after a two-factor verification or enrollment succeeds */
+  completeTwoFactorLogin: (overrideEmail?: string) => Promise<void>;
+  /** Cancels an in-progress two-factor login and ends the pending server session */
+  cancelTwoFactor: (clearChallengeOnly?: boolean) => Promise<void>;
   /** Host of the connected Joplin Server, for display */
   serverHost: string | null;
   /** Leaves an expired session for the login page; unsaved drafts are kept */
@@ -55,6 +63,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [serverHost, setServerHost] = useState<string | null>(null);
   const [lastEmail, setLastEmail] = useState<string | null>(null);
+  const [pendingChallenge, setPendingChallenge] = useState<TwoFactorChallenge | null>(null);
+  const [pendingEmail, setPendingEmail] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -91,38 +101,66 @@ export function AuthProvider({ children }: AuthProviderProps) {
     });
   }, [isAuthenticated, queryClient]);
 
-  const login = useCallback(
-    async (email: string, password: string) => {
-      setIsLoading(true);
-      try {
-        await apiLogin(email, password);
-        // The server host is part of the draft owner; a failed check doesn't fail the login
-        const host = (await checkSession().catch(() => null))?.serverHost ?? null;
-        // Never show data cached for a previous session
-        queryClient.clear();
-        clearResourceCache();
-        resetConnection();
-        // Drafts of another account (or server) are dropped, not offered
-        const owner = draftOwner(email, host);
-        setDraftOwner(owner);
-        setCrossTabUser(owner);
-        setStoredEmail(email);
-        setEmail(email);
-        setServerHost(host);
-        setLastEmail(null);
-        setIsAuthenticated(true);
-      } finally {
-        setIsLoading(false);
-      }
+  const finalizeSession = useCallback(
+    async (userEmail: string) => {
+      // The server host is part of the draft owner; a failed check doesn't fail the login
+      const host = (await checkSession().catch(() => null))?.serverHost ?? null;
+      // Never show data cached for a previous session
+      queryClient.clear();
+      clearResourceCache();
+      resetConnection();
+      // Drafts of another account (or server) are dropped, not offered
+      const owner = draftOwner(userEmail, host);
+      setDraftOwner(owner);
+      setCrossTabUser(owner);
+      setStoredEmail(userEmail);
+      setEmail(userEmail);
+      setServerHost(host);
+      setLastEmail(null);
+      setPendingChallenge(null);
+      setPendingEmail(null);
+      setIsAuthenticated(true);
     },
     [queryClient]
   );
+
+  const login = useCallback(
+    async (userEmail: string, password: string): Promise<LoginResponse> => {
+      const response = await apiLogin(userEmail, password);
+      if ("twoFactor" in response && response.twoFactor) {
+        setPendingChallenge(response.twoFactor);
+        setPendingEmail(userEmail);
+        return response;
+      }
+      await finalizeSession(userEmail);
+      return response;
+    },
+    [finalizeSession]
+  );
+
+  const completeTwoFactorLogin = useCallback(
+    async (overrideEmail?: string) => {
+      const activeEmail = overrideEmail ?? pendingEmail ?? email ?? "";
+      await finalizeSession(activeEmail);
+    },
+    [email, finalizeSession, pendingEmail]
+  );
+
+  const cancelTwoFactor = useCallback(async (clearChallengeOnly = false) => {
+    if (!clearChallengeOnly) {
+      await apiLogout().catch(() => undefined);
+    }
+    setPendingChallenge(null);
+    setPendingEmail(null);
+  }, []);
 
   const endSession = useCallback(() => {
     queryClient.clear();
     clearResourceCache();
     clearStoredSession();
     setCrossTabUser(null);
+    setPendingChallenge(null);
+    setPendingEmail(null);
     // Unmount the pages now: open editors close (their drafts are already stored)
     flushSync(() => {
       setIsAuthenticated(false);
@@ -163,6 +201,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
       setDraftOwner(null);
       setCrossTabUser(null);
       setLastEmail(null);
+      setPendingChallenge(null);
+      setPendingEmail(null);
       setIsAuthenticated(false);
       setEmail(null);
       setServerHost(null);
@@ -176,6 +216,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
     isLoading,
     login,
     logout,
+    pendingChallenge,
+    pendingEmail,
+    completeTwoFactorLogin,
+    cancelTwoFactor,
     serverHost,
     signInAgain,
     discardAndSignOut,
