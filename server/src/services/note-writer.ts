@@ -859,11 +859,32 @@ export class NoteWriterService {
       return parsed;
     };
 
+    const mergeTagLists = (first: string[], second: string[]): string[] => {
+      if (first.length === 0 && second.length === 0) return [];
+      const seen = new Set<string>();
+      const merged: string[] = [];
+      for (const list of [first, second]) {
+        for (const tagTitle of list) {
+          const key = tagTitle.toLowerCase();
+          if (seen.has(key)) continue;
+          seen.add(key);
+          merged.push(tagTitle);
+        }
+      }
+      return merged;
+    };
+
     const addTags = parseTagList(request.addTags, 'addTags');
     const removeTags = parseTagList(request.removeTags, 'removeTags');
 
     const hasPerItemChange = request.items.some(
-      (item) => item && typeof item === 'object' && (item.parentId !== undefined || item.title !== undefined)
+      (item) =>
+        item &&
+        typeof item === 'object' &&
+        (item.parentId !== undefined ||
+          item.title !== undefined ||
+          (item.addTags !== undefined && (!Array.isArray(item.addTags) || item.addTags.length > 0)) ||
+          (item.removeTags !== undefined && (!Array.isArray(item.removeTags) || item.removeTags.length > 0)))
     );
     if (
       request.parentId === undefined &&
@@ -962,6 +983,11 @@ export class NoteWriterService {
           throw new WriteValidationError('Invalid note title');
         }
 
+        const itemAddTags = parseTagList(rawItem.addTags, 'addTags');
+        const itemRemoveTags = parseTagList(rawItem.removeTags, 'removeTags');
+        const effectiveAddTags = mergeTagLists(addTags, itemAddTags);
+        const effectiveRemoveTags = mergeTagLists(removeTags, itemRemoveTags);
+
         const current = await this.fetchFreshOfType(sessionId, id, JoplinItemType.Note);
         if (rawItem.baseUpdatedTime !== undefined && current.updatedTime !== rawItem.baseUpdatedTime) {
           noteCache.upsertItem(sessionId, current);
@@ -973,7 +999,7 @@ export class NoteWriterService {
           await ensureNotebook(targetParentId);
         }
 
-        if (addTags.length > 0 && !request.restore) {
+        if (effectiveAddTags.length > 0 && !request.restore) {
           if (current.deletedTime > 0) {
             throw new WriteValidationError(`Note not found: ${id}`, 404);
           }
@@ -1022,9 +1048,9 @@ export class NoteWriterService {
         }
 
         let addedTags: string[] | undefined;
-        if (addTags.length > 0) {
+        if (effectiveAddTags.length > 0) {
           addedTags = [];
-          for (const tagTitle of addTags) {
+          for (const tagTitle of effectiveAddTags) {
             const tag = await getOrCreateTag(tagTitle);
             if (await this.linkTagItemToNote(sessionId, id, tag.id)) {
               addedTags.push(tag.title);
@@ -1032,9 +1058,9 @@ export class NoteWriterService {
           }
         }
 
-        if (removeTags.length > 0) {
+        if (effectiveRemoveTags.length > 0) {
           const entry = await noteCache.getEntry(sessionId);
-          for (const tagTitle of removeTags) {
+          for (const tagTitle of effectiveRemoveTags) {
             const tag = Array.from(entry.tags.values()).find(
               (t) => t.title.trim().toLowerCase() === tagTitle.toLowerCase()
             );

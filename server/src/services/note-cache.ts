@@ -235,6 +235,35 @@ export class NoteCacheService {
   }
 
   /**
+   * Filesystem-safe owner key for per-user persisted state (e.g. organize jobs).
+   * Resolves to `user-<userId>` when bound via login, else `session-<sha256>`. Never exposes raw tokens.
+   */
+  public getOwnerKey(sessionId: string): string {
+    const userId = this.sessionUsers.get(hashSession(sessionId));
+    return userId ? `user-${userId}` : `session-${hashSession(sessionId)}`;
+  }
+
+  /**
+   * Reads a persisted user cache entry directly from CACHE_DIR without requiring an active sessionId
+   * (used after server restarts to resume background work immediately when CACHE_DIR is populated).
+   */
+  public loadSavedEntryByOwnerKey(ownerKey: string): CacheEntry | null {
+    if (!ownerKey.startsWith('user-')) return null;
+    const userId = ownerKey.slice('user-'.length);
+    if (!/^[A-Za-z0-9_-]+$/.test(userId)) return null;
+    const key = userKey(userId);
+    return this.caches.get(key) ?? this.loadEntry(key);
+  }
+
+  /**
+   * Returns the current in-memory (or saved) entry for `sessionId` without forcing a remote fetch, or null.
+   */
+  public peekEntry(sessionId: string): CacheEntry | null {
+    const key = this.keyOf(sessionId);
+    return this.caches.get(key) ?? this.loadEntry(key);
+  }
+
+  /**
    * Records which Joplin user a session belongs to (at login), so it shares that user's cache.
    * Does nothing without CACHE_DIR, where every session keeps its own cache.
    */
@@ -1187,19 +1216,13 @@ export class NoteCacheService {
 
   /**
    * Returns the concatenated OCR text (`ocr_status: 2`) of attachments linked from a note (`:/id`),
-   * in link order and joined by blank lines. Returns an empty string when the note is missing,
-   * encrypted, or has no OCR text.
-   *
-   * @param sessionId Active session ID
-   * @param noteId Note ID
-   * @param options Optional cap `maxChars` on total returned characters
+   * in link order and joined by blank lines, given an already-loaded `CacheEntry`.
    */
-  public async getNoteAttachmentText(
-    sessionId: string,
+  public getAttachmentTextFromEntry(
+    entry: CacheEntry,
     noteId: string,
     options: { maxChars?: number } = {}
-  ): Promise<string> {
-    const entry = await this.ensureFresh(sessionId);
+  ): string {
     const maxChars = options.maxChars;
     if (maxChars !== undefined && (Number.isNaN(maxChars) || maxChars <= 0)) {
       return '';
@@ -1226,6 +1249,24 @@ export class NoteCacheService {
       if (total >= maxChars) break;
     }
     return parts.join('\n\n');
+  }
+
+  /**
+   * Returns the concatenated OCR text (`ocr_status: 2`) of attachments linked from a note (`:/id`),
+   * in link order and joined by blank lines. Returns an empty string when the note is missing,
+   * encrypted, or has no OCR text.
+   *
+   * @param sessionId Active session ID
+   * @param noteId Note ID
+   * @param options Optional cap `maxChars` on total returned characters
+   */
+  public async getNoteAttachmentText(
+    sessionId: string,
+    noteId: string,
+    options: { maxChars?: number } = {}
+  ): Promise<string> {
+    const entry = await this.ensureFresh(sessionId);
+    return this.getAttachmentTextFromEntry(entry, noteId, options);
   }
 
   /**

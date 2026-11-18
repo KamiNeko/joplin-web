@@ -17,6 +17,10 @@ const mock = await startMockJoplinServer({ email: DEMO_EMAIL, password: DEMO_PAS
 
 // Must be set before the backend's config module is loaded
 process.env.JOPLIN_SERVER_URL = mock.url;
+// Demo uses the deterministic fake organizer and never calls a real LLM
+process.env.AI_FAKE = '1';
+process.env.AI_BASE_URL ??= 'http://127.0.0.1:18317/v1';
+process.env.AI_MODEL ??= 'deepseek-flash';
 await import('../src/index.js');
 
 console.log(`[Demo] Mock Joplin Server running at ${mock.url}`);

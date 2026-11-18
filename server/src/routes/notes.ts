@@ -38,7 +38,7 @@ router.get('/', async (req, res) => {
 /**
  * POST /api/notes/batch
  * Applies bulk edits across up to 1000 notes:
- * { items: [{ id, baseUpdatedTime?, parentId?, title? }], parentId?, addTags?, removeTags?, trash?, restore? }
+ * { items: [{ id, baseUpdatedTime?, parentId?, title?, addTags?, removeTags? }], parentId?, addTags?, removeTags?, trash?, restore? }
  * Responds with per-item results [{ id, status: "ok" | "conflict" | "error", updatedTime?, error?, addedTags? }].
  */
 router.post('/batch', async (req, res) => {

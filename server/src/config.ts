@@ -32,6 +32,18 @@ export interface AppConfig {
   gitSha: string | null;
   /** Requests per client address and 15 minutes allowed on /api/ (RATE_LIMIT_MAX) */
   rateLimitMax: number;
+  /** Base URL of an OpenAI-compatible Chat Completions endpoint (AI_BASE_URL), null when unset */
+  aiBaseUrl: string | null;
+  /** Optional API key sent as Bearer token to AI_BASE_URL (AI_API_KEY) */
+  aiApiKey: string | null;
+  /** Model name sent to AI_BASE_URL (AI_MODEL), null when unset */
+  aiModel: string | null;
+  /** Maximum concurrent LLM classification calls per organize job (AI_CONCURRENCY, default 4) */
+  aiConcurrency: number;
+  /** Built-in deterministic fake organizer flag for demo/tests (AI_FAKE) */
+  aiFake: boolean;
+  /** Optional artificial per-note delay in ms when using the fake organizer (AI_FAKE_DELAY_MS) */
+  aiFakeDelayMs: number;
 }
 
 /**
@@ -152,16 +164,53 @@ function parseGitSha(raw: string | undefined): string | null {
 }
 
 /**
+ * Parses a positive whole number config setting.
+ */
+function parsePositiveInt(name: string, raw: string | undefined, fallback: number): number {
+  const value = raw?.trim();
+  if (!value) return fallback;
+  if (!/^\d+$/.test(value) || parseInt(value, 10) < 1) {
+    throw new ConfigError(`${name} must be a positive whole number, got: ${raw}`);
+  }
+  return parseInt(value, 10);
+}
+
+function parseNonNegativeInt(name: string, raw: string | undefined, fallback: number): number {
+  const value = raw?.trim();
+  if (!value) return fallback;
+  if (!/^\d+$/.test(value)) {
+    throw new ConfigError(`${name} must be a non-negative whole number, got: ${raw}`);
+  }
+  return parseInt(value, 10);
+}
+
+/**
+ * Validates AI_BASE_URL (when set) as http/https without embedded credentials.
+ */
+function parseAiBaseUrl(raw: string | undefined): string | null {
+  const value = raw?.trim();
+  if (!value) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ConfigError(`AI_BASE_URL is not a valid URL: ${value}`);
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new ConfigError(`AI_BASE_URL must start with http:// or https://, got: ${value}`);
+  }
+  if (url.username || url.password) {
+    throw new ConfigError('AI_BASE_URL must not contain credentials');
+  }
+  return value.replace(/\/+$/, '');
+}
+
+/**
  * Parses RATE_LIMIT_MAX, the general request limit per client address and 15 minutes. Unset means
  * 1000; anything but a positive whole number is rejected.
  */
 export function parseRateLimitMax(raw: string | undefined): number {
-  const value = raw?.trim();
-  if (!value) return 1000;
-  if (!/^\d+$/.test(value) || parseInt(value, 10) < 1) {
-    throw new ConfigError(`RATE_LIMIT_MAX must be a positive whole number, got: ${raw}`);
-  }
-  return parseInt(value, 10);
+  return parsePositiveInt('RATE_LIMIT_MAX', raw, 1000);
 }
 
 // Resolved from this module, not process.cwd(): src/config.ts (tsx) and dist/config.js (compiled)
@@ -191,6 +240,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     appVersion: parseAppVersion(env.APP_VERSION),
     gitSha: parseGitSha(env.GIT_SHA),
     rateLimitMax: parseRateLimitMax(env.RATE_LIMIT_MAX),
+    aiBaseUrl: parseAiBaseUrl(env.AI_BASE_URL),
+    aiApiKey: env.AI_API_KEY?.trim() || null,
+    aiModel: env.AI_MODEL?.trim() || null,
+    aiConcurrency: parsePositiveInt('AI_CONCURRENCY', env.AI_CONCURRENCY, 4),
+    aiFake: parseBoolean('AI_FAKE', env.AI_FAKE, false),
+    aiFakeDelayMs: parseNonNegativeInt('AI_FAKE_DELAY_MS', env.AI_FAKE_DELAY_MS, 0),
   };
 }
 

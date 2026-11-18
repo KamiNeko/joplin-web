@@ -589,6 +589,73 @@ describe('batch updates', () => {
     );
   });
 
+  test('supports per-item parentId, title, and addTags/removeTags merged with top-level tags', async () => {
+    const n1 = await createTestNote('Per-item 1', demoId('nb-projects'));
+    const n2 = await createTestNote('Per-item 2', demoId('nb-projects'));
+    await api(`/api/notes/${n1.id}/tags`, { method: 'POST', body: JSON.stringify({ title: 'planning' }) });
+
+    const applyRes = await api('/api/notes/batch', {
+      method: 'POST',
+      body: JSON.stringify({
+        addTags: ['shared-tag'],
+        items: [
+          {
+            id: n1.id,
+            baseUpdatedTime: n1.updatedTime,
+            title: '2024-03-11 Acme – Invoice',
+            parentId: demoId('nb-travel'),
+            addTags: ['PLANNING', 'invoice'],
+          },
+          {
+            id: n2.id,
+            baseUpdatedTime: n2.updatedTime,
+            title: 'Per-item 2 Renamed',
+            addTags: ['notes'],
+          },
+        ],
+      }),
+    });
+
+    assert.equal(applyRes.status, 200);
+    assert.equal(applyRes.data[0].status, 'ok');
+    // n1 already had planning, so only shared-tag + invoice are newly added
+    assert.deepEqual(applyRes.data[0].addedTags.sort(), ['invoice', 'shared-tag']);
+    assert.equal(applyRes.data[1].status, 'ok');
+    assert.deepEqual(applyRes.data[1].addedTags.sort(), ['notes', 'shared-tag']);
+
+    const n1After = await api(`/api/notes/${n1.id}`);
+    assert.equal(n1After.data.title, '2024-03-11 Acme – Invoice');
+    assert.equal(n1After.data.parentId, demoId('nb-travel'));
+    assert.deepEqual(n1After.data.tags.map((t: any) => t.title).sort(), ['invoice', 'planning', 'shared-tag']);
+
+    const n2After = await api(`/api/notes/${n2.id}`);
+    assert.equal(n2After.data.title, 'Per-item 2 Renamed');
+    assert.equal(n2After.data.parentId, demoId('nb-projects'));
+    assert.deepEqual(n2After.data.tags.map((t: any) => t.title).sort(), ['notes', 'shared-tag']);
+
+    // Per-item removeTags preserves n1's pre-existing planning tag
+    const undoRes = await api('/api/notes/batch', {
+      method: 'POST',
+      body: JSON.stringify({
+        items: [
+          {
+            id: n1.id,
+            baseUpdatedTime: applyRes.data[0].updatedTime,
+            title: 'Per-item 1',
+            parentId: demoId('nb-projects'),
+            removeTags: applyRes.data[0].addedTags,
+          },
+        ],
+      }),
+    });
+    assert.equal(undoRes.status, 200);
+    assert.equal(undoRes.data[0].status, 'ok');
+    const n1Reverted = await api(`/api/notes/${n1.id}`);
+    assert.equal(n1Reverted.data.title, 'Per-item 1');
+    assert.equal(n1Reverted.data.parentId, demoId('nb-projects'));
+    assert.deepEqual(n1Reverted.data.tags.map((t: any) => t.title), ['planning']);
+  });
+
   test('trashes and restores notes in bulk', async () => {
     const n1 = await createTestNote('Bulk Trash 1', demoId('nb-projects'));
     const n2 = await createTestNote('Bulk Trash 2', demoId('nb-projects'));
@@ -818,6 +885,28 @@ describe('security', () => {
       'https://a.test',
       'https://b.test',
     ]);
+  });
+
+  test('validates AI_* config and disables organize by default when unset', async () => {
+    const { loadConfig, ConfigError } = await import('../src/config.js');
+    const base = { JOPLIN_SERVER_URL: 'https://notes.example.com' };
+    assert.equal(loadConfig(base).aiBaseUrl, null);
+    assert.equal(loadConfig(base).aiModel, null);
+    assert.equal(loadConfig(base).aiConcurrency, 4);
+
+    assert.throws(() => loadConfig({ ...base, AI_BASE_URL: 'ftp://bad.test' }), ConfigError);
+    assert.throws(() => loadConfig({ ...base, AI_BASE_URL: 'https://user:pw@ai.test/v1' }), ConfigError);
+    assert.throws(() => loadConfig({ ...base, AI_CONCURRENCY: '0' }), ConfigError);
+
+    const statusRes = await api('/api/organize/status');
+    assert.equal(statusRes.status, 200);
+    assert.deepEqual(statusRes.data, { enabled: false });
+
+    const startRes = await api('/api/organize/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ noteIds: [demoId('note-roadmap')] }),
+    });
+    assert.equal(startRes.status, 503);
   });
 });
 
