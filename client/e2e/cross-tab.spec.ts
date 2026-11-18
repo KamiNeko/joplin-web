@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { demoId, signIn, uniqueWord } from "./helpers";
+import { demoId, expandSidebar, signIn, uniqueWord } from "./helpers";
 
 test("syncs sidebar tags, notebook counts and notes across tabs without reload", async ({ context, page }) => {
   const word = uniqueWord("crosstab");
@@ -7,6 +7,7 @@ test("syncs sidebar tags, notebook counts and notes across tabs without reload",
   const initialTitle = `Cross-tab ${word}`;
   const updatedTitle = `Cross-tab updated ${word}`;
 
+  await expandSidebar(context);
   await signIn(page);
   await expect(page.getByRole("heading", { name: "All Notes" })).toBeVisible();
   const sidebar1 = page.getByRole("complementary").first();

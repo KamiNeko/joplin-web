@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { expect, Page, test } from "@playwright/test";
-import { demoId, signIn, uniqueWord } from "./helpers";
+import { demoId, expandSidebar, signIn, uniqueWord } from "./helpers";
 
 /** A note's row in the list (its title also shows in the open note on desktop) */
 const listedNote = (page: Page, title: string) => page.getByRole("heading", { level: 3, name: title, exact: true });
@@ -150,6 +150,7 @@ test("creates, edits, tags, finds, trashes and restores a note", async ({ page }
 });
 
 test("selects multiple notes, moves them in bulk and undoes the move", async ({ page }) => {
+  await expandSidebar(page.context());
   await signIn(page);
   const sidebar = page.getByRole("complementary").first();
 
@@ -177,6 +178,7 @@ test("selects multiple notes, moves them in bulk and undoes the move", async ({ 
 });
 
 test("selects multiple notes, runs Auto-organize, applies and undoes", async ({ page }) => {
+  await expandSidebar(page.context());
   await signIn(page);
   const sidebar = page.getByRole("complementary").first();
 
