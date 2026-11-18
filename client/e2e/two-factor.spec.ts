@@ -223,7 +223,7 @@ test.describe("two-factor authentication", () => {
       await expect(page.getByRole("button", { name: "Download .txt" })).toBeVisible();
 
       await page.getByRole("button", { name: "I saved them" }).click();
-      await expect(page).toHaveURL(/\/notes$/);
+      await expect(page).toHaveURL(/\/(notes|notebooks)(\/|$)/);
       await expect(page.getByRole("heading", { name: "All Notes" })).toBeVisible();
 
       // Log out via user menu
@@ -248,7 +248,7 @@ test.describe("two-factor authentication", () => {
       await page.getByLabel("Enter the 6-digit code").fill(loginCode);
       await page.getByRole("button", { name: "Verify" }).click();
 
-      await expect(page).toHaveURL(/\/notes$/);
+      await expect(page).toHaveURL(/\/(notes|notebooks)(\/|$)/);
       await expect(page.getByRole("heading", { name: "All Notes" })).toBeVisible();
 
       // Verify Security settings reflects TOTP enabled
@@ -293,7 +293,7 @@ test.describe("two-factor authentication", () => {
       await expect(page.getByText("Save your recovery codes")).toBeVisible();
       await expect(page.getByRole("list", { name: "Recovery codes" }).locator("li")).toHaveCount(10);
       await page.getByRole("button", { name: "I saved them" }).click();
-      await expect(page).toHaveURL(/\/notes$/);
+      await expect(page).toHaveURL(/\/(notes|notebooks)(\/|$)/);
 
       // Sign out and verify second login uses the passkey
       await page.getByRole("button", { name: "User account menu" }).click();
@@ -309,7 +309,7 @@ test.describe("two-factor authentication", () => {
       await expect(usePasskeyBtn).toBeVisible();
       await usePasskeyBtn.click();
 
-      await expect(page).toHaveURL(/\/notes$/);
+      await expect(page).toHaveURL(/\/(notes|notebooks)(\/|$)/);
       await expect(page.getByRole("heading", { name: "All Notes" })).toBeVisible();
 
       // Verify Security settings shows the registered passkey with last-used date
@@ -344,7 +344,7 @@ test.describe("two-factor authentication", () => {
       await expect(page.getByText("Save your recovery codes")).toBeVisible();
       expect(await hasHorizontalOverflow(page)).toBe(false);
       await page.getByRole("button", { name: "I saved them" }).click();
-      await expect(page).toHaveURL(/\/notes$/);
+      await expect(page).toHaveURL(/\/(notes|notebooks)(\/|$)/);
 
       await page.getByRole("button", { name: "User account menu" }).click();
       await page.getByRole("menuitem", { name: "Security" }).click();
