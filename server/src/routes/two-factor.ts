@@ -13,6 +13,7 @@ import {
   getPendingToken,
   getSessionToken,
   getTrustedDeviceToken,
+  invalidateSessionValidation,
   requireAuth,
 } from '../middleware/auth.js';
 import {
@@ -23,10 +24,13 @@ import {
 } from '../services/auth-cookies.js';
 import { buildOtpauthUri, generateQrSvgDataUrl, generateTotpSecret, verifyTotp } from '../services/totp.js';
 import {
+  clearFailedSecondFactor,
   generateRecoveryCodes,
   getEnrolledMethods,
+  getLockoutRetryAfterSeconds,
   hasPrimaryFactor,
   PendingLogin,
+  recordFailedSecondFactor,
   STEP_UP_TTL_MS,
   TwoFactorStore,
   WEBAUTHN_CHALLENGE_TTL_MS,
@@ -60,11 +64,13 @@ function isStepUpFresh(store: TwoFactorStore, sessionId: string, now = Date.now(
 
 /**
  * Loads an active, non-expired, single-use pending login from the request's pending cookie.
- * Sends an HTTP error response (and cleans up expired upstream Joplin sessions) if invalid.
+ * Derives `mustEnroll` from the live user record (not stale login-time state) and sends an HTTP
+ * error response (cleaning up expired upstream Joplin sessions) if invalid.
  */
 async function loadPendingLogin(
   req: Request,
   res: Response,
+  config: AppConfig,
   store: TwoFactorStore,
   options: { requireMustEnroll?: boolean; requireAlreadyEnrolled?: boolean } = {}
 ): Promise<PendingLogin | null> {
@@ -106,14 +112,18 @@ async function loadPendingLogin(
     return null;
   }
 
-  if (options.requireMustEnroll && !pending.mustEnroll) {
+  const liveRecord = store.getUserRecord(pending.userId);
+  const liveHasFactor = hasPrimaryFactor(liveRecord);
+  const liveMustEnroll = config.require2fa && !liveHasFactor;
+
+  if (options.requireMustEnroll && !liveMustEnroll) {
     res.status(403).json({
       error: 'Enrollment is not permitted during two-factor verification.',
     });
     return null;
   }
 
-  if (options.requireAlreadyEnrolled && pending.mustEnroll) {
+  if (options.requireAlreadyEnrolled && !liveHasFactor) {
     res.status(400).json({
       error: 'No second factor is enrolled yet; complete enrollment first.',
     });
@@ -126,6 +136,33 @@ async function loadPendingLogin(
   }
 
   return pending;
+}
+
+/**
+ * Responds with HTTP 429 + Retry-After header/JSON body when a user is temporarily locked out of
+ * second-factor verification.
+ */
+function sendLockoutResponse(res: Response, retryAfter: number): void {
+  res.setHeader('Retry-After', String(retryAfter));
+  res.status(429).json({
+    error: `Too many failed two-factor verification attempts. Try again in ${retryAfter} seconds.`,
+    retryAfter,
+  });
+}
+
+/**
+ * Drops validation/note caches and terminates upstream Joplin Server sessions for sessions revoked
+ * during first-factor enrollment.
+ */
+async function finalizeRevokedSessions(
+  revokedTokens: string[],
+  req: Request,
+  store: TwoFactorStore
+): Promise<void> {
+  for (const token of revokedTokens) {
+    invalidateSessionValidation(token, req.authState, store);
+  }
+  await Promise.all(revokedTokens.map((token) => endJoplinSessionSafe(token)));
 }
 
 /**
@@ -163,11 +200,12 @@ type EnrollContext =
 
 /**
  * Resolves either a full authenticated session (with step-up check when factors already exist) or
- * a `mustEnroll` pending login for factor enrollment routes.
+ * a live `mustEnroll` pending login for factor enrollment routes.
  */
 async function resolveEnrollContext(
   req: Request,
   res: Response,
+  config: AppConfig,
   store: TwoFactorStore
 ): Promise<EnrollContext | null> {
   const { token: sessionToken, duplicateCookies } = getSessionToken(req);
@@ -197,7 +235,7 @@ async function resolveEnrollContext(
     };
   }
 
-  const pending = await loadPendingLogin(req, res, store, { requireMustEnroll: true });
+  const pending = await loadPendingLogin(req, res, config, store, { requireMustEnroll: true });
   if (!pending) return null;
   return {
     mode: 'pending',
@@ -315,7 +353,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
   // ---------------------------------------------------------------------------
 
   router.post('/totp/setup', requirePersistence, async (req, res) => {
-    const ctx = await resolveEnrollContext(req, res, store);
+    const ctx = await resolveEnrollContext(req, res, config, store);
     if (!ctx) return;
 
     const record = store.getUserRecord(ctx.userId);
@@ -329,6 +367,10 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
     const qrDataUrl = await generateQrSvgDataUrl(otpauthUri);
 
     if (ctx.mode === 'pending') {
+      if (ctx.pending.consumed || !config.require2fa || hasPrimaryFactor(store.getUserRecord(ctx.userId))) {
+        res.status(403).json({ error: 'Enrollment is not permitted during two-factor verification.' });
+        return;
+      }
       ctx.pending.pendingTotpSecret = secret;
     } else {
       store.setSessionTotpSetup(ctx.sessionId, secret);
@@ -338,7 +380,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
   });
 
   router.post('/totp/confirm', requirePersistence, async (req, res) => {
-    const ctx = await resolveEnrollContext(req, res, store);
+    const ctx = await resolveEnrollContext(req, res, config, store);
     if (!ctx) return;
 
     const { code, trustDevice } = req.body ?? {};
@@ -370,17 +412,24 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
       }
 
       const now = Date.now();
-      let recoveryCodes: string[] | undefined;
 
-      const conflict = await store.withUserLock(ctx.userId, () => {
+      const outcome = await store.withUserLock(ctx.userId, () => {
         const record = store.getUserRecord(ctx.userId);
-        if (record.totp) return true;
+        if (ctx.mode === 'pending' && (!config.require2fa || hasPrimaryFactor(record))) {
+          return { status: 'already_enrolled' as const };
+        }
+        if (record.totp) {
+          return { status: 'totp_exists' as const };
+        }
 
-        if (!hasPrimaryFactor(record)) {
+        const isFirstFactor = !hasPrimaryFactor(record);
+        let generatedRecoveryCodes: string[] | undefined;
+        if (isFirstFactor) {
           const generated = generateRecoveryCodes();
           record.recoverySalt = generated.salt;
           record.recoveryCodes = generated.hashedCodes;
-          recoveryCodes = generated.plaintextCodes;
+          record.trustedDevices = [];
+          generatedRecoveryCodes = generated.plaintextCodes;
         }
 
         record.totp = {
@@ -389,30 +438,51 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
           lastUsedStep: check.step,
         };
         store.saveUserRecord(record, now);
-        return false;
+
+        const keepSessionId = ctx.mode === 'pending' ? ctx.pending.joplinSessionId : ctx.sessionId;
+        const revokedTokens = isFirstFactor ? store.revokeOtherSessionsForUser(ctx.userId, keepSessionId) : [];
+
+        return {
+          status: 'ok' as const,
+          isFirstFactor,
+          recoveryCodes: generatedRecoveryCodes,
+          revokedTokens,
+        };
       });
 
-      if (conflict) {
+      if (outcome.status === 'already_enrolled') {
+        if (ctx.mode === 'pending') ctx.pending.pendingTotpSecret = null;
+        res.status(403).json({ error: 'Enrollment is not permitted during two-factor verification.' });
+        return;
+      }
+      if (outcome.status === 'totp_exists') {
         res.status(409).json({ error: 'Authenticator app is already configured.' });
         return;
       }
 
+      await finalizeRevokedSessions(outcome.revokedTokens, req, store);
+
       if (ctx.mode === 'pending') {
         ctx.pending.pendingTotpSecret = null;
+        if (outcome.isFirstFactor && !trustDevice) {
+          clearTrustedDeviceCookies(res);
+        }
         await promotePendingLogin(req, res, config, store, ctx.pending, { trustDevice: Boolean(trustDevice) });
         res.status(200).json({
           verified: true,
           userId: ctx.userId,
-          recoveryCodes,
+          recoveryCodes: outcome.recoveryCodes,
         });
       } else {
         store.clearSessionTotpSetup(ctx.sessionId);
         const stepUpExpiresAt = store.touchStepUp(ctx.sessionId, now);
-        store.revokeUnverifiedSessionsForUser(ctx.userId, ctx.sessionId);
+        if (outcome.isFirstFactor) {
+          clearTrustedDeviceCookies(res);
+        }
         res.status(200).json({
           enrolled: true,
           stepUpExpiresAt,
-          recoveryCodes,
+          recoveryCodes: outcome.recoveryCodes,
         });
       }
     } finally {
@@ -425,7 +495,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
   // ---------------------------------------------------------------------------
 
   router.post('/passkey/register/options', requirePersistence, async (req, res) => {
-    const ctx = await resolveEnrollContext(req, res, store);
+    const ctx = await resolveEnrollContext(req, res, config, store);
     if (!ctx) return;
 
     const rp = getWebAuthnRpOrRespond(req, res, config);
@@ -458,6 +528,10 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
     };
 
     if (ctx.mode === 'pending') {
+      if (ctx.pending.consumed || !config.require2fa || hasPrimaryFactor(store.getUserRecord(ctx.userId))) {
+        res.status(403).json({ error: 'Enrollment is not permitted during two-factor verification.' });
+        return;
+      }
       ctx.pending.webAuthnChallenge = challengeRecord;
     } else {
       store.setSessionWebAuthnChallenge(ctx.sessionId, challengeRecord);
@@ -467,7 +541,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
   });
 
   router.post('/passkey/register/verify', requirePersistence, async (req, res) => {
-    const ctx = await resolveEnrollContext(req, res, store);
+    const ctx = await resolveEnrollContext(req, res, config, store);
     if (!ctx) return;
 
     const { response, name, trustDevice } = req.body ?? {};
@@ -524,19 +598,24 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
 
       const { credential } = verification.registrationInfo;
       const now = Date.now();
-      let recoveryCodes: string[] | undefined;
 
       const result = await store.withUserLock(ctx.userId, () => {
         const record = store.getUserRecord(ctx.userId);
+        if (ctx.mode === 'pending' && (!config.require2fa || hasPrimaryFactor(record))) {
+          return { status: 'already_enrolled' as const };
+        }
         if (record.passkeys.some((pk) => pk.credentialID === credential.id)) {
-          return { duplicate: true as const, passkey: null };
+          return { status: 'duplicate' as const };
         }
 
-        if (!hasPrimaryFactor(record)) {
+        const isFirstFactor = !hasPrimaryFactor(record);
+        let generatedRecoveryCodes: string[] | undefined;
+        if (isFirstFactor) {
           const generated = generateRecoveryCodes();
           record.recoverySalt = generated.salt;
           record.recoveryCodes = generated.hashedCodes;
-          recoveryCodes = generated.plaintextCodes;
+          record.trustedDevices = [];
+          generatedRecoveryCodes = generated.plaintextCodes;
         }
 
         const passkeyName = sanitizePasskeyName(name, record.passkeys.length + 1);
@@ -556,15 +635,34 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
         };
         record.passkeys.push(saved);
         store.saveUserRecord(record, now);
-        return { duplicate: false as const, passkey: saved };
+
+        const keepSessionId = ctx.mode === 'pending' ? ctx.pending.joplinSessionId : ctx.sessionId;
+        const revokedTokens = isFirstFactor ? store.revokeOtherSessionsForUser(ctx.userId, keepSessionId) : [];
+
+        return {
+          status: 'ok' as const,
+          isFirstFactor,
+          passkey: saved,
+          recoveryCodes: generatedRecoveryCodes,
+          revokedTokens,
+        };
       });
 
-      if (result.duplicate || !result.passkey) {
+      if (result.status === 'already_enrolled') {
+        res.status(403).json({ error: 'Enrollment is not permitted during two-factor verification.' });
+        return;
+      }
+      if (result.status === 'duplicate') {
         res.status(409).json({ error: 'This passkey is already registered.' });
         return;
       }
 
+      await finalizeRevokedSessions(result.revokedTokens, req, store);
+
       if (ctx.mode === 'pending') {
+        if (result.isFirstFactor && !trustDevice) {
+          clearTrustedDeviceCookies(res);
+        }
         await promotePendingLogin(req, res, config, store, ctx.pending, { trustDevice: Boolean(trustDevice) });
         res.status(200).json({
           verified: true,
@@ -575,11 +673,13 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
             createdAt: result.passkey.createdAt,
             lastUsedAt: result.passkey.lastUsedAt,
           },
-          recoveryCodes,
+          recoveryCodes: result.recoveryCodes,
         });
       } else {
         const stepUpExpiresAt = store.touchStepUp(ctx.sessionId, now);
-        store.revokeUnverifiedSessionsForUser(ctx.userId, ctx.sessionId);
+        if (result.isFirstFactor) {
+          clearTrustedDeviceCookies(res);
+        }
         res.status(200).json({
           enrolled: true,
           stepUpExpiresAt,
@@ -589,7 +689,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
             createdAt: result.passkey.createdAt,
             lastUsedAt: result.passkey.lastUsedAt,
           },
-          recoveryCodes,
+          recoveryCodes: result.recoveryCodes,
         });
       }
     } finally {
@@ -602,7 +702,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
   // ---------------------------------------------------------------------------
 
   router.post('/totp/verify', requirePersistence, async (req, res) => {
-    const pending = await loadPendingLogin(req, res, store, { requireAlreadyEnrolled: true });
+    const pending = await loadPendingLogin(req, res, config, store, { requireAlreadyEnrolled: true });
     if (!pending) return;
 
     const { code, trustDevice } = req.body ?? {};
@@ -614,20 +714,34 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
     pending.inFlight = true;
     try {
       const outcome = await store.withUserLock(pending.userId, () => {
+        const now = Date.now();
         const record = store.getUserRecord(pending.userId);
+        const lockedRetryAfter = getLockoutRetryAfterSeconds(record, now);
+        if (lockedRetryAfter !== null) {
+          return { status: 'locked' as const, retryAfter: lockedRetryAfter };
+        }
         if (!record.totp) {
-          return { ok: false as const, reason: 'Authenticator app is not configured for this account.' };
+          recordFailedSecondFactor(record, now);
+          store.saveUserRecord(record, now);
+          return { status: 'failed' as const, reason: 'Authenticator app is not configured for this account.' };
         }
         const check = verifyTotp(record.totp.secret, code, { lastUsedStep: record.totp.lastUsedStep });
         if (!check.valid || check.step === null) {
-          return { ok: false as const, reason: 'Invalid verification code.' };
+          recordFailedSecondFactor(record, now);
+          store.saveUserRecord(record, now);
+          return { status: 'failed' as const, reason: 'Invalid verification code.' };
         }
         record.totp = { ...record.totp, lastUsedStep: check.step };
-        store.saveUserRecord(record);
-        return { ok: true as const };
+        clearFailedSecondFactor(record);
+        store.saveUserRecord(record, now);
+        return { status: 'ok' as const };
       });
 
-      if (!outcome.ok) {
+      if (outcome.status === 'locked') {
+        sendLockoutResponse(res, outcome.retryAfter);
+        return;
+      }
+      if (outcome.status === 'failed') {
         await failPendingAttempt(res, store, pending, outcome.reason);
         return;
       }
@@ -640,7 +754,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
   });
 
   router.post('/passkey/auth/options', requirePersistence, async (req, res) => {
-    const pending = await loadPendingLogin(req, res, store, { requireAlreadyEnrolled: true });
+    const pending = await loadPendingLogin(req, res, config, store, { requireAlreadyEnrolled: true });
     if (!pending) return;
 
     const rp = getWebAuthnRpOrRespond(req, res, config);
@@ -673,7 +787,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
   });
 
   router.post('/passkey/auth/verify', requirePersistence, async (req, res) => {
-    const pending = await loadPendingLogin(req, res, store, { requireAlreadyEnrolled: true });
+    const pending = await loadPendingLogin(req, res, config, store, { requireAlreadyEnrolled: true });
     if (!pending) return;
 
     const { response, trustDevice } = req.body ?? {};
@@ -684,18 +798,30 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
 
     pending.inFlight = true;
     try {
-      const challengeRecord = pending.webAuthnChallenge;
-      pending.webAuthnChallenge = null;
-      if (!challengeRecord || challengeRecord.kind !== 'authenticate' || challengeRecord.expiresAt <= Date.now()) {
-        await failPendingAttempt(res, store, pending, 'Passkey challenge missing or expired. Please try again.');
-        return;
-      }
-
       const authResponse = response as AuthenticationResponseJSON;
       const result = await store.withUserLock(pending.userId, async () => {
+        const now = Date.now();
         const record = store.getUserRecord(pending.userId);
+        const lockedRetryAfter = getLockoutRetryAfterSeconds(record, now);
+        if (lockedRetryAfter !== null) {
+          return { status: 'locked' as const, retryAfter: lockedRetryAfter };
+        }
+
+        const challengeRecord = pending.webAuthnChallenge;
+        pending.webAuthnChallenge = null;
+        if (!challengeRecord || challengeRecord.kind !== 'authenticate' || challengeRecord.expiresAt <= now) {
+          return {
+            status: 'failed' as const,
+            reason: 'Passkey challenge missing or expired. Please try again.',
+          };
+        }
+
         const idx = record.passkeys.findIndex((pk) => pk.credentialID === authResponse.id);
-        if (idx === -1) return { ok: false as const };
+        if (idx === -1) {
+          recordFailedSecondFactor(record, now);
+          store.saveUserRecord(record, now);
+          return { status: 'failed' as const, reason: 'Passkey verification failed.' };
+        }
         const passkey = record.passkeys[idx];
 
         let verification;
@@ -714,28 +840,40 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
             requireUserVerification: false,
           });
         } catch {
-          return { ok: false as const };
+          recordFailedSecondFactor(record, now);
+          store.saveUserRecord(record, now);
+          return { status: 'failed' as const, reason: 'Passkey verification failed.' };
         }
 
-        if (!verification.verified) return { ok: false as const };
+        if (!verification.verified) {
+          recordFailedSecondFactor(record, now);
+          store.saveUserRecord(record, now);
+          return { status: 'failed' as const, reason: 'Passkey verification failed.' };
+        }
 
         const newCounter = verification.authenticationInfo.newCounter;
         if ((passkey.counter > 0 || newCounter > 0) && newCounter <= passkey.counter) {
-          return { ok: false as const };
+          recordFailedSecondFactor(record, now);
+          store.saveUserRecord(record, now);
+          return { status: 'failed' as const, reason: 'Passkey verification failed.' };
         }
 
-        const now = Date.now();
         record.passkeys[idx] = {
           ...passkey,
           counter: newCounter,
           lastUsedAt: now,
         };
+        clearFailedSecondFactor(record);
         store.saveUserRecord(record, now);
-        return { ok: true as const };
+        return { status: 'ok' as const };
       });
 
-      if (!result.ok) {
-        await failPendingAttempt(res, store, pending, 'Passkey verification failed.');
+      if (result.status === 'locked') {
+        sendLockoutResponse(res, result.retryAfter);
+        return;
+      }
+      if (result.status === 'failed') {
+        await failPendingAttempt(res, store, pending, result.reason);
         return;
       }
 
@@ -747,7 +885,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
   });
 
   router.post('/recovery/verify', requirePersistence, async (req, res) => {
-    const pending = await loadPendingLogin(req, res, store, { requireAlreadyEnrolled: true });
+    const pending = await loadPendingLogin(req, res, config, store, { requireAlreadyEnrolled: true });
     if (!pending) return;
 
     const { code, trustDevice } = req.body ?? {};
@@ -758,8 +896,29 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
 
     pending.inFlight = true;
     try {
-      const result = await store.verifyAndConsumeRecoveryCode(pending.userId, code);
-      if (!result.valid) {
+      const result = await store.withUserLock(pending.userId, () => {
+        const now = Date.now();
+        const record = store.getUserRecord(pending.userId);
+        const lockedRetryAfter = getLockoutRetryAfterSeconds(record, now);
+        if (lockedRetryAfter !== null) {
+          return { status: 'locked' as const, retryAfter: lockedRetryAfter };
+        }
+        const outcome = store.verifyAndConsumeRecoveryCodeLocked(record, code, now);
+        if (!outcome.valid) {
+          recordFailedSecondFactor(record, now);
+          store.saveUserRecord(record, now);
+          return { status: 'failed' as const };
+        }
+        clearFailedSecondFactor(record);
+        store.saveUserRecord(record, now);
+        return { status: 'ok' as const, remaining: outcome.remaining };
+      });
+
+      if (result.status === 'locked') {
+        sendLockoutResponse(res, result.retryAfter);
+        return;
+      }
+      if (result.status === 'failed') {
         await failPendingAttempt(res, store, pending, 'Invalid or already used recovery code.');
         return;
       }
@@ -787,17 +946,35 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
     }
 
     const userId = req.userId!;
-    const ok = await store.withUserLock(userId, () => {
+    const outcome = await store.withUserLock(userId, () => {
+      const now = Date.now();
       const record = store.getUserRecord(userId);
-      if (!record.totp) return false;
+      const lockedRetryAfter = getLockoutRetryAfterSeconds(record, now);
+      if (lockedRetryAfter !== null) {
+        return { status: 'locked' as const, retryAfter: lockedRetryAfter };
+      }
+      if (!record.totp) {
+        recordFailedSecondFactor(record, now);
+        store.saveUserRecord(record, now);
+        return { status: 'failed' as const };
+      }
       const check = verifyTotp(record.totp.secret, code, { lastUsedStep: record.totp.lastUsedStep });
-      if (!check.valid || check.step === null) return false;
+      if (!check.valid || check.step === null) {
+        recordFailedSecondFactor(record, now);
+        store.saveUserRecord(record, now);
+        return { status: 'failed' as const };
+      }
       record.totp = { ...record.totp, lastUsedStep: check.step };
-      store.saveUserRecord(record);
-      return true;
+      clearFailedSecondFactor(record);
+      store.saveUserRecord(record, now);
+      return { status: 'ok' as const };
     });
 
-    if (!ok) {
+    if (outcome.status === 'locked') {
+      sendLockoutResponse(res, outcome.retryAfter);
+      return;
+    }
+    if (outcome.status === 'failed') {
       res.status(400).json({ error: 'Invalid verification code.' });
       return;
     }
@@ -843,18 +1020,27 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
       return;
     }
 
-    const challengeRecord = store.consumeSessionWebAuthnChallenge(req.sessionId!, 'step-up');
-    if (!challengeRecord) {
-      res.status(400).json({ error: 'Passkey challenge missing or expired. Please try again.' });
-      return;
-    }
-
     const authResponse = response as AuthenticationResponseJSON;
     const userId = req.userId!;
-    const verified = await store.withUserLock(userId, async () => {
+    const outcome = await store.withUserLock(userId, async () => {
+      const now = Date.now();
       const record = store.getUserRecord(userId);
+      const lockedRetryAfter = getLockoutRetryAfterSeconds(record, now);
+      if (lockedRetryAfter !== null) {
+        return { status: 'locked' as const, retryAfter: lockedRetryAfter };
+      }
+
+      const challengeRecord = store.consumeSessionWebAuthnChallenge(req.sessionId!, 'step-up', now);
+      if (!challengeRecord) {
+        return { status: 'no_challenge' as const };
+      }
+
       const idx = record.passkeys.findIndex((pk) => pk.credentialID === authResponse.id);
-      if (idx === -1) return false;
+      if (idx === -1) {
+        recordFailedSecondFactor(record, now);
+        store.saveUserRecord(record, now);
+        return { status: 'failed' as const };
+      }
       const passkey = record.passkeys[idx];
 
       let verification;
@@ -873,23 +1059,39 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
           requireUserVerification: false,
         });
       } catch {
-        return false;
+        recordFailedSecondFactor(record, now);
+        store.saveUserRecord(record, now);
+        return { status: 'failed' as const };
       }
 
-      if (!verification.verified) return false;
+      if (!verification.verified) {
+        recordFailedSecondFactor(record, now);
+        store.saveUserRecord(record, now);
+        return { status: 'failed' as const };
+      }
 
       const newCounter = verification.authenticationInfo.newCounter;
       if ((passkey.counter > 0 || newCounter > 0) && newCounter <= passkey.counter) {
-        return false;
+        recordFailedSecondFactor(record, now);
+        store.saveUserRecord(record, now);
+        return { status: 'failed' as const };
       }
 
-      const now = Date.now();
       record.passkeys[idx] = { ...passkey, counter: newCounter, lastUsedAt: now };
+      clearFailedSecondFactor(record);
       store.saveUserRecord(record, now);
-      return true;
+      return { status: 'ok' as const };
     });
 
-    if (!verified) {
+    if (outcome.status === 'locked') {
+      sendLockoutResponse(res, outcome.retryAfter);
+      return;
+    }
+    if (outcome.status === 'no_challenge') {
+      res.status(400).json({ error: 'Passkey challenge missing or expired. Please try again.' });
+      return;
+    }
+    if (outcome.status === 'failed') {
       res.status(400).json({ error: 'Passkey verification failed.' });
       return;
     }
@@ -905,8 +1107,29 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
       return;
     }
 
-    const result = await store.verifyAndConsumeRecoveryCode(req.userId!, code);
-    if (!result.valid) {
+    const outcome = await store.withUserLock(req.userId!, () => {
+      const now = Date.now();
+      const record = store.getUserRecord(req.userId!);
+      const lockedRetryAfter = getLockoutRetryAfterSeconds(record, now);
+      if (lockedRetryAfter !== null) {
+        return { status: 'locked' as const, retryAfter: lockedRetryAfter };
+      }
+      const check = store.verifyAndConsumeRecoveryCodeLocked(record, code, now);
+      if (!check.valid) {
+        recordFailedSecondFactor(record, now);
+        store.saveUserRecord(record, now);
+        return { status: 'failed' as const };
+      }
+      clearFailedSecondFactor(record);
+      store.saveUserRecord(record, now);
+      return { status: 'ok' as const, remaining: check.remaining };
+    });
+
+    if (outcome.status === 'locked') {
+      sendLockoutResponse(res, outcome.retryAfter);
+      return;
+    }
+    if (outcome.status === 'failed') {
       res.status(400).json({ error: 'Invalid or already used recovery code.' });
       return;
     }
@@ -915,7 +1138,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
     res.status(200).json({
       verified: true,
       stepUpExpiresAt,
-      recoveryCodesRemaining: result.remaining,
+      recoveryCodesRemaining: outcome.remaining,
     });
   });
 

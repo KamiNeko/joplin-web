@@ -264,13 +264,23 @@ class SoftwareAuthenticator {
 
 /** Enrolls TOTP on a fresh server instance (via forced enrollment when require2fa=true, or Settings when false) */
 async function setupUserWithTotp(
-  options: { require2fa?: boolean; trustDevice?: boolean; userAgent?: string } = {}
+  options: {
+    require2fa?: boolean;
+    trustDevice?: boolean;
+    userAgent?: string;
+    trustProxy?: AppConfig['trustProxy'];
+    publicUrl?: string;
+  } = {}
 ) {
   const require2fa = options.require2fa ?? true;
-  const { baseUrl, server, cacheDir } = await startApp({ require2fa });
+  const { baseUrl, server, cacheDir } = await startApp({
+    require2fa,
+    ...(options.trustProxy !== undefined ? { trustProxy: options.trustProxy } : {}),
+    ...(options.publicUrl !== undefined ? { publicUrl: options.publicUrl } : {}),
+  });
   const jar = new CookieJar();
   const baseHeaders: Record<string, string> = {
-    Origin: baseUrl,
+    Origin: options.publicUrl ?? baseUrl,
     ...(options.userAgent ? { 'User-Agent': options.userAgent } : {}),
   };
   const login = await call(baseUrl, '/api/auth/login', {
@@ -1296,6 +1306,743 @@ describe('storage permissions, fail-closed corruption, restarts, and log redacti
     assert.equal(combinedLogs.includes(assertionSig), false, 'WebAuthn signature must not appear in logs');
     for (const rc of recoveryList) {
       assert.equal(combinedLogs.includes(rc), false, 'recovery code must not appear in logs');
+    }
+  });
+});
+
+describe('stale mustEnroll race & concurrent enrollment protection', () => {
+  test('attacker with pre-opened mustEnroll pending login cannot enroll passkey or TOTP after owner enrolls TOTP', async () => {
+    const publicUrl = 'https://notes.example.com';
+    const { baseUrl } = await startApp({ require2fa: true, publicUrl });
+    const headers = { Origin: publicUrl };
+
+    // Attacker opens pending login while account is unenrolled (mustEnroll=true)
+    const attackerJar = new CookieJar();
+    const attackerLogin = await call(baseUrl, '/api/auth/login', {
+      method: 'POST',
+      headers,
+      jar: attackerJar,
+      json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+    });
+    assert.equal(attackerLogin.status, 200);
+    assert.equal(attackerLogin.data.twoFactor?.mustEnroll, true);
+
+    // Attacker even pre-fetches passkey registration options before owner finishes enrolling
+    const attackerRegOpts = await call(baseUrl, '/api/auth/2fa/passkey/register/options', {
+      method: 'POST',
+      headers,
+      jar: attackerJar,
+      json: {},
+    });
+    assert.equal(attackerRegOpts.status, 200);
+
+    // Owner signs in and enrolls TOTP first
+    const ownerJar = new CookieJar();
+    await call(baseUrl, '/api/auth/login', {
+      method: 'POST',
+      headers,
+      jar: ownerJar,
+      json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+    });
+    const ownerSetup = await call(baseUrl, '/api/auth/2fa/totp/setup', {
+      method: 'POST',
+      headers,
+      jar: ownerJar,
+      json: {},
+    });
+    assert.equal(ownerSetup.status, 200);
+    const ownerConfirm = await call(baseUrl, '/api/auth/2fa/totp/confirm', {
+      method: 'POST',
+      headers,
+      jar: ownerJar,
+      json: { code: computeTotp(ownerSetup.data.secret) },
+    });
+    assert.equal(ownerConfirm.status, 200);
+
+    // Attacker's stale pending login MUST now be rejected (403) across all pending enrollment routes
+    const latePasskeyOpts = await call(baseUrl, '/api/auth/2fa/passkey/register/options', {
+      method: 'POST',
+      headers,
+      jar: attackerJar,
+      json: {},
+    });
+    assert.equal(latePasskeyOpts.status, 403);
+
+    const attackerAuthn = new SoftwareAuthenticator();
+    const latePasskeyVerify = await call(baseUrl, '/api/auth/2fa/passkey/register/verify', {
+      method: 'POST',
+      headers,
+      jar: attackerJar,
+      json: {
+        name: 'Attacker Key',
+        response: attackerAuthn.makeRegistrationResponse(attackerRegOpts.data, publicUrl),
+      },
+    });
+    assert.equal(latePasskeyVerify.status, 403);
+
+    const lateTotpSetup = await call(baseUrl, '/api/auth/2fa/totp/setup', {
+      method: 'POST',
+      headers,
+      jar: attackerJar,
+      json: {},
+    });
+    assert.equal(lateTotpSetup.status, 403);
+
+    // Attacker session was not promoted and no passkey was persisted
+    assert.equal((await call(baseUrl, '/api/notes', { jar: attackerJar })).status, 401);
+    const ownerPasskeys = await call(baseUrl, '/api/auth/2fa/passkeys', { jar: ownerJar });
+    assert.equal(ownerPasskeys.status, 200);
+    assert.equal(ownerPasskeys.data.passkeys.length, 0);
+  });
+
+  test('attacker with pre-opened mustEnroll pending login + TOTP secret cannot confirm TOTP after owner enrolls passkey', async () => {
+    const publicUrl = 'https://notes.example.com';
+    const { baseUrl } = await startApp({ require2fa: true, publicUrl });
+    const headers = { Origin: publicUrl };
+
+    // Attacker opens pending login and starts TOTP setup before owner enrolls
+    const attackerJar = new CookieJar();
+    const attackerLogin = await call(baseUrl, '/api/auth/login', {
+      method: 'POST',
+      headers,
+      jar: attackerJar,
+      json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+    });
+    assert.equal(attackerLogin.data.twoFactor?.mustEnroll, true);
+
+    const attackerTotpSetup = await call(baseUrl, '/api/auth/2fa/totp/setup', {
+      method: 'POST',
+      headers,
+      jar: attackerJar,
+      json: {},
+    });
+    assert.equal(attackerTotpSetup.status, 200);
+
+    // Owner signs in and enrolls a passkey first
+    const ownerJar = new CookieJar();
+    await call(baseUrl, '/api/auth/login', {
+      method: 'POST',
+      headers,
+      jar: ownerJar,
+      json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+    });
+    const ownerRegOpts = await call(baseUrl, '/api/auth/2fa/passkey/register/options', {
+      method: 'POST',
+      headers,
+      jar: ownerJar,
+      json: {},
+    });
+    const ownerAuthn = new SoftwareAuthenticator();
+    const ownerRegVerify = await call(baseUrl, '/api/auth/2fa/passkey/register/verify', {
+      method: 'POST',
+      headers,
+      jar: ownerJar,
+      json: {
+        name: 'Owner Key',
+        response: ownerAuthn.makeRegistrationResponse(ownerRegOpts.data, publicUrl),
+      },
+    });
+    assert.equal(ownerRegVerify.status, 200);
+
+    // Attacker attempts to complete pre-started TOTP confirm -> MUST fail with 403
+    const lateTotpConfirm = await call(baseUrl, '/api/auth/2fa/totp/confirm', {
+      method: 'POST',
+      headers,
+      jar: attackerJar,
+      json: { code: computeTotp(attackerTotpSetup.data.secret) },
+    });
+    assert.equal(lateTotpConfirm.status, 403);
+
+    const lateTotpSetup = await call(baseUrl, '/api/auth/2fa/totp/setup', {
+      method: 'POST',
+      headers,
+      jar: attackerJar,
+      json: {},
+    });
+    assert.equal(lateTotpSetup.status, 403);
+
+    // Attacker was not promoted and TOTP remains disabled on the account
+    assert.equal((await call(baseUrl, '/api/notes', { jar: attackerJar })).status, 401);
+    const status = await call(baseUrl, '/api/auth/2fa/status', { jar: ownerJar });
+    assert.equal(status.status, 200);
+    assert.equal(status.data.enrolled.totp, false);
+    assert.equal(status.data.enrolled.passkeysCount, 1);
+  });
+
+  test('concurrent pending passkey enrollments allow only the first writer and reject the second with 403', async () => {
+    const publicUrl = 'https://notes.example.com';
+    const { baseUrl } = await startApp({ require2fa: true, publicUrl });
+    const headers = { Origin: publicUrl };
+
+    const jarA = new CookieJar();
+    const jarB = new CookieJar();
+    await call(baseUrl, '/api/auth/login', {
+      method: 'POST',
+      headers,
+      jar: jarA,
+      json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+    });
+    await call(baseUrl, '/api/auth/login', {
+      method: 'POST',
+      headers,
+      jar: jarB,
+      json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+    });
+
+    const optsA = await call(baseUrl, '/api/auth/2fa/passkey/register/options', {
+      method: 'POST',
+      headers,
+      jar: jarA,
+      json: {},
+    });
+    const optsB = await call(baseUrl, '/api/auth/2fa/passkey/register/options', {
+      method: 'POST',
+      headers,
+      jar: jarB,
+      json: {},
+    });
+
+    const authnA = new SoftwareAuthenticator();
+    const authnB = new SoftwareAuthenticator();
+    const [resA, resB] = await Promise.all([
+      call(baseUrl, '/api/auth/2fa/passkey/register/verify', {
+        method: 'POST',
+        headers,
+        jar: jarA,
+        json: { name: 'Key A', response: authnA.makeRegistrationResponse(optsA.data, publicUrl) },
+      }),
+      call(baseUrl, '/api/auth/2fa/passkey/register/verify', {
+        method: 'POST',
+        headers,
+        jar: jarB,
+        json: { name: 'Key B', response: authnB.makeRegistrationResponse(optsB.data, publicUrl) },
+      }),
+    ]);
+
+    const statuses = [resA.status, resB.status].sort((a, b) => a - b);
+    assert.deepEqual(statuses, [200, 403]);
+    const winnerJar = resA.status === 200 ? jarA : jarB;
+    const loserJar = resA.status === 200 ? jarB : jarA;
+    assert.equal((await call(baseUrl, '/api/notes', { jar: loserJar })).status, 401);
+    const passkeys = await call(baseUrl, '/api/auth/2fa/passkeys', { jar: winnerJar });
+    assert.equal(passkeys.status, 200);
+    assert.equal(passkeys.data.passkeys.length, 1);
+  });
+});
+
+describe('first-factor enrollment session & trusted-device revocation', () => {
+  test('enrolling first factor from Settings revokes all pre-existing sessions (API & browser) and keeps enrolling session; adding 2nd factor keeps other verified sessions', async () => {
+    const publicUrl = 'https://notes.example.com';
+    const { baseUrl } = await startApp({ require2fa: false, publicUrl });
+    const headers = { Origin: publicUrl };
+
+    // Create three pre-enrollment sessions: two browser cookies + one API bearer token
+    const jar1 = new CookieJar();
+    const jar2 = new CookieJar();
+    await call(baseUrl, '/api/auth/login', {
+      method: 'POST',
+      headers,
+      jar: jar1,
+      json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+    });
+    await call(baseUrl, '/api/auth/login', {
+      method: 'POST',
+      headers,
+      jar: jar2,
+      json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+    });
+    const apiLogin = await call(baseUrl, '/api/auth/login', {
+      method: 'POST',
+      json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+    });
+    assert.equal(apiLogin.status, 200);
+    const apiToken = apiLogin.data.sessionId as string;
+    assert.ok(apiToken);
+
+    // Warm /api/notes on all three sessions so validation cache + note cache are populated
+    assert.equal((await call(baseUrl, '/api/notes', { jar: jar1 })).status, 200);
+    assert.equal((await call(baseUrl, '/api/notes', { jar: jar2 })).status, 200);
+    assert.equal(
+      (await call(baseUrl, '/api/notes', { headers: { Authorization: `Bearer ${apiToken}` } })).status,
+      200
+    );
+    assert.equal(joplinMock.sessions.has(apiToken), true);
+
+    // Enroll FIRST factor (TOTP) in jar1
+    const setup = await call(baseUrl, '/api/auth/2fa/totp/setup', {
+      method: 'POST',
+      headers,
+      jar: jar1,
+      json: {},
+    });
+    assert.equal(setup.status, 200);
+    const secret = setup.data.secret as string;
+    const confirm = await call(baseUrl, '/api/auth/2fa/totp/confirm', {
+      method: 'POST',
+      headers,
+      jar: jar1,
+      json: { code: computeTotp(secret) },
+    });
+    assert.equal(confirm.status, 200);
+    assert.equal(confirm.data.enrolled, true);
+
+    // Enrolling session keeps working, while both other pre-existing sessions fail with 401 and are ended upstream
+    assert.equal((await call(baseUrl, '/api/notes', { jar: jar1 })).status, 200);
+    assert.equal((await call(baseUrl, '/api/notes', { jar: jar2 })).status, 401);
+    assert.equal(
+      (await call(baseUrl, '/api/notes', { headers: { Authorization: `Bearer ${apiToken}` } })).status,
+      401
+    );
+    assert.equal(joplinMock.sessions.has(apiToken), false, 'revoked session ended upstream via Joplin Server');
+
+    // Now verify that adding a SECOND factor does NOT revoke another verified session
+    testMock.timers.enable({ apis: ['Date'], now: Date.now() + 30_000 });
+    try {
+      const verifiedJar = new CookieJar();
+      await call(baseUrl, '/api/auth/login', {
+        method: 'POST',
+        headers,
+        jar: verifiedJar,
+        json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+      });
+      const verify = await call(baseUrl, '/api/auth/2fa/totp/verify', {
+        method: 'POST',
+        headers,
+        jar: verifiedJar,
+        json: { code: computeTotp(secret, Date.now()) },
+      });
+      assert.equal(verify.status, 200);
+      assert.equal((await call(baseUrl, '/api/notes', { jar: verifiedJar })).status, 200);
+
+      // jar1 adds a passkey as a second factor (within its fresh 5-min step-up window)
+      const regOpts = await call(baseUrl, '/api/auth/2fa/passkey/register/options', {
+        method: 'POST',
+        headers,
+        jar: jar1,
+        json: {},
+      });
+      assert.equal(regOpts.status, 200);
+      const authn = new SoftwareAuthenticator();
+      const regVerify = await call(baseUrl, '/api/auth/2fa/passkey/register/verify', {
+        method: 'POST',
+        headers,
+        jar: jar1,
+        json: { name: 'Second Factor', response: authn.makeRegistrationResponse(regOpts.data, publicUrl) },
+      });
+      assert.equal(regVerify.status, 200);
+
+      // Verified session remains valid after adding a second factor
+      assert.equal((await call(baseUrl, '/api/notes', { jar: verifiedJar })).status, 200);
+    } finally {
+      testMock.timers.reset();
+    }
+  });
+
+  test('enrolling first factor via pending login revokes pre-existing sessions surviving a REQUIRE_2FA restart', async () => {
+    const publicUrl = 'https://notes.example.com';
+    const first = await startApp({ require2fa: false, publicUrl });
+
+    // Create a session before REQUIRE_2FA was turned on
+    const preLogin = await call(first.baseUrl, '/api/auth/login', {
+      method: 'POST',
+      json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+    });
+    assert.equal(preLogin.status, 200);
+    const preToken = preLogin.data.sessionId as string;
+    assert.equal(
+      (await call(first.baseUrl, '/api/notes', { headers: { Authorization: `Bearer ${preToken}` } })).status,
+      200
+    );
+
+    first.server.closeAllConnections();
+    await new Promise((resolve) => first.server.close(resolve));
+
+    // Restart with REQUIRE_2FA=true on the same CACHE_DIR
+    const restarted = await startApp({ cacheDir: first.cacheDir, require2fa: true, publicUrl });
+    // Pre-existing session had twoFactorPassed=true in sessions.json, so it works before enrollment
+    assert.equal(
+      (await call(restarted.baseUrl, '/api/notes', { headers: { Authorization: `Bearer ${preToken}` } })).status,
+      200
+    );
+
+    // Pre-seed a stale trusted device in the still-unenrolled user record to prove first-factor
+    // enrollment wipes any pre-existing trustedDevices alongside pre-existing sessions
+    const userId = preLogin.data.userId as string;
+    const userRecordFile = path.join(first.cacheDir!, 'auth', `${ownerKeyForUser(userId)}.json`);
+    const { readFile } = await import('node:fs/promises');
+    await writeFile(
+      userRecordFile,
+      JSON.stringify({
+        version: 1,
+        userId,
+        totp: null,
+        passkeys: [],
+        recoverySalt: null,
+        recoveryCodes: [],
+        trustedDevices: [
+          {
+            id: 'stale-td',
+            tokenHash: 'deadbeef',
+            label: 'Stale Browser',
+            createdAt: Date.now() - 1000,
+            lastUsedAt: Date.now() - 1000,
+            expiresAt: Date.now() + 86_400_000,
+          },
+        ],
+      })
+    );
+    await chmod(userRecordFile, 0o600);
+
+    // Enroll first factor via pending enrollment
+    const enrollJar = new CookieJar();
+    const login2 = await call(restarted.baseUrl, '/api/auth/login', {
+      method: 'POST',
+      headers: { Origin: publicUrl },
+      jar: enrollJar,
+      json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+    });
+    assert.equal(login2.data.twoFactor?.mustEnroll, true);
+
+    const regOpts = await call(restarted.baseUrl, '/api/auth/2fa/passkey/register/options', {
+      method: 'POST',
+      headers: { Origin: publicUrl },
+      jar: enrollJar,
+      json: {},
+    });
+    const authn = new SoftwareAuthenticator();
+    const regVerify = await call(restarted.baseUrl, '/api/auth/2fa/passkey/register/verify', {
+      method: 'POST',
+      headers: { Origin: publicUrl },
+      jar: enrollJar,
+      json: { name: 'Mandatory Key', response: authn.makeRegistrationResponse(regOpts.data, publicUrl) },
+    });
+    assert.equal(regVerify.status, 200);
+
+    // Stale trusted device cleared by first-factor enrollment
+    const updatedRecord = JSON.parse(await readFile(userRecordFile, 'utf8'));
+    assert.deepEqual(updatedRecord.trustedDevices, []);
+
+    // Promoted session works; pre-enrollment session gets 401 and is terminated upstream
+    assert.equal((await call(restarted.baseUrl, '/api/notes', { jar: enrollJar })).status, 200);
+    assert.equal(
+      (await call(restarted.baseUrl, '/api/notes', { headers: { Authorization: `Bearer ${preToken}` } })).status,
+      401
+    );
+    assert.equal(joplinMock.sessions.has(preToken), false);
+  });
+});
+
+describe('per-user second-factor lockout and exponential backoff', () => {
+  test('locks second-factor verification across logins/IPs/methods after 5 failures with exponential backoff (1..60 min), preserves password step & existing sessions, survives restart, and resets on success', async () => {
+    const publicUrl = 'https://notes.example.com';
+    testMock.timers.enable({ apis: ['Date'], now: 1_700_100_000_000 });
+    try {
+      const ctx = await setupUserWithTotp({
+        require2fa: true,
+        trustProxy: 1,
+        publicUrl,
+      });
+
+      // Also enroll a passkey on the same account and keep `ctx.jar` as an active valid session
+      const regOpts = await call(ctx.baseUrl, '/api/auth/2fa/passkey/register/options', {
+        method: 'POST',
+        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.1' },
+        jar: ctx.jar,
+        json: {},
+      });
+      assert.equal(regOpts.status, 200);
+      const authn = new SoftwareAuthenticator();
+      const regVerify = await call(ctx.baseUrl, '/api/auth/2fa/passkey/register/verify', {
+        method: 'POST',
+        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.1' },
+        jar: ctx.jar,
+        json: { name: 'Lockout Test Key', response: authn.makeRegistrationResponse(regOpts.data, publicUrl) },
+      });
+      assert.equal(regVerify.status, 200);
+
+      // Pending login A from IP 1: burn 3 failed TOTP attempts
+      const jarA = new CookieJar();
+      await call(ctx.baseUrl, '/api/auth/login', {
+        method: 'POST',
+        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.2' },
+        jar: jarA,
+        json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+      });
+      for (let i = 0; i < 3; i++) {
+        const res = await call(ctx.baseUrl, '/api/auth/2fa/totp/verify', {
+          method: 'POST',
+          headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.2' },
+          jar: jarA,
+          json: { code: '000000' },
+        });
+        assert.equal(res.status, 401);
+      }
+
+      // Pending login B from IP 2: 4th failure via invalid recovery code, 5th failure via bad passkey assertion -> 1-min lock!
+      const jarB = new CookieJar();
+      await call(ctx.baseUrl, '/api/auth/login', {
+        method: 'POST',
+        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.3' },
+        jar: jarB,
+        json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+      });
+      const recFail = await call(ctx.baseUrl, '/api/auth/2fa/recovery/verify', {
+        method: 'POST',
+        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.3' },
+        jar: jarB,
+        json: { code: 'AAAA-AAAA-AAAA-AAAA' },
+      });
+      assert.equal(recFail.status, 401);
+
+      const pkOpts = await call(ctx.baseUrl, '/api/auth/2fa/passkey/auth/options', {
+        method: 'POST',
+        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.3' },
+        jar: jarB,
+        json: {},
+      });
+      const pkFail = await call(ctx.baseUrl, '/api/auth/2fa/passkey/auth/verify', {
+        method: 'POST',
+        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.3' },
+        jar: jarB,
+        json: { response: authn.makeAuthenticationResponse(pkOpts.data, publicUrl, { corruptSignature: true }) },
+      });
+      assert.equal(pkFail.status, 401);
+
+      // Advance 10s (still within 1-min lockout)
+      testMock.timers.setTime(Date.now() + 10_000);
+
+      // Already-authenticated session still works
+      assert.equal((await call(ctx.baseUrl, '/api/notes', { jar: ctx.jar })).status, 200);
+
+      // Password step still works and opens a pending login, only 2FA waits
+      const jarLocked = new CookieJar();
+      const pwOk = await call(ctx.baseUrl, '/api/auth/login', {
+        method: 'POST',
+        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.4' },
+        jar: jarLocked,
+        json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+      });
+      assert.equal(pwOk.status, 200);
+      assert.equal(pwOk.data.twoFactor?.required, true);
+
+      // Pending TOTP, recovery (even with valid codes!), passkey verify, and step-up ALL return 429 with retryAfter
+      const lockedTotp = await call(ctx.baseUrl, '/api/auth/2fa/totp/verify', {
+        method: 'POST',
+        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.4' },
+        jar: jarLocked,
+        json: { code: computeTotp(ctx.secret, Date.now()) },
+      });
+      assert.equal(lockedTotp.status, 429);
+      assert.ok(lockedTotp.data.retryAfter > 0 && lockedTotp.data.retryAfter <= 60);
+      assert.equal(Number(lockedTotp.headers.get('retry-after')), lockedTotp.data.retryAfter);
+
+      const lockedRec = await call(ctx.baseUrl, '/api/auth/2fa/recovery/verify', {
+        method: 'POST',
+        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.4' },
+        jar: jarLocked,
+        json: { code: ctx.recoveryCodes[0] },
+      });
+      assert.equal(lockedRec.status, 429);
+      assert.ok(lockedRec.data.retryAfter > 0);
+
+      const lockedPkOpts = await call(ctx.baseUrl, '/api/auth/2fa/passkey/auth/options', {
+        method: 'POST',
+        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.4' },
+        jar: jarLocked,
+        json: {},
+      });
+      const lockedPk = await call(ctx.baseUrl, '/api/auth/2fa/passkey/auth/verify', {
+        method: 'POST',
+        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.4' },
+        jar: jarLocked,
+        json: { response: authn.makeAuthenticationResponse(lockedPkOpts.data, publicUrl) },
+      });
+      assert.equal(lockedPk.status, 429);
+      assert.ok(lockedPk.data.retryAfter > 0);
+
+      const lockedStepUp = await call(ctx.baseUrl, '/api/auth/2fa/step-up/totp', {
+        method: 'POST',
+        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.4' },
+        jar: ctx.jar,
+        json: { code: computeTotp(ctx.secret, Date.now()) },
+      });
+      assert.equal(lockedStepUp.status, 429);
+      assert.ok(lockedStepUp.data.retryAfter > 0);
+
+      // Lockout survives a server restart
+      ctx.server.closeAllConnections();
+      await new Promise((resolve) => ctx.server.close(resolve));
+      const restarted = await startApp({ cacheDir: ctx.cacheDir, require2fa: true, trustProxy: 1, publicUrl });
+      const restartJar = new CookieJar();
+      await call(restarted.baseUrl, '/api/auth/login', {
+        method: 'POST',
+        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.5' },
+        jar: restartJar,
+        json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+      });
+      const lockedAfterRestart = await call(restarted.baseUrl, '/api/auth/2fa/totp/verify', {
+        method: 'POST',
+        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.5' },
+        jar: restartJar,
+        json: { code: '000000' },
+      });
+      assert.equal(lockedAfterRestart.status, 429);
+      assert.ok(lockedAfterRestart.data.retryAfter > 0);
+
+      // Exponential backoff steps after initial 1 min lock: 2, 4, 8, 16, 32, 60, and still capped at 60 min
+      const expectedMinutes = [2, 4, 8, 16, 32, 60, 60];
+      let prevLockWaitMs = 60_000;
+      for (let step = 0; step < expectedMinutes.length; step++) {
+        testMock.timers.setTime(Date.now() + prevLockWaitMs);
+        const failJar = new CookieJar();
+        await call(restarted.baseUrl, '/api/auth/login', {
+          method: 'POST',
+          headers: { Origin: publicUrl, 'X-Forwarded-For': `10.0.2.${step + 1}` },
+          jar: failJar,
+          json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+        });
+        const failRes = await call(restarted.baseUrl, '/api/auth/2fa/totp/verify', {
+          method: 'POST',
+          headers: { Origin: publicUrl, 'X-Forwarded-For': `10.0.2.${step + 1}` },
+          jar: failJar,
+          json: { code: '000000' },
+        });
+        assert.equal(failRes.status, 401);
+
+        // Immediately verify next request sees expected backoff seconds
+        const checkLock = await call(restarted.baseUrl, '/api/auth/2fa/totp/verify', {
+          method: 'POST',
+          headers: { Origin: publicUrl, 'X-Forwarded-For': `10.0.3.${step + 1}` },
+          jar: failJar,
+          json: { code: '000000' },
+        });
+        assert.equal(checkLock.status, 429);
+        assert.equal(checkLock.data.retryAfter, expectedMinutes[step] * 60);
+        prevLockWaitMs = expectedMinutes[step] * 60 * 1000;
+      }
+
+      // After final 60-min lock expires, valid verification succeeds and resets counter (plus unused recovery code wasn't consumed while locked)
+      testMock.timers.setTime(Date.now() + 60 * 60 * 1000 + 1_000);
+      const resetJar = new CookieJar();
+      await call(restarted.baseUrl, '/api/auth/login', {
+        method: 'POST',
+        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.4.1' },
+        jar: resetJar,
+        json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+      });
+      const recStillValid = await call(restarted.baseUrl, '/api/auth/2fa/recovery/verify', {
+        method: 'POST',
+        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.4.1' },
+        jar: resetJar,
+        json: { code: ctx.recoveryCodes[0] },
+      });
+      assert.equal(recStillValid.status, 200);
+      assert.equal(recStillValid.data.recoveryCodesRemaining, 9);
+
+      // Single subsequent wrong step-up returns 400 (not 429), proving counter reset to 0
+      const postResetFail = await call(restarted.baseUrl, '/api/auth/2fa/step-up/totp', {
+        method: 'POST',
+        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.4.2' },
+        jar: resetJar,
+        json: { code: '000000' },
+      });
+      assert.equal(postResetFail.status, 400);
+    } finally {
+      testMock.timers.reset();
+    }
+  });
+
+  test('one-call API login path and step-up enforce per-user lockout, do not leak upstream sessions, and ignore discovery calls', async () => {
+    testMock.timers.enable({ apis: ['Date'], now: 1_700_200_000_000 });
+    try {
+      const { baseUrl, secret, recoveryCodes, jar } = await setupUserWithTotp({
+        require2fa: true,
+        trustProxy: 1,
+      });
+      const sessionsBefore = joplinMock.sessions.size;
+
+      // API discovery calls (no totpCode/recoveryCode) never count toward lockout
+      for (let i = 0; i < 6; i++) {
+        const disc = await call(baseUrl, '/api/auth/login', {
+          method: 'POST',
+          headers: { 'X-Forwarded-For': `10.1.0.${i + 1}` },
+          json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+        });
+        assert.equal(disc.status, 401);
+        assert.equal(disc.data.twoFactor?.required, true);
+      }
+
+      // 5 failed second-factor guesses via API login (4 wrong TOTP + 1 wrong recovery) trigger 1-min lockout
+      for (let i = 0; i < 4; i++) {
+        const failTotp = await call(baseUrl, '/api/auth/login', {
+          method: 'POST',
+          headers: { 'X-Forwarded-For': `10.1.1.${i + 1}` },
+          json: { email: DEMO_EMAIL, password: DEMO_PASSWORD, totpCode: '000000' },
+        });
+        assert.equal(failTotp.status, 401);
+      }
+      const failRec = await call(baseUrl, '/api/auth/login', {
+        method: 'POST',
+        headers: { 'X-Forwarded-For': '10.1.1.5' },
+        json: { email: DEMO_EMAIL, password: DEMO_PASSWORD, recoveryCode: 'BBBB-BBBB-BBBB-BBBB' },
+      });
+      assert.equal(failRec.status, 401);
+
+      // While locked: API discovery still returns 401 twoFactor required; API verify calls return 429 & clean upstream sessions
+      const discWhileLocked = await call(baseUrl, '/api/auth/login', {
+        method: 'POST',
+        headers: { 'X-Forwarded-For': '10.1.2.1' },
+        json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+      });
+      assert.equal(discWhileLocked.status, 401);
+
+      const apiLockedTotp = await call(baseUrl, '/api/auth/login', {
+        method: 'POST',
+        headers: { 'X-Forwarded-For': '10.1.2.2' },
+        json: { email: DEMO_EMAIL, password: DEMO_PASSWORD, totpCode: computeTotp(secret, Date.now()) },
+      });
+      assert.equal(apiLockedTotp.status, 429);
+      assert.ok(apiLockedTotp.data.retryAfter > 0 && apiLockedTotp.data.retryAfter <= 60);
+      assert.equal(Number(apiLockedTotp.headers.get('retry-after')), apiLockedTotp.data.retryAfter);
+
+      const apiLockedRec = await call(baseUrl, '/api/auth/login', {
+        method: 'POST',
+        headers: { 'X-Forwarded-For': '10.1.2.3' },
+        json: { email: DEMO_EMAIL, password: DEMO_PASSWORD, recoveryCode: recoveryCodes[0] },
+      });
+      assert.equal(apiLockedRec.status, 429);
+      assert.equal(joplinMock.sessions.size, sessionsBefore, 'locked API logins must close temporary upstream sessions');
+
+      // Advance past lock -> valid API TOTP login succeeds and resets lockout
+      testMock.timers.setTime(Date.now() + 61_000);
+      const apiOk = await call(baseUrl, '/api/auth/login', {
+        method: 'POST',
+        headers: { 'X-Forwarded-For': '10.1.2.4' },
+        json: { email: DEMO_EMAIL, password: DEMO_PASSWORD, totpCode: computeTotp(secret, Date.now()) },
+      });
+      assert.equal(apiOk.status, 200);
+      assert.ok(apiOk.data.sessionId);
+
+      // Step-up failure lockout: 5 wrong step-up checks return 400, 6th returns 429
+      for (let i = 0; i < 5; i++) {
+        const failStep = await call(baseUrl, '/api/auth/2fa/step-up/totp', {
+          method: 'POST',
+          headers: { Origin: baseUrl, 'X-Forwarded-For': `10.1.3.${i + 1}` },
+          jar,
+          json: { code: '000000' },
+        });
+        assert.equal(failStep.status, 400);
+      }
+      const lockedStep = await call(baseUrl, '/api/auth/2fa/step-up/recovery', {
+        method: 'POST',
+        headers: { Origin: baseUrl, 'X-Forwarded-For': '10.1.3.6' },
+        jar,
+        json: { code: recoveryCodes[0] },
+      });
+      assert.equal(lockedStep.status, 429);
+      assert.ok(lockedStep.data.retryAfter > 0 && lockedStep.data.retryAfter <= 60);
+    } finally {
+      testMock.timers.reset();
     }
   });
 });

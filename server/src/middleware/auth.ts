@@ -241,6 +241,7 @@ export async function authenticateSession(req: Request, res: Response): Promise<
       const sessionRecord = store.getSession(sessionId);
       if (activeConfig.cacheDir) {
         if (!sessionRecord) {
+          noteCache.clearCache(sessionId);
           res.status(401).json({ error: 'Unauthorized: Session has expired or is invalid' });
           return false;
         }
