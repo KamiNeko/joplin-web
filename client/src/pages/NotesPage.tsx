@@ -207,6 +207,19 @@ export function NotesPage() {
   };
 
   const isSearchActive = debouncedQuery.length >= 2;
+  const openNoteSummary = useMemo(() => {
+    if (!selectedNoteId) return undefined;
+    return notes?.find((n) => n.id === selectedNoteId) ?? searchResults?.find((n) => n.id === selectedNoteId);
+  }, [selectedNoteId, notes, searchResults]);
+  const openNoteNotebookId =
+    selectedNoteId && !isTrashSelected && !isConflictsSelected
+      ? fullNote && !fullNote.deletedTime && !fullNote.isConflict
+        ? fullNote.notebookId
+        : openNoteSummary && !openNoteSummary.deletedTime && !openNoteSummary.isConflict
+        ? openNoteSummary.notebookId ?? openNoteSummary.parentId ?? null
+        : null
+      : null;
+
   // Remount the list per scope so its filter doesn't carry over to another notebook or tag
   // (the sort choice is stored separately and stays)
   const listKey =
@@ -237,6 +250,7 @@ export function NotesPage() {
       sidebar={({ onCloseMobile }) => (
         <Sidebar
           selectedNotebookId={selectedNotebookId}
+          openNoteNotebookId={openNoteNotebookId}
           selectedTagId={selectedTagId}
           isAllNotesSelected={!selectedNotebookId && !selectedTagId && !isTrashSelected && !isConflictsSelected}
           isTrashSelected={isTrashSelected}
