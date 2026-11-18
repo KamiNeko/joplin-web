@@ -27,13 +27,16 @@ In production the backend also serves the compiled client (`client/dist`) on the
 | `services/search-query.ts` | Parses the search syntax (words, phrases, negation, `tag:`/`notebook:`/`type:`/`iscompleted:` filters) for `note-cache`'s search; see *Search syntax*. |
 | `services/note-writer.ts` | All writes: create/update/trash/restore/purge for notes, notebooks, tags, note-tag links and resources; conflict detection; `getWriteState` (the E2EE guard as a yes/no answer for the client). |
 | `services/item-defaults.ts` | Property sets Joplin desktop writes for new notes, notebooks, tags, note-tag links and resources; used by the writer on create. |
-| `app.ts` | `createApp(config)`: helmet/CSP, CORS, rate limits, origin check, routers, static client. `index.ts` only starts it. |
-| `middleware/auth.ts` | Accepts the session as `Authorization: Bearer` / `X-API-AUTH` (API clients) or the httpOnly `joplin_web_session` cookie (browser); never in the query string, which would leak into logs and referrers. Validates it against Joplin Server and caches the result for `AUTH_CACHE_TTL_MS`; logged-out sessions are cached as invalid. |
-| `middleware/origin-check.ts` | CSRF protection for POST/PUT/DELETE: the `Origin` header must match the request's `Host`/`X-Forwarded-Host`, `PUBLIC_URL` or `CORS_ORIGIN`. Requests without `Origin` (non-browser clients) pass only when they don't use the cookie. |
+| `services/totp.ts` | RFC 6238 TOTP generation and verification (SHA-1, 6 digits, 30 s, ±1 step window, last-accepted step replay rejection), Base32 codec, `otpauth://` URIs, and `qrcode` SVG `data:` URL rendering. |
+| `services/two-factor-store.ts` | Per-user JSON storage (`CACHE_DIR/auth/<ownerKey>.json`, mode `0600`, atomic temp+rename + per-user async mutex), session 2FA binding registry (`sessions.json`), in-memory pending logins (5 min TTL, 5-attempt cap, single-use), salted SHA-256 recovery codes, and 30-day trusted-device tokens. |
+| `services/auth-cookies.ts` | Cookie builders (`joplin_web_session`, `joplin_web_2fa_pending`, `joplin_web_trusted_device` and `__Host-` variants), pending-login promotion, and safe upstream session termination. |
+| `app.ts` | `createApp(config)`: helmet/CSP, CORS, rate limits (`/api/`, `/api/auth/login`, `/api/auth/2fa`), origin check, routers, static client. `index.ts` only starts it. |
+| `middleware/auth.ts` | Accepts the session as `Authorization: Bearer` / `X-API-AUTH` (API clients) or the httpOnly `joplin_web_session` cookie (browser); never in the query string, which would leak into logs and referrers. Validates it against Joplin Server (cached for `AUTH_CACHE_TTL_MS`), enforces `twoFactorPassed` via `TwoFactorStore` when `CACHE_DIR` is enabled, and provides cookie readers for pending 2FA and trusted-device cookies. |
+| `middleware/origin-check.ts` | CSRF protection for POST/PUT/DELETE: the `Origin` header must match the request's `Host`/`X-Forwarded-Host`, `PUBLIC_URL` or `CORS_ORIGIN`. Requests without `Origin` (non-browser clients) pass only when they carry no auth cookies (`hasAuthCookies`, including pending and trusted-device cookies). |
 | `middleware/request-logger.ts` | morgan access log with sensitive query parameters (`auth`, `token`, `password`, …) redacted. |
 | `middleware/error-handler.ts` | Maps errors to JSON responses; 5xx responses carry a generic message only (details are logged). |
-| `config.ts` | Reads the environment (`JOPLIN_SERVER_URL`, `PUBLIC_URL`, `TRUST_PROXY`, `ALLOW_REMOTE_IMAGES`, `COOKIE_SECURE`, `RATE_LIMIT_MAX`, …); exits at startup on invalid values or when `JOPLIN_SERVER_URL` is missing. There is no default server. |
-| `routes/*.ts` | Thin Express 5 routers per resource. Handlers are plain `async` functions: Express 5 forwards rejected promises to the error handler, so they have no try/catch. |
+| `config.ts` | Reads the environment (`JOPLIN_SERVER_URL`, `PUBLIC_URL`, `CACHE_DIR`, `REQUIRE_2FA`, `TRUST_PROXY`, `ALLOW_REMOTE_IMAGES`, `COOKIE_SECURE`, `RATE_LIMIT_MAX`, …); exits at startup on invalid values, missing `JOPLIN_SERVER_URL`, or `REQUIRE_2FA=true` without `CACHE_DIR`. Resolves WebAuthn RP ID/origin from `PUBLIC_URL` (or `http://localhost` outside production). |
+| `routes/*.ts` | Thin Express 5 routers per resource, including `routes/auth.ts` and `routes/two-factor.ts`. Handlers are plain `async` functions: Express 5 forwards rejected promises to the error handler, so they have no try/catch. |
 
 ## Joplin sync protocol
 
@@ -106,14 +109,35 @@ type_: 1
 
 ## REST API (backend → browser)
 
-All routes except `/api/health` and `/api/auth/login` require a session.
+All routes except `/api/health`, `/api/auth/login`, `/api/auth/logout`, and the pending-2FA login/enrollment endpoints under `/api/auth/2fa/*` require a full verified session (or a validated `mustEnroll` pending login where explicitly noted).
 
 | Method | Path | Description |
 | :--- | :--- | :--- |
 | `GET` | `/api/health` | Health check: `{ status, version, commit }` (build metadata only, no configuration) |
-| `POST` | `/api/auth/login` | `{ email, password }` → `{ userId }` and the session cookie: `joplin_web_session` (`HttpOnly; SameSite=Strict; Path=/api`) over HTTP, `__Host-joplin_web_session` (`Secure; Path=/`) over HTTPS. Requests carrying more than one session cookie get 401. Only requests without an `Origin` header (non-browser API clients) also get `sessionId` in the body. |
-| `POST` | `/api/auth/logout` | Ends the session on Joplin Server, drops cached session state and the note cache, clears the cookie |
+| `POST` | `/api/auth/login` | `{ email, password, totpCode?, recoveryCode? }` → sets `joplin_web_session` / `__Host-joplin_web_session` (browser) or returns `{ userId, sessionId }` (API clients without `Origin`). When 2FA is active or `REQUIRE_2FA=true`, browsers without a valid trusted-device cookie receive `{ twoFactor: { required: true, methods, mustEnroll, passkeysAvailable } }` and an httpOnly pending cookie instead of a session cookie; API clients must pass `totpCode` or `recoveryCode` in the same request or receive `401`. Requests carrying duplicate session cookies get `401`. |
+| `POST` | `/api/auth/logout` | Ends an active session or pending 2FA login on Joplin Server, drops cached session state and the note cache, clears session and pending cookies |
 | `GET` | `/api/auth/check` | Validates the session → `{ valid: true, serverHost }` (Joplin Server host and port, for display; visible to every signed-in user) |
+| `GET` | `/api/auth/2fa/status` | `{ persistenceEnabled, require2fa, passkeysAvailable, enrolled: { totp, passkeysCount, recoveryCodesRemaining }, methods, stepUpValid, stepUpExpiresAt }` |
+| `POST` | `/api/auth/2fa/totp/setup` | Generates pending TOTP secret + `otpauthUri` + SVG `qrDataUrl` (`mustEnroll` pending login or step-up session; inactive until confirmed) |
+| `POST` | `/api/auth/2fa/totp/confirm` | Verifies 6-digit `{ code, trustDevice? }` to enable TOTP; generates 10 recovery codes on first factor and promotes a pending login |
+| `POST` | `/api/auth/2fa/totp/verify` | Verifies `{ code, trustDevice? }` against pending login and promotes it to a full session (rejects replayed step) |
+| `DELETE` | `/api/auth/2fa/totp` | Removes TOTP (full session + fresh step-up; returns `400` if removing the last factor while `REQUIRE_2FA=true`) |
+| `POST` | `/api/auth/2fa/passkey/register/options` | Returns `@simplewebauthn/server` registration options (`residentKey: "preferred"`, `userVerification: "preferred"`, `excludeCredentials`) |
+| `POST` | `/api/auth/2fa/passkey/register/verify` | Verifies attestation response (`{ response, name?, trustDevice? }`); generates recovery codes on first factor and promotes a pending login |
+| `POST` | `/api/auth/2fa/passkey/auth/options` | Returns passkey assertion options for the active pending login |
+| `POST` | `/api/auth/2fa/passkey/auth/verify` | Verifies `{ response, trustDevice? }`, enforces monotonic signature counter, promotes pending login |
+| `GET` | `/api/auth/2fa/passkeys` | Lists enrolled passkeys (`{ id, name, createdAt, lastUsedAt }`) |
+| `PUT` | `/api/auth/2fa/passkeys/:id` | Renames a passkey (full session + step-up) |
+| `DELETE` | `/api/auth/2fa/passkeys/:id` | Removes a passkey (full session + step-up; refuses last factor when `REQUIRE_2FA=true`) |
+| `POST` | `/api/auth/2fa/recovery/verify` | Consumes a single-use recovery code (`{ code, trustDevice? }`) and promotes the pending login |
+| `POST` | `/api/auth/2fa/recovery/regenerate` | Replaces all recovery codes with 10 fresh codes (full session + step-up) |
+| `POST` | `/api/auth/2fa/step-up/totp` | Verifies TOTP `{ code }` for an active session to open a 5-minute step-up window |
+| `POST` | `/api/auth/2fa/step-up/passkey/options` | Returns passkey assertion options for an active session's step-up check |
+| `POST` | `/api/auth/2fa/step-up/passkey/verify` | Verifies passkey assertion for an active session to open a 5-minute step-up window |
+| `POST` | `/api/auth/2fa/step-up/recovery` | Consumes a recovery code `{ code }` to open a 5-minute step-up window |
+| `GET` | `/api/auth/2fa/trusted-devices` | Lists active non-expired trusted devices (`{ id, label, createdAt, lastUsedAt, expiresAt, current }`) |
+| `DELETE` | `/api/auth/2fa/trusted-devices` | Revokes all trusted devices for the user and clears the trusted-device cookie (full session + step-up) |
+| `DELETE` | `/api/auth/2fa/trusted-devices/:id` | Revokes one trusted device (full session + step-up; clears cookie if current) |
 | `GET` | `/api/account/write-state` | `{ writable: true }`, or `{ writable: false, reason }` when the account is read-only (E2EE); same check as every write |
 | `GET` | `/api/notebooks` | Nested notebook tree with note counts |
 | `GET` | `/api/notebooks/trash` | Trashed notebooks (top of each trashed subtree) with note and sub-notebook counts |
@@ -164,13 +188,51 @@ Filter values may be quoted; tag and notebook names must match the whole title, 
 ### Sessions
 
 - The browser never sees the token: it lives in the httpOnly cookie. On startup the client calls `/api/auth/check`; only the email address (for display) is kept in `localStorage`.
-- Rate limits per client address and 15 minutes: `RATE_LIMIT_MAX` requests on `/api/` (default 1000), 30 login attempts. A 429 carries `Retry-After`.
+- Rate limits per client address and 15 minutes: `RATE_LIMIT_MAX` requests on `/api/` (default 1000), 30 login attempts on `/api/auth/login`, and 30 mutating (`POST`/`PUT`/`DELETE`) requests on `/api/auth/2fa`. A 429 carries `Retry-After`.
 - `TRUST_PROXY` sets Express' `trust proxy`, so `req.ip` (rate limits, logs) and `req.secure` (cookie `Secure` flag) reflect the client behind a reverse proxy. Off by default, so a directly exposed instance can't be fooled by a forged `X-Forwarded-For`.
 - Logout (client): unmounts the notes UI so open editors flush their changes, waits for pending writes, calls `/api/auth/logout`, then clears the TanStack Query cache and revokes cached attachment URLs. Login also clears the query cache.
 
+### Two-factor authentication
+
+```mermaid
+flowchart TD
+    PW["POST /api/auth/login<br/>Email + password verified upstream"] --> Check2FA{"User has 2FA or<br/>REQUIRE_2FA=true?"}
+    Check2FA -- No --> Full["Full session<br/>Set session cookie"]
+    Check2FA -- Yes --> ClientType{"Origin header?"}
+    ClientType -- "Missing (API client)" --> InlineCode{"Valid totpCode /<br/>recoveryCode?"}
+    InlineCode -- Yes --> Full
+    InlineCode -- No --> EndUp401["End upstream session<br/>401 twoFactor required"]
+    ClientType -- "Present (Browser)" --> Trusted{"Valid trusted-device<br/>cookie & enrolled?"}
+    Trusted -- Yes --> FullNoStepUp["Full session<br/>No step-up grace"]
+    Trusted -- No --> Pending["Pending login in memory + pending cookie<br/>5 min TTL · max 5 attempts · single-use"]
+    Pending --> Challenge{"mustEnroll?"}
+    Challenge -- Yes --> Enroll["Enroll TOTP or Passkey<br/>Generate 10 recovery codes"]
+    Challenge -- No --> Verify["Verify TOTP, Passkey, or Recovery Code"]
+    Enroll -- Success --> Full
+    Verify -- Success --> Full
+    Pending -- "Cancel / Expiry / 5 failures" --> EndUp["Delete pending record<br/>End upstream session"]
+```
+
+- **Login state machine:**
+  - When password authentication succeeds against Joplin Server, `POST /api/auth/login` loads `CACHE_DIR/auth/<ownerKey>.json` (if `CACHE_DIR` is configured).
+  - If 2FA is disabled for the user and `REQUIRE_2FA` is `false`, a full session is recorded immediately.
+  - If 2FA applies, browser logins (requests with an `Origin` header) with a valid `joplin_web_trusted_device` cookie and already-enrolled factor receive a full session (`twoFactorPassed: true`, `lastSecondFactorAt: null` so sensitive Settings actions still ask for step-up verification).
+  - Otherwise, browser logins do **not** receive a session cookie. The upstream Joplin session id stays server-side in a `PendingLogin` entry (`5 min` TTL, max `5` attempts, single-use `consumed` + `inFlight` lock) keyed by SHA-256 of a random token stored in the httpOnly `joplin_web_2fa_pending` / `__Host-joplin_web_2fa_pending` cookie. Cancelling (`POST /api/auth/logout`), exceeding 5 failed attempts, or timing out drops the pending record and terminates the upstream Joplin session (`deleteSession`).
+  - Once TOTP, WebAuthn passkey assertion, recovery code verification, or mandatory enrollment succeeds, `promotePendingLogin` deletes the pending entry, records the verified session in `TwoFactorStore`, promotes the httpOnly session cookie, clears the pending cookie, and optionally issues a 30-day trusted-device cookie.
+  - Non-browser API clients (no `Origin` header, no auth cookies) can pass `totpCode` or `recoveryCode` in `POST /api/auth/login` for single-call authentication; otherwise `401` is returned and the temporary upstream session is closed immediately.
+- **Session binding & step-up:** `CACHE_DIR/auth/sessions.json` maps `sha256(sessionId)` to `{ userId, email, createdAt, twoFactorPassed, lastSecondFactorAt, lastAccessedAt }`. `authenticateSession` refuses requests against `CACHE_DIR` unless a matching verified session exists in `sessions.json`, preventing raw Joplin Server tokens from bypassing Joplin Web's 2FA. When a user enrolls their first factor from Settings, pre-enrollment unverified sessions for that user are revoked. Modifying TOTP, passkeys, recovery codes, or trusted devices from Settings requires `lastSecondFactorAt` within 5 minutes (`403 { stepUpRequired: true, methods }`). When `REQUIRE_2FA=true`, removing the last primary factor (TOTP or final passkey) is refused with `400`.
+- **Storage layout & security invariants (`CACHE_DIR/auth/`):**
+  - Directory mode `0700`; all JSON writes use temp files in the same directory + `chmod 0600` + `rename` (`atomicWriteJson`) serialized through per-user async mutexes (`withUserLock`).
+  - `<ownerKey>` is `userId` when matching `^[A-Za-z0-9_-]{1,128}$` and lowercase `sha256(userId)` otherwise. Malformed or unreadable user files fail closed rather than falling back to an empty record.
+  - `<ownerKey>.json` (`version: 1`) stores `totp: { secret, createdAt, lastUsedStep } | null` (RFC 6238 SHA-1, 6 digits, 30 s, ±1 step window, monotonically increasing `lastUsedStep`), `passkeys: [{ credentialID, publicKey, counter, transports?, name, createdAt, lastUsedAt }]` (verified via `@simplewebauthn/server`; enforces counter growth whenever `counter > 0 || newCounter > 0`), `recoverySalt` + `recoveryCodes: [{ hash, usedAt }]` (10 × 80-bit codes hashed with per-user salted SHA-256), and `trustedDevices: [{ id, tokenHash, label, createdAt, lastUsedAt, expiresAt }]` (capped at 50 active devices, expired entries pruned on write).
+  - Secrets, `otpauth://` URIs, QR URLs, recovery codes, raw tokens, and WebAuthn assertions are never written to logs. TOTP QR codes are rendered with `qrcode` as `data:image/svg+xml;base64,...` images so helmet's strict `script-src 'self'` CSP remains untouched.
+  - WebAuthn Relying Party config comes strictly from `PUBLIC_URL` (`rpID = url.hostname`, `expectedOrigin = url.origin`); outside `NODE_ENV=production`, `http://localhost` origins are also allowed when `PUBLIC_URL` is unset.
+
 ## Frontend (`client/src`)
 
-- `lib/api.ts`: fetch wrapper (`credentials: "include"`, `referrerPolicy: "same-origin"` so the CSRF check gets a real `Origin`). Every request outcome feeds `lib/connection.ts` (pending writes, last update, last network/5xx error, session expiry). A 401 on an authenticated request marks the session expired and the "Session expired" dialog sends the user to `/login`, which returns to the same page; login and session checks show the server's error message.
+- `lib/api.ts`: fetch wrapper (`credentials: "include"`, `referrerPolicy: "same-origin"` so the CSRF check gets a real `Origin`). Every request outcome feeds `lib/connection.ts` (pending writes, last update, last network/5xx error, session expiry). A 401 on an authenticated request marks the session expired and the "Session expired" dialog sends the user to `/login`, which returns to the same page; login and session checks show the server's error message. Also wraps `/api/auth/2fa/*` calls (`stepUpRequired`, `expired` helpers).
+- `components/auth/LoginForm.tsx` + `components/auth/RecoveryCodesPanel.tsx` + `lib/webauthn.ts`: multi-step login UI handling password submission, second-factor challenge (WebAuthn passkey assertion via `@simplewebauthn/browser` when supported & configured, 6-digit TOTP, one-time recovery code, 30-day "Trust this device" toggle, Cancel), mandatory enrollment under `REQUIRE_2FA` (TOTP QR SVG + manual key or passkey registration), and one-time recovery code display (copy / `.txt` download / confirmation).
+- `components/auth/SecurityDialog.tsx` + `hooks/use-two-factor.ts`: Security settings dialog reachable from the header avatar menu (`Header.tsx`) to enroll/remove authenticator apps, add/rename/remove passkeys (hidden where unsupported), regenerate recovery codes, revoke individual or all trusted devices, and complete inline 5-minute step-up verification when prompted.
 - `lib/connection.ts` + `hooks/use-connection.ts`: the sidebar connection status (`deriveConnectionStatus`), manual refresh (`POST /api/notebooks/refresh`, then invalidate all queries) and the refresh on tab focus / visibility / `online`, throttled to 30 s. Both skip `["note", id]` queries of notes whose editor has unsaved edits (`setNoteUnsaved`).
 - `lib/drafts.ts`: unsaved editor text in `localStorage` (`joplin-draft:<noteId>`, with the `baseUpdatedTime` it was based on and its owner, email + Joplin Server host). Written on every edit; removed after a successful save, on logout, on *Sign out and discard*, after 7 days, and on login when the owner differs. The viewer offers to restore a draft that differs from the server text and blocks editing until the user restores or discards it; a restored draft is saved with its original base, so conflict detection still applies.
 - `hooks/use-write-state.ts`: `useWriteState()` reads `/api/account/write-state` (refetched with every other query on refresh; counts as writable while unknown, the server still refuses). `NotesPage` passes `readOnly` down: the layout shows a "Read-only" banner with the server's reason, and the sidebar, note list, viewer and trash hide editing, creating, to-do toggles, tags, trash actions and (with the editor) uploads. Encrypted notes, notebooks and tags (`encrypted: true`) are shown with a lock and get no actions even on a writable account. Any write refused with `422` (mutations via the `MutationCache`, editor saves via `use-note-saver`) invalidates the write state; the editor shows the server's message inline ("Not saved. …") and does not retry a `422`.
