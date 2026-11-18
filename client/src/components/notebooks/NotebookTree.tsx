@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Notebook } from "@/lib/types";
+import { collectNotebookIds, findNotebookAncestors } from "@/lib/notebooks";
 import { ChevronRight, Folder, FolderInput, FolderOpen, FolderPlus, Lock, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import {
   DropdownMenu,
@@ -10,13 +11,45 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { ROW_ACTION_VISIBILITY } from "@/lib/ui-constants";
+import { EXPANDED_NOTEBOOKS_STORAGE_KEY, ROW_ACTION_VISIBILITY } from "@/lib/ui-constants";
 
 export type NotebookAction = "create-child" | "rename" | "move" | "delete";
+
+const EMPTY_STRING_SET: ReadonlySet<string> = new Set();
+const expandedListeners = new Set<() => void>();
+
+function loadExpandedNotebooks(): Set<string> {
+  try {
+    const raw = localStorage.getItem(EXPANDED_NOTEBOOKS_STORAGE_KEY);
+    if (!raw) return new Set();
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((item): item is string => typeof item === "string" && item.length > 0));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveExpandedNotebooks(ids: ReadonlySet<string>, notify = true) {
+  try {
+    localStorage.setItem(EXPANDED_NOTEBOOKS_STORAGE_KEY, JSON.stringify([...ids]));
+  } catch {
+    // storage unavailable
+  }
+  if (notify) expandedListeners.forEach((cb) => cb());
+}
+
+function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const item of a) if (!b.has(item)) return false;
+  return true;
+}
 
 interface NotebookTreeProps {
   notebooks: Notebook[];
   selectedNotebookId?: string | null;
+  /** Notebook containing the currently open note, so its ancestors expand even outside its folder */
+  openNoteNotebookId?: string | null;
   onSelectNotebook: (id: string) => void;
   /** Enables the per-notebook actions menu (never shown for encrypted notebooks, which can't be changed here) */
   onNotebookAction?: (action: NotebookAction, notebook: Notebook) => void;
@@ -26,6 +59,8 @@ interface NotebookTreeProps {
 interface NotebookItemProps {
   notebook: Notebook;
   selectedNotebookId?: string | null;
+  expandedIds: ReadonlySet<string>;
+  onToggleExpand: (id: string) => void;
   onSelectNotebook: (id: string) => void;
   onNotebookAction?: (action: NotebookAction, notebook: Notebook) => void;
   depth: number;
@@ -34,6 +69,8 @@ interface NotebookItemProps {
 function NotebookItem({
   notebook,
   selectedNotebookId,
+  expandedIds,
+  onToggleExpand,
   onSelectNotebook,
   onNotebookAction,
   depth,
@@ -41,11 +78,11 @@ function NotebookItem({
   const [menuOpen, setMenuOpen] = useState(false);
   const hasChildren = Boolean(notebook.children && notebook.children.length > 0);
   const isSelected = selectedNotebookId === notebook.id;
-  const [isOpen, setIsOpen] = useState<boolean>(true);
+  const isOpen = expandedIds.has(notebook.id);
 
   const toggleOpen = (e: React.MouseEvent) => {
     e.stopPropagation();
-    setIsOpen((prev) => !prev);
+    onToggleExpand(notebook.id);
   };
 
   const handleSelect = () => {
@@ -74,7 +111,7 @@ function NotebookItem({
           <button
             type="button"
             onClick={toggleOpen}
-            className="p-0.5 mr-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-transform shrink-0"
+            className="p-0.5 mr-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-transform shrink-0 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sidebar-ring"
             aria-label={`${isOpen ? "Collapse" : "Expand"} ${title}`}
             aria-expanded={isOpen}
           >
@@ -176,6 +213,8 @@ function NotebookItem({
               key={child.id}
               notebook={child}
               selectedNotebookId={selectedNotebookId}
+              expandedIds={expandedIds}
+              onToggleExpand={onToggleExpand}
               onSelectNotebook={onSelectNotebook}
               onNotebookAction={onNotebookAction}
               depth={depth + 1}
@@ -187,13 +226,99 @@ function NotebookItem({
   );
 }
 
+/**
+ * Collapsible notebook tree: collapsed by default, auto-expands ancestors of the active
+ * notebook or open note's notebook, and persists explicit toggle choices in localStorage.
+ */
 export function NotebookTree({
   notebooks,
   selectedNotebookId,
+  openNoteNotebookId,
   onSelectNotebook,
   onNotebookAction,
   depth = 0,
 }: NotebookTreeProps) {
+  const [persistedExpanded, setPersistedExpanded] = useState<Set<string>>(loadExpandedNotebooks);
+
+  useEffect(() => {
+    const sync = () => {
+      const latest = loadExpandedNotebooks();
+      setPersistedExpanded((prev) => (setsEqual(prev, latest) ? prev : latest));
+    };
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === EXPANDED_NOTEBOOKS_STORAGE_KEY || e.key === null) sync();
+    };
+    expandedListeners.add(sync);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      expandedListeners.delete(sync);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
+
+  const validIds = useMemo(() => collectNotebookIds(notebooks), [notebooks]);
+
+  // Drop stored ids for notebooks that no longer exist once the tree has loaded
+  useEffect(() => {
+    if (notebooks.length === 0) return;
+    const pruned = new Set([...persistedExpanded].filter((id) => validIds.has(id)));
+    if (setsEqual(pruned, persistedExpanded)) return;
+    saveExpandedNotebooks(pruned, false);
+  }, [notebooks.length, persistedExpanded, validIds]);
+
+  const activeAncestors = useMemo(() => {
+    const ids = new Set<string>();
+    for (const id of findNotebookAncestors(notebooks, selectedNotebookId)) ids.add(id);
+    for (const id of findNotebookAncestors(notebooks, openNoteNotebookId)) ids.add(id);
+    return ids;
+  }, [notebooks, selectedNotebookId, openNoteNotebookId]);
+
+  const activeContextKey = useMemo(
+    () => `${selectedNotebookId ?? ""}|${openNoteNotebookId ?? ""}|${[...activeAncestors].sort().join(",")}`,
+    [selectedNotebookId, openNoteNotebookId, activeAncestors]
+  );
+  const [prevContextKey, setPrevContextKey] = useState(activeContextKey);
+  const [sessionCollapsed, setSessionCollapsed] = useState<ReadonlySet<string>>(EMPTY_STRING_SET);
+  if (prevContextKey !== activeContextKey) {
+    setPrevContextKey(activeContextKey);
+    if (sessionCollapsed.size > 0) setSessionCollapsed(EMPTY_STRING_SET);
+  }
+
+  const expandedIds = useMemo(() => {
+    const next = new Set<string>();
+    for (const id of persistedExpanded) {
+      if (validIds.has(id)) next.add(id);
+    }
+    for (const id of activeAncestors) {
+      if (!sessionCollapsed.has(id)) next.add(id);
+    }
+    return next;
+  }, [persistedExpanded, validIds, activeAncestors, sessionCollapsed]);
+
+  const handleToggleExpand = (id: string) => {
+    if (expandedIds.has(id)) {
+      const nextPersisted = new Set([...persistedExpanded].filter((item) => item !== id && validIds.has(item)));
+      saveExpandedNotebooks(nextPersisted);
+      setPersistedExpanded(nextPersisted);
+      if (activeAncestors.has(id)) {
+        const nextCollapsed = new Set(sessionCollapsed);
+        nextCollapsed.add(id);
+        setSessionCollapsed(nextCollapsed);
+      }
+      return;
+    }
+
+    const nextPersisted = new Set([...persistedExpanded].filter((item) => validIds.has(item)));
+    nextPersisted.add(id);
+    saveExpandedNotebooks(nextPersisted);
+    setPersistedExpanded(nextPersisted);
+    if (sessionCollapsed.has(id)) {
+      const nextCollapsed = new Set(sessionCollapsed);
+      nextCollapsed.delete(id);
+      setSessionCollapsed(nextCollapsed);
+    }
+  };
+
   if (!notebooks || notebooks.length === 0) {
     return (
       <div className="px-3 py-2 text-xs text-muted-foreground italic">
@@ -209,6 +334,8 @@ export function NotebookTree({
           key={notebook.id}
           notebook={notebook}
           selectedNotebookId={selectedNotebookId}
+          expandedIds={expandedIds}
+          onToggleExpand={handleToggleExpand}
           onSelectNotebook={onSelectNotebook}
           onNotebookAction={onNotebookAction}
           depth={depth}

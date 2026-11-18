@@ -476,6 +476,19 @@ export function NotesPage() {
     organizeStatus?.enabled && !readOnly && !isTrashSelected && !isConflictsSelected
   );
 
+  const openNoteSummary = useMemo(() => {
+    if (!selectedNoteId) return undefined;
+    return notes?.find((n) => n.id === selectedNoteId) ?? searchResults?.find((n) => n.id === selectedNoteId);
+  }, [selectedNoteId, notes, searchResults]);
+  const openNoteNotebookId =
+    selectedNoteId && !isTrashSelected && !isConflictsSelected
+      ? fullNote && !fullNote.deletedTime && !fullNote.isConflict
+        ? fullNote.notebookId
+        : openNoteSummary && !openNoteSummary.deletedTime && !openNoteSummary.isConflict
+        ? openNoteSummary.notebookId ?? openNoteSummary.parentId ?? null
+        : null
+      : null;
+
   const emptyState = isTrashSelected
     ? trashedNotebooks?.length
       ? { title: "No notes in the trash", description: undefined }
@@ -500,6 +513,7 @@ export function NotesPage() {
       sidebar={({ onCloseMobile }) => (
         <Sidebar
           selectedNotebookId={selectedNotebookId}
+          openNoteNotebookId={openNoteNotebookId}
           selectedTagId={selectedTagId}
           isAllNotesSelected={!selectedNotebookId && !selectedTagId && !isTrashSelected && !isConflictsSelected}
           isTrashSelected={isTrashSelected}

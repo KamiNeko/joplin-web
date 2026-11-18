@@ -11,3 +11,9 @@ export const SEARCH_SYNTAX_HINT =
  */
 export const ROW_ACTION_VISIBILITY =
   "md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100 md:focus-visible:opacity-100 [@media(hover:none)]:opacity-100";
+
+/** localStorage key holding the JSON array of explicitly expanded notebook IDs in the sidebar */
+export const EXPANDED_NOTEBOOKS_STORAGE_KEY = "joplin-sidebar-expanded-notebooks";
+
+/** localStorage key holding whether the sidebar Tags section is explicitly expanded ("true"/"false") */
+export const TAGS_EXPANDED_STORAGE_KEY = "joplin-sidebar-tags-expanded";

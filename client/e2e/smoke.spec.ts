@@ -45,6 +45,8 @@ test.describe("sign-in", () => {
     await signIn(page, page.url());
     await expect(page).toHaveURL(new RegExp(`${roadmap}$`));
     await expect(page.getByRole("heading", { level: 1, name: "Website Relaunch Roadmap" })).toBeVisible();
+    // Ancestors of the opened nested notebook stay expanded automatically
+    await expect(page.getByRole("complementary").first().getByRole("button", { name: /^Projects\b/ })).toBeVisible();
 
     await page.getByRole("button", { name: "User account menu" }).click();
     await page.getByRole("menuitem", { name: "Sign Out" }).click();
@@ -58,16 +60,34 @@ test("browses notebooks and tags of the demo data", async ({ page }) => {
   await signIn(page);
   const sidebar = page.getByRole("complementary").first();
 
+  // Tree and Tags start collapsed (with the tag count badge visible)
+  await expect(sidebar.getByRole("button", { name: /^Recipes/ })).toHaveCount(0);
+  const tagsHeader = sidebar.getByRole("button", { name: /^Tags\b/i });
+  await expect(tagsHeader).toHaveAttribute("aria-expanded", "false");
+  await expect(tagsHeader).toContainText("6");
+  await expect(sidebar.getByRole("button", { name: /^books\b/ })).toHaveCount(0);
+
+  await sidebar.getByRole("button", { name: "Expand Personal" }).click();
   await sidebar.getByRole("button", { name: /^Recipes/ }).click();
   await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-recipes")}/notes/[0-9a-f]{32}$`));
   await expect(listedNote(page, "Weeknight Miso Ramen")).toBeVisible();
   await expect(page.getByText("Website Relaunch Roadmap")).toHaveCount(0);
 
+  // Keyboard toggle expands Tags; persisted Personal stays expanded after reload
+  await tagsHeader.press("Enter");
+  await expect(tagsHeader).toHaveAttribute("aria-expanded", "true");
   await sidebar.getByRole("button", { name: /^books\b/ }).click();
   await expect(page).toHaveURL(new RegExp(`/notes/[0-9a-f]{32}\\?tag=${demoId("tag-books")}$`));
   await expect(listedNote(page, "Book Notes: Deep Work")).toBeVisible();
   await expect(listedNote(page, "Books to Read in 2026")).toBeVisible();
   await expect(page.getByText("Weeknight Miso Ramen")).toHaveCount(0);
+
+  // Direct /tags/:id URL auto-expands Tags even when collapsed in storage
+  await page.evaluate(() => localStorage.removeItem("joplin-sidebar-tags-expanded"));
+  await page.goto(`/tags/${demoId("tag-cooking")}`);
+  await expect(page).toHaveURL(new RegExp(`/notes\\?tag=${demoId("tag-cooking")}$`));
+  await expect(sidebar.getByRole("button", { name: /^Tags\b/i })).toHaveAttribute("aria-expanded", "true");
+  await expect(sidebar.getByRole("button", { name: /^cooking\b/ })).toBeVisible();
 });
 
 test("creates, edits, tags, finds, trashes and restores a note", async ({ page }) => {
@@ -95,12 +115,14 @@ test("creates, edits, tags, finds, trashes and restores a note", async ({ page }
   await page.getByLabel("Add tag").press("Enter");
   await page.getByLabel("Add tag").press("Escape");
   await expect(page.getByRole("button", { name: `#${tag}` })).toBeVisible();
+  await sidebar.getByRole("button", { name: /^Tags\b/i }).click();
   await expect(sidebar.getByRole("button", { name: new RegExp(`^${tag}\\s*, 1 note$`) })).toBeVisible();
 
   // Edits survive a reload, so they reached the (mock) Joplin Server
   await page.reload();
   await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
   await expect(page.getByRole("button", { name: `#${tag}` })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: new RegExp(`^${tag}\\s*, 1 note$`) })).toBeVisible();
 
   // Find it through search from another list
   await sidebar.getByRole("button", { name: "All Notes" }).click();
@@ -243,6 +265,7 @@ test("navigates on a phone between menu, list and note @phone", async ({ page })
 
   await page.getByRole("button", { name: "Toggle navigation menu" }).click();
   const menu = page.getByRole("dialog", { name: "Navigation Menu" });
+  await menu.getByRole("button", { name: "Expand Personal" }).click();
   await menu.getByRole("button", { name: /^Travel/ }).click();
   await expect(menu).toBeHidden();
 
