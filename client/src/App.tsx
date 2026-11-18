@@ -153,6 +153,14 @@ export function App() {
                   }
                 />
                 <Route
+                  path="/organize"
+                  element={
+                    <ProtectedRoute>
+                      <OrganizePage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
                   path="/organize/:jobId"
                   element={
                     <ProtectedRoute>

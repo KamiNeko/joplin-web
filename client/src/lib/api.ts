@@ -6,8 +6,11 @@ import {
   Note,
   OrganizeApplyItemInput,
   OrganizeApplyResponse,
+  OrganizeDeleteResponse,
   OrganizeJobResponse,
   OrganizeJobStatus,
+  OrganizeJobSummary,
+  OrganizeRetryResponse,
   OrganizeStatus,
   OrganizeUndoResponse,
   Tag,
@@ -651,6 +654,28 @@ export async function getOrganizeStatus(): Promise<OrganizeStatus> {
 }
 
 /**
+ * Lists the user's persisted and active Auto-organize jobs, newest first.
+ */
+export async function listOrganizeJobs(): Promise<{ jobs: OrganizeJobSummary[] }> {
+  const data = await request<{ jobs?: unknown } | OrganizeJobSummary[] | null>("/api/organize/jobs");
+  if (Array.isArray(data)) {
+    return { jobs: data };
+  }
+  return {
+    jobs: Array.isArray(data?.jobs) ? (data.jobs as OrganizeJobSummary[]) : [],
+  };
+}
+
+/**
+ * Extracts `runningJobId` from a 409 response when starting or retrying while another job runs.
+ */
+export function getOrganizeRunningJobId(error: unknown): string | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  const details = (error.data as { details?: { runningJobId?: unknown } } | undefined)?.details;
+  return typeof details?.runningJobId === "string" ? details.runningJobId : null;
+}
+
+/**
  * Starts a server-side Auto-organize job for the selected note IDs.
  */
 export async function createOrganizeJob(payload: {
@@ -683,6 +708,24 @@ export async function getOrganizeJob(
 export async function cancelOrganizeJob(jobId: string): Promise<{ id: string; status: OrganizeJobStatus }> {
   return request<{ id: string; status: OrganizeJobStatus }>(`/api/organize/jobs/${encodeURIComponent(jobId)}`, {
     method: "DELETE",
+  });
+}
+
+/**
+ * Deletes a finished or cancelled Auto-organize job from disk and history.
+ */
+export async function deleteOrganizeJob(jobId: string): Promise<OrganizeDeleteResponse> {
+  return request<OrganizeDeleteResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}?remove=1`, {
+    method: "DELETE",
+  });
+}
+
+/**
+ * Re-queues retryable failed items on a job using the current notebook tree and resumes analysis.
+ */
+export async function retryOrganizeJob(jobId: string): Promise<OrganizeRetryResponse> {
+  return request<OrganizeRetryResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}/retry`, {
+    method: "POST",
   });
 }
 

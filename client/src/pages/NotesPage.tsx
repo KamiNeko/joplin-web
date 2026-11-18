@@ -17,7 +17,13 @@ import { BatchNoteItem, BatchNoteResult, NoteListItem } from "@/lib/types";
 import { toast } from "sonner";
 import { noteDisplayTitle } from "@/lib/format";
 import { useWriteState } from "@/hooks/use-write-state";
-import { useCreateOrganizeJob, useOrganizeStatus } from "@/hooks/use-organize";
+import {
+  useCancelOrganizeJob,
+  useCreateOrganizeJob,
+  useOrganizeJobs,
+  useOrganizeStatus,
+} from "@/hooks/use-organize";
+import { getOrganizeRunningJobId } from "@/lib/api";
 import { StartOrganizeDialog } from "@/components/organize/StartOrganizeDialog";
 
 /** The list shown in the middle column: everything, one notebook, one tag, the conflicts or the trash */
@@ -104,11 +110,19 @@ export function NotesPage() {
     notes: NoteListItem[];
     defaultExcludedNotebookId: string | null;
   } | null>(null);
+  const [organizeConflict, setOrganizeConflict] = useState<{
+    runningJobId: string;
+    message: string;
+  } | null>(null);
   const createNote = useCreateNote();
   const updateNote = useUpdateNote();
   const bulkUpdate = useBulkUpdateNotes();
   const { data: organizeStatus } = useOrganizeStatus();
+  const { data: organizeJobsData, refetch: refetchOrganizeJobs } = useOrganizeJobs(
+    Boolean(organizeStatus?.enabled)
+  );
   const createOrganizeJob = useCreateOrganizeJob();
+  const cancelOrganizeJob = useCancelOrganizeJob();
   // An account with end-to-end encryption is read-only: no editing, creating, tagging or uploads
   const { readOnly, reason: readOnlyReason } = useWriteState();
 
@@ -416,20 +430,47 @@ export function NotesPage() {
 
   const handleStartOrganize = async (excludeNotebookIds: string[]) => {
     if (!organizeTargets || organizeTargets.notes.length === 0) return;
+    setOrganizeConflict(null);
     try {
       const { jobId } = await createOrganizeJob.mutateAsync({
         noteIds: organizeTargets.notes.map((n) => n.id),
         excludeNotebookIds,
       });
       setOrganizeTargets(null);
+      setOrganizeConflict(null);
       selection.exitSelectionMode();
       navigate(`/organize/${jobId}`);
     } catch (err) {
+      const runningJobId = getOrganizeRunningJobId(err);
+      if (runningJobId) {
+        setOrganizeConflict({
+          runningJobId,
+          message: err instanceof Error ? err.message : "Another Auto-organize job is currently running.",
+        });
+        void refetchOrganizeJobs();
+        return;
+      }
       toast.error("Could not start Auto-organize", {
         description: err instanceof Error ? err.message : undefined,
       });
     }
   };
+
+  const handleCancelAndStartOrganize = async (runningJobId: string, excludeNotebookIds: string[]) => {
+    if (!organizeTargets || organizeTargets.notes.length === 0) return;
+    try {
+      await cancelOrganizeJob.mutateAsync(runningJobId);
+      setOrganizeConflict(null);
+      await handleStartOrganize(excludeNotebookIds);
+    } catch (err) {
+      toast.error("Could not replace running Auto-organize job", {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    }
+  };
+
+  const organizeJobs = organizeJobsData?.jobs ?? [];
+  const runningOrganizeJob = organizeJobs.find((j) => j.status === "running") ?? null;
 
   const canAutoOrganize = Boolean(
     organizeStatus?.enabled && !readOnly && !isTrashSelected && !isConflictsSelected
@@ -464,8 +505,15 @@ export function NotesPage() {
           isTrashSelected={isTrashSelected}
           isConflictsSelected={isConflictsSelected}
           conflictCount={conflictNotesQuery.data?.length ?? 0}
+          organizeJobCount={organizeJobs.length}
+          runningOrganizeJob={Boolean(runningOrganizeJob)}
           onSelectConflicts={() => {
             handleSelectConflicts();
+            onCloseMobile?.();
+          }}
+          onSelectOrganize={() => {
+            setSearchQuery("");
+            navigate("/organize");
             onCloseMobile?.();
           }}
           onSelectAllNotes={() => {
@@ -596,14 +644,32 @@ export function NotesPage() {
       <StartOrganizeDialog
         open={Boolean(organizeTargets)}
         onOpenChange={(open) => {
-          if (!open && !createOrganizeJob.isPending) {
+          if (!open && !createOrganizeJob.isPending && !cancelOrganizeJob.isPending) {
             setOrganizeTargets(null);
+            setOrganizeConflict(null);
           }
         }}
         selectedCount={organizeTargets?.notes.length ?? 0}
         notebooks={notebooks ?? []}
         defaultExcludedNotebookId={organizeTargets?.defaultExcludedNotebookId ?? null}
-        isPending={createOrganizeJob.isPending}
+        isPending={createOrganizeJob.isPending || cancelOrganizeJob.isPending}
+        previousJobsCount={organizeJobs.length}
+        onViewJobs={() => {
+          setOrganizeTargets(null);
+          setOrganizeConflict(null);
+          selection.exitSelectionMode();
+          navigate("/organize");
+        }}
+        runningJob={runningOrganizeJob}
+        conflictRunningJobId={organizeConflict?.runningJobId ?? null}
+        conflictMessage={organizeConflict?.message ?? null}
+        onViewRunningJob={(runningJobId) => {
+          setOrganizeTargets(null);
+          setOrganizeConflict(null);
+          selection.exitSelectionMode();
+          navigate(`/organize/${runningJobId}`);
+        }}
+        onCancelAndStart={(runningJobId, excludeIds) => void handleCancelAndStartOrganize(runningJobId, excludeIds)}
         onConfirm={(excludeIds) => void handleStartOrganize(excludeIds)}
       />
     </AppLayout>

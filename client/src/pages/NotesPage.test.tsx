@@ -461,4 +461,84 @@ describe("bulk selection and actions", () => {
       excludeNotebookIds: [work.id],
     });
   });
+
+  it("shows Auto-organize in sidebar when jobs exist and offers Cancel the running job and start on 409", async () => {
+    const runningId = "run1234567890abcdef1234567890abc";
+    const newId = "new1234567890abcdef1234567890abc";
+    let runningCancelled = false;
+
+    const calls = mockNotesApi((call) => {
+      if (call.path === "/api/organize/status") {
+        return jsonResponse({ enabled: true, model: "deepseek-flash" });
+      }
+      if (call.method === "GET" && call.path === "/api/organize/jobs") {
+        return jsonResponse({
+          jobs: [
+            {
+              id: "old1234567890abcdef1234567890abc",
+              status: "done",
+              progress: { total: 5, done: 5, failed: 0 },
+              appliedCount: 2,
+              usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 },
+              canUndo: true,
+              createdAt: 1_700_000_000_000,
+              updatedAt: 1_700_000_001_000,
+            },
+          ],
+        });
+      }
+      if (call.method === "POST" && call.path === "/api/organize/jobs") {
+        if (!runningCancelled) {
+          return jsonResponse(
+            {
+              error: `Another Auto-organize job (${runningId}) is already running.`,
+              details: { runningJobId: runningId },
+            },
+            409
+          );
+        }
+        return jsonResponse({ jobId: newId }, 201);
+      }
+      if (call.method === "DELETE" && call.path === `/api/organize/jobs/${runningId}`) {
+        runningCancelled = true;
+        return jsonResponse({ id: runningId, status: "cancelled" });
+      }
+      return undefined;
+    });
+
+    renderWithProviders(
+      <>
+        <Routes>
+          <Route path="/notebooks/:id" element={<NotesPage />} />
+          <Route path="/organize" element={<div>Organize List</div>} />
+          <Route path="/organize/:jobId" element={<div>Organize View</div>} />
+        </Routes>
+        <LocationProbe />
+      </>,
+      { route: `/notebooks/${work.id}` }
+    );
+
+    await noteRow("Roadmap");
+    const orgSidebarBtn = await sidebar().findByRole("button", { name: /^Auto-organize/ });
+    expect(orgSidebarBtn).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Select" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select all (2)" }));
+    const bar = screen.getByRole("region", { name: "Bulk actions" });
+    fireEvent.click(await within(bar).findByRole("button", { name: "Auto-organize" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("button", { name: "Previous jobs (1)" })).toBeTruthy();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start organizing (2)" }));
+
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert.textContent).toContain("Another Auto-organize job");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel the running job and start" }));
+
+    await waitFor(() => expect(location()).toBe(`/organize/${newId}`));
+    expect(calls.some((c) => c.method === "DELETE" && c.path === `/api/organize/jobs/${runningId}`)).toBe(true);
+    expect(calls.filter((c) => c.method === "POST" && c.path === "/api/organize/jobs")).toHaveLength(2);
+  });
 });

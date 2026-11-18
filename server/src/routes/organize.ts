@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import { organizerService, OrganizerService } from '../services/organizer.js';
+import { isTrueFlag } from './query.js';
 
 export function createOrganizeRouter(service: OrganizerService = organizerService): Router {
   const router = Router();
@@ -14,6 +15,14 @@ export function createOrganizeRouter(service: OrganizerService = organizerServic
    */
   router.get('/status', (req, res) => {
     res.status(200).json(service.getStatus(req.sessionId!));
+  });
+
+  /**
+   * GET /api/organize/jobs
+   * Lists persisted and active Auto-organize jobs for the current user, newest first.
+   */
+  router.get('/jobs', (req, res) => {
+    res.status(200).json(service.listJobs(req.sessionId!));
   });
 
   /**
@@ -57,10 +66,24 @@ export function createOrganizeRouter(service: OrganizerService = organizerServic
 
   /**
    * DELETE /api/organize/jobs/:id
-   * Cancels a running organize job.
+   * Cancels a running organize job, or deletes a finished job when `?remove=1` is passed.
    */
   router.delete('/jobs/:id', async (req, res) => {
+    if (isTrueFlag(req.query.remove)) {
+      const result = await service.deleteJob(req.sessionId!, req.params.id);
+      res.status(200).json(result);
+      return;
+    }
     const result = await service.cancelJob(req.sessionId!, req.params.id);
+    res.status(200).json(result);
+  });
+
+  /**
+   * POST /api/organize/jobs/:id/retry
+   * Re-queues retryable failed items using the current notebook tree and resumes the job.
+   */
+  router.post('/jobs/:id/retry', async (req, res) => {
+    const result = await service.retryJob(req.sessionId!, req.params.id);
     res.status(200).json(result);
   });
 

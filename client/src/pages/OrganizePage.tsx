@@ -1,4 +1,4 @@
-import { useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   AlertTriangle,
@@ -7,10 +7,13 @@ import {
   Check,
   ExternalLink,
   Folder,
+  History,
   Loader2,
   Plus,
+  RotateCcw,
   Sparkles,
   Tag as TagIcon,
+  Trash2,
   Undo2,
   X,
   XCircle,
@@ -20,6 +23,7 @@ import { AppLayout } from "@/components/layout/AppLayout";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { NotebookPicker } from "@/components/notebooks/NotebookPicker";
 import { TagAutocompleteInput } from "@/components/tags/TagAutocompleteInput";
+import { ConfirmDialog } from "@/components/common/Dialogs";
 import { QueryError } from "@/components/common/QueryError";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -34,15 +38,20 @@ import {
   ORGANIZE_PAGE_SIZE,
   useApplyOrganizeJob,
   useCancelOrganizeJob,
+  useDeleteOrganizeJob,
   useOrganizeJob,
+  useOrganizeJobs,
+  useRetryOrganizeJob,
   useUndoOrganizeJob,
 } from "@/hooks/use-organize";
+import { formatRelativeTime } from "@/lib/format";
 import { buildNotebookPathMap } from "@/lib/notebooks";
-import { OrganizeApplyItemInput, OrganizeJobItem } from "@/lib/types";
+import { OrganizeApplyItemInput, OrganizeJobItem, OrganizeJobSummary } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type OrganizeFilter = "all" | "high" | "moves";
+type OrganizeFilter = "all" | "very-high" | "high" | "moves";
 
+const VERY_HIGH_CONFIDENCE_THRESHOLD = 0.85;
 const HIGH_CONFIDENCE_THRESHOLD = 0.7;
 
 interface RowEdit {
@@ -77,8 +86,13 @@ function useIsDesktop(): boolean {
 
 export function OrganizePage() {
   const { jobId } = useParams<{ jobId: string }>();
+  return <OrganizePageContent key={jobId ?? "list"} jobId={jobId} />;
+}
+
+function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
   const navigate = useNavigate();
   const isDesktop = useIsDesktop();
+  const isListView = !jobId;
 
   const [offset, setOffset] = useState(0);
   const [filter, setFilter] = useState<OrganizeFilter>("all");
@@ -88,16 +102,23 @@ export function OrganizePage() {
   const [openNotebookRow, setOpenNotebookRow] = useState<string | null>(null);
   const [openTagRow, setOpenTagRow] = useState<string | null>(null);
   const [tagDraft, setTagDraft] = useState("");
+  const [jobToDelete, setJobToDelete] = useState<OrganizeJobSummary | null>(null);
 
   const { readOnly, reason: readOnlyReason } = useWriteState();
   const { data: notebooks } = useNotebooks();
   const { data: allTags } = useTags();
   const { data: conflictNotes } = useConflictNotes();
 
+  const jobsQuery = useOrganizeJobs(true);
+  const organizeJobs = jobsQuery.data?.jobs ?? [];
+  const hasRunningJob = organizeJobs.some((j) => j.status === "running");
+
   const jobQuery = useOrganizeJob(jobId, { offset, limit: ORGANIZE_PAGE_SIZE });
   const { data: job, isLoading, error } = jobQuery;
 
   const cancelMutation = useCancelOrganizeJob(jobId);
+  const deleteMutation = useDeleteOrganizeJob();
+  const retryMutation = useRetryOrganizeJob(jobId);
   const applyMutation = useApplyOrganizeJob(jobId);
   const undoMutation = useUndoOrganizeJob(jobId);
 
@@ -124,31 +145,46 @@ export function OrganizePage() {
     };
   };
 
-  const isRowChecked = (item: OrganizeJobItem): boolean => {
-    if (item.status !== "done" || !item.suggestion) return false;
-    if (Object.prototype.hasOwnProperty.call(selectionOverrides, item.noteId)) {
-      return Boolean(selectionOverrides[item.noteId]);
-    }
-    if (item.applied) return false;
-    return item.suggestion.confidence >= HIGH_CONFIDENCE_THRESHOLD;
-  };
+  const isRowChecked = useCallback(
+    (item: OrganizeJobItem): boolean => {
+      if (item.status !== "done" || !item.suggestion) return false;
+      if (Object.prototype.hasOwnProperty.call(selectionOverrides, item.noteId)) {
+        return Boolean(selectionOverrides[item.noteId]);
+      }
+      if (item.applied) return false;
+      return item.suggestion.confidence >= HIGH_CONFIDENCE_THRESHOLD;
+    },
+    [selectionOverrides]
+  );
 
   const items = useMemo(() => job?.items ?? [], [job?.items]);
 
   const counts = useMemo(() => {
+    let veryHigh = 0;
     let high = 0;
     let moves = 0;
     for (const item of items) {
       if (item.status !== "done" || !item.suggestion) continue;
+      if (item.suggestion.confidence >= VERY_HIGH_CONFIDENCE_THRESHOLD) veryHigh++;
       if (item.suggestion.confidence >= HIGH_CONFIDENCE_THRESHOLD) high++;
       const targetNb = edits[item.noteId]?.notebookId ?? item.suggestion.notebookId;
       if (targetNb && targetNb !== item.currentNotebookId) moves++;
     }
-    return { all: items.length, high, moves };
+    return { all: items.length, veryHigh, high, moves };
   }, [items, edits]);
+
+  const retryableFailedCount =
+    typeof job?.retryableFailedCount === "number"
+      ? job.retryableFailedCount
+      : items.filter((item) => item.status === "failed" && !item.skipped).length;
 
   const filteredItems = useMemo(() => {
     if (filter === "all") return items;
+    if (filter === "very-high") {
+      return items.filter(
+        (item) => item.status === "done" && (item.suggestion?.confidence ?? 0) >= VERY_HIGH_CONFIDENCE_THRESHOLD
+      );
+    }
     if (filter === "high") {
       return items.filter(
         (item) => item.status === "done" && (item.suggestion?.confidence ?? 0) >= HIGH_CONFIDENCE_THRESHOLD
@@ -163,12 +199,22 @@ export function OrganizePage() {
 
   const selectedItems = useMemo(
     () => items.filter((item) => isRowChecked(item)),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [items, selectionOverrides]
+    [items, isRowChecked]
   );
 
   const toggleRow = (noteId: string, nextValue: boolean) => {
     setSelectionOverrides((prev) => ({ ...prev, [noteId]: nextValue }));
+  };
+
+  const selectAllVeryHigh = () => {
+    setSelectionOverrides((prev) => {
+      const next = { ...prev };
+      for (const item of items) {
+        if (item.status !== "done" || item.applied) continue;
+        next[item.noteId] = (item.suggestion?.confidence ?? 0) >= VERY_HIGH_CONFIDENCE_THRESHOLD;
+      }
+      return next;
+    });
   };
 
   const selectAllHighConfidence = () => {
@@ -309,12 +355,36 @@ export function OrganizePage() {
     }
   };
 
-  const handleCancelJob = async () => {
+  const handleCancelJob = async (targetJobId?: string) => {
     try {
-      await cancelMutation.mutateAsync();
+      await cancelMutation.mutateAsync(targetJobId);
       toast.info("Auto-organize cancelled");
     } catch (err) {
       toast.error("Could not cancel job", { description: err instanceof Error ? err.message : undefined });
+    }
+  };
+
+  const handleDeleteJob = async () => {
+    if (!jobToDelete) return;
+    try {
+      await deleteMutation.mutateAsync(jobToDelete.id);
+      setJobToDelete(null);
+      toast.success("Auto-organize job deleted");
+    } catch (err) {
+      toast.error("Could not delete job", { description: err instanceof Error ? err.message : undefined });
+    }
+  };
+
+  const handleRetryFailed = async () => {
+    try {
+      const res = await retryMutation.mutateAsync();
+      toast.success(
+        `Retrying ${res.requeuedCount} failed ${res.requeuedCount === 1 ? "note" : "notes"}`
+      );
+    } catch (err) {
+      toast.error("Could not retry failed items", {
+        description: err instanceof Error ? err.message : undefined,
+      });
     }
   };
 
@@ -346,6 +416,14 @@ export function OrganizePage() {
       );
     }
     if (item.status === "failed") {
+      if (item.skipped) {
+        return (
+          <Badge variant="outline" className="text-[11px] border-border bg-muted/60 text-muted-foreground gap-1">
+            <XCircle className="h-3 w-3" />
+            Skipped
+          </Badge>
+        );
+      }
       return (
         <Badge variant="outline" className="text-[11px] border-destructive/40 bg-destructive/10 text-destructive gap-1">
           <XCircle className="h-3 w-3" />
@@ -355,18 +433,19 @@ export function OrganizePage() {
     }
     const conf = item.suggestion?.confidence ?? 0;
     const pct = Math.round(conf * 100);
+    const isVeryHigh = conf >= VERY_HIGH_CONFIDENCE_THRESHOLD;
     const isHigh = conf >= HIGH_CONFIDENCE_THRESHOLD;
     return (
       <Badge
         variant="outline"
         className={cn(
           "text-[11px] font-mono",
-          isHigh
+          isVeryHigh || isHigh
             ? "border-success/35 bg-success/10 text-success"
             : "border-warning/40 bg-warning/10 text-warning"
         )}
       >
-        {isHigh ? "High" : "Low"} {pct}%
+        {isVeryHigh ? "Very high" : isHigh ? "High" : "Low"} {pct}%
       </Badge>
     );
   };
@@ -513,9 +592,16 @@ export function OrganizePage() {
           isAllNotesSelected={false}
           isTrashSelected={false}
           isConflictsSelected={false}
+          isOrganizeSelected
           conflictCount={conflictNotes?.length ?? 0}
+          organizeJobCount={organizeJobs.length}
+          runningOrganizeJob={hasRunningJob}
           onSelectConflicts={() => {
             navigate("/conflicts");
+            onCloseMobile?.();
+          }}
+          onSelectOrganize={() => {
+            navigate("/organize");
             onCloseMobile?.();
           }}
           onSelectAllNotes={() => {
@@ -541,11 +627,192 @@ export function OrganizePage() {
         />
       )}
     >
+      {isListView ? (
+        <div className="flex h-full w-full flex-col overflow-hidden bg-background">
+          <div className="shrink-0 border-b border-border bg-card/40 px-4 py-3 sm:px-6">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => navigate("/notes")}
+                  className="h-8 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground"
+                >
+                  <ArrowLeft className="h-3.5 w-3.5" />
+                  Back
+                </Button>
+                <div className="flex items-center gap-2 min-w-0">
+                  <Sparkles className="h-4 w-4 text-primary shrink-0" aria-hidden="true" />
+                  <h1 className="text-base sm:text-lg font-bold text-foreground truncate">
+                    Auto-organize jobs
+                  </h1>
+                </div>
+              </div>
+              {organizeJobs.length > 0 && (
+                <span className="text-xs font-mono text-muted-foreground">
+                  {organizeJobs.length} {organizeJobs.length === 1 ? "job" : "jobs"}
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 sm:px-6">
+            {jobsQuery.isLoading ? (
+              <div className="space-y-3">
+                {Array.from({ length: 3 }).map((_, i) => (
+                  <div key={i} className="rounded-xl border border-border p-4 space-y-2">
+                    <Skeleton className="h-4 w-1/3" />
+                    <Skeleton className="h-3 w-2/3" />
+                  </div>
+                ))}
+              </div>
+            ) : jobsQuery.error ? (
+              <QueryError
+                message="Couldn't load Auto-organize jobs"
+                error={jobsQuery.error}
+                onRetry={() => void jobsQuery.refetch()}
+                isRetrying={jobsQuery.isFetching}
+              />
+            ) : organizeJobs.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-16 text-center space-y-3">
+                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted/50 text-muted-foreground">
+                  <Sparkles className="h-6 w-6" />
+                </div>
+                <div className="space-y-1">
+                  <p className="text-sm font-medium text-foreground">No Auto-organize jobs yet</p>
+                  <p className="text-xs text-muted-foreground max-w-sm">
+                    Select notes in any notebook and choose Auto-organize from the bulk bar to get title, notebook, and tag suggestions.
+                  </p>
+                </div>
+                <Button type="button" variant="outline" size="sm" onClick={() => navigate("/notes")}>
+                  Browse notes
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-3 max-w-4xl">
+                {organizeJobs.map((summary) => {
+                  const processed = summary.progress.done + summary.progress.failed;
+                  const total = summary.progress.total;
+                  const pct = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+
+                  return (
+                    <article
+                      key={summary.id}
+                      className="rounded-xl border border-border bg-card/50 p-4 space-y-3"
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="space-y-1 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Link
+                              to={`/organize/${summary.id}`}
+                              className="text-sm font-semibold text-foreground hover:text-primary hover:underline font-mono"
+                            >
+                              Job {summary.id.slice(0, 8)}
+                            </Link>
+                            <Badge
+                              variant="outline"
+                              className={cn(
+                                "text-[11px] capitalize",
+                                summary.status === "running" && "border-primary/40 bg-primary/10 text-primary",
+                                summary.status === "done" && "border-success/35 bg-success/10 text-success",
+                                summary.status === "cancelled" && "border-warning/40 bg-warning/10 text-warning",
+                                summary.status === "failed" && "border-destructive/40 bg-destructive/10 text-destructive"
+                              )}
+                            >
+                              {summary.status}
+                            </Badge>
+                            {summary.createdAt > 0 && (
+                              <span className="text-xs text-muted-foreground">
+                                {formatRelativeTime(summary.createdAt)}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs font-mono text-muted-foreground">
+                            Analysed {processed} / {total}
+                            {summary.progress.failed > 0 ? ` (${summary.progress.failed} failed)` : ""}
+                            {summary.appliedCount > 0 ? ` · ${summary.appliedCount} applied` : ""}
+                            {summary.usage.totalTokens > 0
+                              ? ` · ${summary.usage.totalTokens.toLocaleString()} tokens`
+                              : ""}
+                            {summary.canUndo ? " · Undo available" : ""}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          <Button
+                            asChild
+                            type="button"
+                            size="sm"
+                            variant={summary.status === "running" ? "outline" : "default"}
+                            className="h-8 px-3 text-xs"
+                          >
+                            <Link to={`/organize/${summary.id}`}>
+                              {summary.status === "running" ? "View progress" : "Review"}
+                            </Link>
+                          </Button>
+                          {summary.status === "running" ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              disabled={cancelMutation.isPending}
+                              onClick={() => void handleCancelJob(summary.id)}
+                              className="h-8 px-2.5 text-xs"
+                            >
+                              Cancel
+                            </Button>
+                          ) : (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              disabled={deleteMutation.isPending}
+                              onClick={() => setJobToDelete(summary)}
+                              className="h-8 px-2.5 text-xs text-muted-foreground hover:text-destructive gap-1"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                              Delete
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                        <div
+                          className={cn(
+                            "h-full transition-all duration-300",
+                            summary.status === "failed" ? "bg-destructive" : "bg-primary"
+                          )}
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <ConfirmDialog
+            open={Boolean(jobToDelete)}
+            onOpenChange={(open) => {
+              if (!open && !deleteMutation.isPending) setJobToDelete(null);
+            }}
+            title="Delete Auto-organize job?"
+            description="All saved suggestions and undo history for this job will be removed. Your notes are not changed."
+            confirmLabel="Delete job"
+            destructive
+            isPending={deleteMutation.isPending}
+            onConfirm={() => void handleDeleteJob()}
+          />
+        </div>
+      ) : (
       <div className="flex h-full w-full flex-col overflow-hidden bg-background">
         {/* Top Header & Progress */}
         <div className="shrink-0 border-b border-border bg-card/40 px-4 py-3 sm:px-6 space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5 min-w-0">
+            <div className="flex items-center gap-2 min-w-0">
               <Button
                 type="button"
                 variant="ghost"
@@ -561,6 +828,18 @@ export function OrganizePage() {
               >
                 <ArrowLeft className="h-3.5 w-3.5" />
                 Back
+              </Button>
+              <Button
+                asChild
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-8 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground"
+              >
+                <Link to="/organize">
+                  <History className="h-3.5 w-3.5" aria-hidden="true" />
+                  All jobs
+                </Link>
               </Button>
               <div className="flex items-center gap-2 min-w-0">
                 <Sparkles className="h-4 w-4 text-primary shrink-0" aria-hidden="true" />
@@ -592,6 +871,23 @@ export function OrganizePage() {
                   <span className="text-[11px] font-mono text-muted-foreground/80 hidden sm:inline">
                     · {job.usage.totalTokens.toLocaleString()} tokens
                   </span>
+                )}
+                {job.status !== "running" && retryableFailedCount > 0 && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={retryMutation.isPending || readOnly}
+                    onClick={() => void handleRetryFailed()}
+                    className="h-7 px-2.5 text-xs gap-1"
+                  >
+                    {retryMutation.isPending ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <RotateCcw className="h-3 w-3" />
+                    )}
+                    Retry failed ({retryableFailedCount})
+                  </Button>
                 )}
                 {job.status === "running" && (
                   <Button
@@ -646,6 +942,16 @@ export function OrganizePage() {
                 <Button
                   type="button"
                   size="sm"
+                  variant={filter === "very-high" ? "secondary" : "ghost"}
+                  aria-pressed={filter === "very-high"}
+                  onClick={() => setFilter("very-high")}
+                  className="h-7 px-2.5 text-xs"
+                >
+                  Very high (&gt;= 0.85) ({counts.veryHigh})
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
                   variant={filter === "high" ? "secondary" : "ghost"}
                   aria-pressed={filter === "high"}
                   onClick={() => setFilter("high")}
@@ -666,6 +972,16 @@ export function OrganizePage() {
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={counts.veryHigh === 0 || applyMutation.isPending}
+                  onClick={selectAllVeryHigh}
+                  className="h-8 px-2.5 text-xs"
+                >
+                  Select all very-high
+                </Button>
                 <Button
                   type="button"
                   variant="outline"
@@ -819,7 +1135,9 @@ export function OrganizePage() {
                                 className="h-8 text-xs font-medium"
                               />
                             ) : item.status === "failed" ? (
-                              <p className="text-xs text-destructive">{item.error || "Analysis failed"}</p>
+                              <p className={cn("text-xs", item.skipped ? "text-muted-foreground" : "text-destructive")}>
+                                {item.error || "Analysis failed"}
+                              </p>
                             ) : (
                               <Skeleton className="h-8 w-full" />
                             )}
@@ -961,7 +1279,9 @@ export function OrganizePage() {
                           {item.applyError && <p className="text-xs text-warning">{item.applyError}</p>}
                         </div>
                       ) : item.status === "failed" ? (
-                        <p className="text-xs text-destructive">{item.error || "Analysis failed"}</p>
+                        <p className={cn("text-xs", item.skipped ? "text-muted-foreground" : "text-destructive")}>
+                          {item.error || "Analysis failed"}
+                        </p>
                       ) : (
                         <Skeleton className="h-16 w-full" />
                       )}
@@ -1005,6 +1325,7 @@ export function OrganizePage() {
           )}
         </div>
       </div>
+      )}
     </AppLayout>
   );
 }

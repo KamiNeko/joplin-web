@@ -43,8 +43,8 @@ export class ConflictError extends JoplinApiError {
  * Thrown for invalid write requests (bad ids, encrypted items, wrong item type, ...)
  */
 export class WriteValidationError extends JoplinApiError {
-  constructor(message: string, status = 400) {
-    super(message, status);
+  constructor(message: string, status = 400, details?: unknown) {
+    super(message, status, details);
     this.name = 'WriteValidationError';
   }
 }

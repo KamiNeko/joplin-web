@@ -66,4 +66,48 @@ describe("StartOrganizeDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start organizing (3)" }));
     expect(onConfirm).toHaveBeenCalledWith([id("1"), id("3")]);
   });
+
+  it("shows Previous jobs (N) and running-job warning with Cancel and start option", () => {
+    const onViewJobs = vi.fn();
+    const onViewRunningJob = vi.fn();
+    const onCancelAndStart = vi.fn();
+
+    renderWithProviders(
+      <StartOrganizeDialog
+        open
+        onOpenChange={vi.fn()}
+        selectedCount={4}
+        notebooks={notebooks}
+        defaultExcludedNotebookId={id("1")}
+        previousJobsCount={3}
+        onViewJobs={onViewJobs}
+        runningJob={{
+          id: "runjob1234567890abcdef1234567890",
+          status: "running",
+          progress: { total: 100, done: 42, failed: 3 },
+          appliedCount: 0,
+          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          canUndo: false,
+          createdAt: 1_700_000_000_000,
+          updatedAt: 1_700_000_010_000,
+        }}
+        onViewRunningJob={onViewRunningJob}
+        onCancelAndStart={onCancelAndStart}
+        onConfirm={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Previous jobs (3)" }));
+    expect(onViewJobs).toHaveBeenCalledTimes(1);
+
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toContain("Another Auto-organize job is currently running.");
+    expect(alert.textContent).toContain("45 / 100 notes analysed");
+
+    fireEvent.click(screen.getByRole("button", { name: "View running job" }));
+    expect(onViewRunningJob).toHaveBeenCalledWith("runjob1234567890abcdef1234567890");
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel the running job and start" }));
+    expect(onCancelAndStart).toHaveBeenCalledWith("runjob1234567890abcdef1234567890", [id("1")]);
+  });
 });

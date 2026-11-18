@@ -1,14 +1,17 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { config } from '../config.js';
 import type {
   BatchNoteItem,
   OrganizeApplyItemInput,
   OrganizeApplyResponse,
+  OrganizeDeleteResponse,
   OrganizeJobItem,
   OrganizeJobResponse,
   OrganizeJobStatus,
+  OrganizeJobSummary,
+  OrganizeRetryResponse,
   OrganizeStatus,
   OrganizeSuggestion,
   OrganizeUndoRecord,
@@ -79,7 +82,12 @@ const MAX_TITLE_CHARS = 80;
 const MAX_REASON_CHARS = 240;
 const REQUEST_TIMEOUT_MS = 60_000;
 const PERSIST_DEBOUNCE_MS = 300;
+export const MAX_RETAINED_JOBS = 20;
+const ORGANIZE_INDEX_FILE = 'index.json';
+const OWNER_KEY_RE = /^[A-Za-z0-9_-]+$/;
 const SAFE_JOB_ID_RE = /^[0-9a-f]{32}$|^[0-9a-f-]{16,64}$/i;
+const NON_RETRYABLE_ERROR_RE =
+  /\bskipped\b|\btrashed\b|duplicate copy|^note not found$|^encrypted notes cannot|^conflict copies cannot/i;
 const DOC_EXTENSION_RE = /\.(pdf|png|jpe?g|tiff?|bmp|webp|heic|heif|gif)$/i;
 const SCANNER_TITLE_PATTERNS: RegExp[] = [
   DOC_EXTENSION_RE,
@@ -134,9 +142,36 @@ interface InternalOrganizeJob {
   updatedAt: number;
 }
 
-interface PersistedJobFile {
+interface PersistedJobFileV1 {
   version: 1;
   job: InternalOrganizeJob;
+}
+
+interface PersistedJobFileV2 {
+  version: 2;
+  job: InternalOrganizeJob;
+}
+
+interface PersistedLegacyJobsV2 {
+  version: 2;
+  jobs: InternalOrganizeJob[];
+}
+
+interface PersistedOrganizeIndexFile {
+  version: 2;
+  jobs: OrganizeJobSummary[];
+}
+
+interface OwnerJobState {
+  summaries: OrganizeJobSummary[];
+  loadedJobs: Map<string, InternalOrganizeJob>;
+  lastViewedFinishedJobId: string | null;
+}
+
+interface PersistTimerEntry {
+  ownerKey: string;
+  jobId: string;
+  timer: NodeJS.Timeout;
 }
 
 interface ParsedNotebookSpec {
@@ -146,8 +181,8 @@ interface ParsedNotebookSpec {
 }
 
 export class OrganizeValidationError extends WriteValidationError {
-  constructor(message: string, status = 400) {
-    super(message, status);
+  constructor(message: string, status = 400, details?: unknown) {
+    super(message, status, details);
     this.name = 'OrganizeValidationError';
   }
 }
@@ -269,6 +304,115 @@ function buildNotebookPaths(entry: CacheEntry): {
   }
 
   return { pathById, activeNonEncryptedIds };
+}
+
+function isNotebookTrashed(entry: CacheEntry, notebookId: string): boolean {
+  const seen = new Set<string>();
+  let curId = notebookId;
+  while (curId && !seen.has(curId)) {
+    seen.add(curId);
+    const nb = entry.notebooks.get(curId);
+    if (!nb) return false;
+    if (nb.deletedTime && nb.deletedTime > 0) return true;
+    curId = nb.parentId;
+  }
+  return false;
+}
+
+function resolveNotebookPath(entry: CacheEntry, notebookId: string, pathById: Map<string, string>): string {
+  if (!notebookId) return '';
+  const direct = pathById.get(notebookId);
+  if (direct) return direct;
+  const nb = entry.notebooks.get(notebookId);
+  if (!nb) return '';
+  if (nb.deletedTime > 0 || isNotebookTrashed(entry, notebookId)) {
+    return `${sanitizeLine(nb.title) || 'Trashed Notebook'} (Trashed)`;
+  }
+  return nb.properties.encryption_applied === '1' ? 'Encrypted notebook' : sanitizeLine(nb.title);
+}
+
+function classifyRetryability(
+  item: InternalJobItem,
+  entry: CacheEntry | null
+): { retryable: boolean; reason?: string; liveNote?: RawJoplinItem } {
+  if (item.skipped) {
+    return { retryable: false, reason: item.error || 'Skipped note' };
+  }
+  if (item.error && NON_RETRYABLE_ERROR_RE.test(item.error)) {
+    return { retryable: false, reason: item.error };
+  }
+  if (entry) {
+    const liveNote = entry.notes.get(item.noteId);
+    if (!liveNote) {
+      return { retryable: false, reason: 'Note not found' };
+    }
+    if (liveNote.properties.encryption_applied === '1') {
+      return { retryable: false, reason: 'Encrypted notes cannot be read or organized' };
+    }
+    if (isConflictNote(liveNote)) {
+      return { retryable: false, reason: 'Conflict copies cannot be auto-organized here' };
+    }
+    if (liveNote.deletedTime > 0 || (liveNote.parentId && isNotebookTrashed(entry, liveNote.parentId))) {
+      return { retryable: false, reason: 'Trashed notes cannot be organized' };
+    }
+    return { retryable: true, liveNote };
+  }
+  return { retryable: true };
+}
+
+function computeJobSummary(job: InternalOrganizeJob): OrganizeJobSummary {
+  let done = 0;
+  let failed = 0;
+  let appliedCount = 0;
+  for (const item of job.items) {
+    if (item.status === 'done') done++;
+    else if (item.status === 'failed') failed++;
+    if (item.applied) appliedCount++;
+  }
+  return {
+    id: job.id,
+    status: job.status,
+    ...(job.error ? { error: job.error } : {}),
+    progress: {
+      total: job.items.length,
+      done,
+      failed,
+    },
+    appliedCount,
+    usage: {
+      promptTokens: job.usage?.promptTokens ?? 0,
+      completionTokens: job.usage?.completionTokens ?? 0,
+      totalTokens: job.usage?.totalTokens ?? 0,
+    },
+    canUndo: Boolean(job.lastUndo && job.lastUndo.items.length > 0),
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+  };
+}
+
+function sortSummariesNewestFirst(summaries: OrganizeJobSummary[]): void {
+  summaries.sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id));
+}
+
+function normalizeLoadedJob(raw: InternalOrganizeJob): InternalOrganizeJob {
+  for (const item of raw.items) {
+    if (item.status === 'running') {
+      item.status = 'pending';
+    }
+  }
+  if (!raw.usage) {
+    raw.usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  }
+  if (!Array.isArray(raw.excludeNotebookIds)) {
+    raw.excludeNotebookIds = [];
+  }
+  if (!Array.isArray(raw.allowedNotebookIds)) {
+    raw.allowedNotebookIds = [];
+  }
+  if (raw.lastUndo === undefined) {
+    raw.lastUndo = null;
+  }
+  return raw;
 }
 
 /**
@@ -1114,12 +1258,13 @@ export function createFakeCompletionClient(
 
 export class OrganizerService {
   private deps: OrganizerDeps;
-  private jobs = new Map<string, InternalOrganizeJob>();
+  private owners = new Map<string, OwnerJobState>();
   private activeControllers = new Map<string, AbortController>();
   private activeLoops = new Map<string, Promise<void>>();
+  private activeRunningJobIds = new Map<string, string>();
   private activeIndexes = new Map<string, NoteSimilarityIndex>();
   private activeSessions = new Map<string, string>();
-  private persistTimers = new Map<string, NodeJS.Timeout>();
+  private persistTimers = new Map<string, PersistTimerEntry>();
   private initializedFromDisk = false;
 
   constructor(deps: OrganizerDeps = {}) {
@@ -1130,6 +1275,12 @@ export class OrganizerService {
   public hasSimilarityIndex(sessionId: string): boolean {
     const ownerKey = noteCache.getOwnerKey(sessionId);
     return this.activeIndexes.has(ownerKey);
+  }
+
+  /** Whether a specific job's full item list is currently retained in RAM (helper for tests). */
+  public isJobLoadedInMemory(sessionId: string, jobId: string): boolean {
+    const ownerKey = noteCache.getOwnerKey(sessionId);
+    return Boolean(this.owners.get(ownerKey)?.loadedJobs.has(jobId));
   }
 
   private resolveConfig() {
@@ -1183,76 +1334,366 @@ export class OrganizerService {
     return cacheDir ? join(cacheDir, 'organize') : null;
   }
 
-  private jobFilePath(ownerKey: string): string | null {
+  private ownerJobsDir(ownerKey: string): string | null {
     const dir = this.jobsDir();
-    if (!dir) return null;
-    if (!/^[A-Za-z0-9_-]+$/.test(ownerKey)) return null;
+    if (!dir || !OWNER_KEY_RE.test(ownerKey)) return null;
+    return join(dir, ownerKey);
+  }
+
+  private legacyJobFilePath(ownerKey: string): string | null {
+    const dir = this.jobsDir();
+    if (!dir || !OWNER_KEY_RE.test(ownerKey)) return null;
     return join(dir, `${ownerKey}.json`);
   }
 
-  private saveJobNow(ownerKey: string): void {
-    const pendingTimer = this.persistTimers.get(ownerKey);
-    if (pendingTimer) {
-      clearTimeout(pendingTimer);
-      this.persistTimers.delete(ownerKey);
-    }
-    const job = this.jobs.get(ownerKey);
-    const filePath = this.jobFilePath(ownerKey);
-    const dir = this.jobsDir();
-    if (!job || !filePath || !dir) return;
+  private indexFilePath(ownerKey: string): string | null {
+    const ownerDir = this.ownerJobsDir(ownerKey);
+    return ownerDir ? join(ownerDir, ORGANIZE_INDEX_FILE) : null;
+  }
 
+  private jobFilePath(ownerKey: string, jobId: string): string | null {
+    const ownerDir = this.ownerJobsDir(ownerKey);
+    if (!ownerDir || !SAFE_JOB_ID_RE.test(jobId)) return null;
+    return join(ownerDir, `${jobId}.json`);
+  }
+
+  private persistKey(ownerKey: string, jobId: string): string {
+    return `${ownerKey}:${jobId}`;
+  }
+
+  private hasPendingPersistTimer(ownerKey: string, jobId: string): boolean {
+    return this.persistTimers.has(this.persistKey(ownerKey, jobId));
+  }
+
+  private writeJobFileSync(ownerKey: string, job: InternalOrganizeJob): boolean {
+    const ownerDir = this.ownerJobsDir(ownerKey);
+    const filePath = this.jobFilePath(ownerKey, job.id);
+    if (!ownerDir || !filePath) return false;
     try {
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      const payload: PersistedJobFile = { version: 1, job };
+      mkdirSync(ownerDir, { recursive: true, mode: 0o700 });
+      const payload: PersistedJobFileV2 = { version: 2, job };
       writeFileSync(`${filePath}.tmp`, JSON.stringify(payload), { mode: 0o600 });
       renameSync(`${filePath}.tmp`, filePath);
+      return true;
     } catch (err) {
-      console.error(`[Organizer] Failed to persist job for ${ownerKey}:`, err);
+      console.error(`[Organizer] Failed to persist job ${job.id} for ${ownerKey}:`, err);
+      return false;
     }
   }
 
-  private scheduleSave(ownerKey: string): void {
-    if (!this.jobsDir() || this.persistTimers.has(ownerKey)) return;
-    const timer = setTimeout(() => {
-      this.persistTimers.delete(ownerKey);
-      this.saveJobNow(ownerKey);
-    }, PERSIST_DEBOUNCE_MS);
-    timer.unref?.();
-    this.persistTimers.set(ownerKey, timer);
+  private writeIndexFileSync(ownerKey: string, summaries: OrganizeJobSummary[]): boolean {
+    const ownerDir = this.ownerJobsDir(ownerKey);
+    const indexPath = this.indexFilePath(ownerKey);
+    if (!ownerDir || !indexPath) return false;
+    try {
+      mkdirSync(ownerDir, { recursive: true, mode: 0o700 });
+      const payload: PersistedOrganizeIndexFile = { version: 2, jobs: summaries };
+      writeFileSync(`${indexPath}.tmp`, JSON.stringify(payload), { mode: 0o600 });
+      renameSync(`${indexPath}.tmp`, indexPath);
+      return true;
+    } catch (err) {
+      console.error(`[Organizer] Failed to persist job index for ${ownerKey}:`, err);
+      return false;
+    }
   }
 
-  private loadJobFromDisk(ownerKey: string): InternalOrganizeJob | null {
-    const filePath = this.jobFilePath(ownerKey);
+  private upsertSummary(state: OwnerJobState, job: InternalOrganizeJob): void {
+    const summary = computeJobSummary(job);
+    const idx = state.summaries.findIndex((s) => s.id === job.id);
+    if (idx >= 0) {
+      state.summaries[idx] = summary;
+    } else {
+      state.summaries.unshift(summary);
+    }
+    sortSummariesNewestFirst(state.summaries);
+  }
+
+  private enforceRetentionCap(ownerKey: string, state: OwnerJobState): boolean {
+    let removedAny = false;
+    while (state.summaries.length > MAX_RETAINED_JOBS) {
+      let dropIndex = -1;
+      for (let i = state.summaries.length - 1; i >= 0; i--) {
+        const candidate = state.summaries[i];
+        if (candidate.status !== 'running' && this.activeRunningJobIds.get(ownerKey) !== candidate.id) {
+          dropIndex = i;
+          break;
+        }
+      }
+      if (dropIndex === -1) {
+        dropIndex = state.summaries.length - 1;
+      }
+      const [removed] = state.summaries.splice(dropIndex, 1);
+      removedAny = true;
+      const pKey = this.persistKey(ownerKey, removed.id);
+      const pending = this.persistTimers.get(pKey);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.persistTimers.delete(pKey);
+      }
+      state.loadedJobs.delete(removed.id);
+      if (state.lastViewedFinishedJobId === removed.id) {
+        state.lastViewedFinishedJobId = null;
+      }
+      const jobFile = this.jobFilePath(ownerKey, removed.id);
+      if (jobFile && existsSync(jobFile)) {
+        try {
+          unlinkSync(jobFile);
+        } catch (err) {
+          console.error(`[Organizer] Failed to delete evicted job file ${jobFile}:`, err);
+        }
+      }
+    }
+    return removedAny;
+  }
+
+  /**
+   * When disk persistence is enabled, keep only running jobs plus at most one recently viewed
+   * finished job in RAM so large backlogs never hold thousands of notes in memory simultaneously.
+   */
+  private markJobAccessed(ownerKey: string, state: OwnerJobState, job: InternalOrganizeJob): void {
+    if (!this.jobsDir() || job.status === 'running') return;
+    state.lastViewedFinishedJobId = job.id;
+    for (const [loadedId, loadedJob] of state.loadedJobs) {
+      if (loadedJob.status === 'running') continue;
+      if (loadedId === state.lastViewedFinishedJobId) continue;
+      if (this.hasPendingPersistTimer(ownerKey, loadedId)) continue;
+      state.loadedJobs.delete(loadedId);
+    }
+  }
+
+  private saveJobNow(ownerKey: string, jobId: string): void {
+    const pKey = this.persistKey(ownerKey, jobId);
+    const pendingTimer = this.persistTimers.get(pKey);
+    if (pendingTimer) {
+      clearTimeout(pendingTimer.timer);
+      this.persistTimers.delete(pKey);
+    }
+    const state = this.owners.get(ownerKey);
+    const job = state?.loadedJobs.get(jobId);
+    if (!state || !job) return;
+
+    this.upsertSummary(state, job);
+    this.enforceRetentionCap(ownerKey, state);
+
+    if (!this.jobsDir()) return;
+    this.writeJobFileSync(ownerKey, job);
+    this.writeIndexFileSync(ownerKey, state.summaries);
+  }
+
+  private scheduleSave(ownerKey: string, jobId: string): void {
+    const pKey = this.persistKey(ownerKey, jobId);
+    if (!this.jobsDir() || this.persistTimers.has(pKey)) return;
+    const timer = setTimeout(() => {
+      this.persistTimers.delete(pKey);
+      this.saveJobNow(ownerKey, jobId);
+    }, PERSIST_DEBOUNCE_MS);
+    timer.unref?.();
+    this.persistTimers.set(pKey, { ownerKey, jobId, timer });
+  }
+
+  private loadJobFromDisk(ownerKey: string, jobId: string): InternalOrganizeJob | null {
+    const filePath = this.jobFilePath(ownerKey, jobId);
     if (!filePath) return null;
     try {
-      const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as PersistedJobFile;
-      if (parsed?.version !== 1 || !parsed.job || parsed.job.ownerKey !== ownerKey) return null;
-      return parsed.job;
+      const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as Partial<PersistedJobFileV2>;
+      if (parsed?.version !== 2 || !parsed.job) return null;
+      const job = parsed.job;
+      if (typeof job.id !== 'string' || job.id !== jobId) return null;
+      if (job.ownerKey && job.ownerKey !== ownerKey) return null;
+      if (!job.ownerKey) job.ownerKey = ownerKey;
+      return normalizeLoadedJob(job);
     } catch {
       return null;
     }
+  }
+
+  private readIndexSummariesFromDisk(ownerKey: string): OrganizeJobSummary[] | null {
+    const indexPath = this.indexFilePath(ownerKey);
+    if (!indexPath || !existsSync(indexPath)) return null;
+    try {
+      const parsed = JSON.parse(readFileSync(indexPath, 'utf8')) as Partial<PersistedOrganizeIndexFile>;
+      if (parsed?.version !== 2 || !Array.isArray(parsed.jobs)) return null;
+      const summaries = parsed.jobs.filter(
+        (s): s is OrganizeJobSummary =>
+          Boolean(s && typeof s.id === 'string' && SAFE_JOB_ID_RE.test(s.id) && typeof s.status === 'string')
+      );
+      sortSummariesNewestFirst(summaries);
+      return summaries;
+    } catch {
+      return null;
+    }
+  }
+
+  private reconstructIndexFromJobFiles(ownerKey: string): OrganizeJobSummary[] {
+    const ownerDir = this.ownerJobsDir(ownerKey);
+    if (!ownerDir || !existsSync(ownerDir)) return [];
+    let files: string[];
+    try {
+      files = readdirSync(ownerDir).filter((name) => name.endsWith('.json') && name !== ORGANIZE_INDEX_FILE);
+    } catch {
+      return [];
+    }
+    const summaries: OrganizeJobSummary[] = [];
+    for (const file of files) {
+      const jobId = file.replace(/\.json$/, '');
+      if (!SAFE_JOB_ID_RE.test(jobId)) continue;
+      const job = this.loadJobFromDisk(ownerKey, jobId);
+      if (!job) continue;
+      summaries.push(computeJobSummary(job));
+    }
+    sortSummariesNewestFirst(summaries);
+    return summaries;
+  }
+
+  private migrateLegacyOwnerFile(ownerKey: string, state: OwnerJobState): boolean {
+    const legacyPath = this.legacyJobFilePath(ownerKey);
+    if (!legacyPath || !existsSync(legacyPath)) return false;
+
+    let legacyJobs: InternalOrganizeJob[] = [];
+    try {
+      const raw = JSON.parse(readFileSync(legacyPath, 'utf8')) as
+        | Partial<PersistedJobFileV1>
+        | Partial<PersistedLegacyJobsV2>;
+      if (raw?.version === 1 && 'job' in raw && raw.job) {
+        const job = raw.job;
+        if (typeof job.id === 'string' && SAFE_JOB_ID_RE.test(job.id) && (!job.ownerKey || job.ownerKey === ownerKey)) {
+          if (!job.ownerKey) job.ownerKey = ownerKey;
+          legacyJobs = [normalizeLoadedJob(job)];
+        }
+      } else if (raw?.version === 2 && 'jobs' in raw && Array.isArray(raw.jobs)) {
+        for (const job of raw.jobs) {
+          if (
+            job &&
+            typeof job.id === 'string' &&
+            SAFE_JOB_ID_RE.test(job.id) &&
+            (!job.ownerKey || job.ownerKey === ownerKey)
+          ) {
+            if (!job.ownerKey) job.ownerKey = ownerKey;
+            legacyJobs.push(normalizeLoadedJob(job));
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`[Organizer] Failed to parse legacy organize file ${legacyPath}:`, err);
+      return false;
+    }
+
+    if (legacyJobs.length === 0) {
+      return false;
+    }
+
+    let allWritten = true;
+    for (const job of legacyJobs) {
+      const existingSummary = state.summaries.find((s) => s.id === job.id);
+      if (!existingSummary) {
+        if (!this.writeJobFileSync(ownerKey, job)) {
+          allWritten = false;
+          continue;
+        }
+        this.upsertSummary(state, job);
+      }
+      if (job.status === 'running') {
+        state.loadedJobs.set(job.id, job);
+      }
+    }
+
+    this.enforceRetentionCap(ownerKey, state);
+    if (!this.writeIndexFileSync(ownerKey, state.summaries)) {
+      allWritten = false;
+    }
+
+    if (allWritten) {
+      try {
+        unlinkSync(legacyPath);
+      } catch (err) {
+        console.error(`[Organizer] Migrated ${legacyPath} to v2, but failed to remove legacy file:`, err);
+      }
+    }
+    return true;
+  }
+
+  private getOrLoadOwnerState(ownerKey: string): OwnerJobState {
+    let state = this.owners.get(ownerKey);
+    const legacyPath = this.legacyJobFilePath(ownerKey);
+    const hasLegacyFile = Boolean(legacyPath && existsSync(legacyPath));
+
+    if (!state) {
+      state = {
+        summaries: [],
+        loadedJobs: new Map(),
+        lastViewedFinishedJobId: null,
+      };
+      this.owners.set(ownerKey, state);
+
+      const diskSummaries = this.readIndexSummariesFromDisk(ownerKey);
+      if (diskSummaries !== null) {
+        state.summaries = diskSummaries;
+      } else {
+        const rebuilt = this.reconstructIndexFromJobFiles(ownerKey);
+        if (rebuilt.length > 0) {
+          state.summaries = rebuilt;
+          this.writeIndexFileSync(ownerKey, state.summaries);
+        }
+      }
+
+      if (hasLegacyFile) {
+        this.migrateLegacyOwnerFile(ownerKey, state);
+      }
+
+      const capped = this.enforceRetentionCap(ownerKey, state);
+      if (capped) {
+        this.writeIndexFileSync(ownerKey, state.summaries);
+      }
+
+      // Eagerly load only running job(s); finished jobs load lazily on demand
+      for (const summary of state.summaries) {
+        if (summary.status !== 'running' || state.loadedJobs.has(summary.id)) continue;
+        const job = this.loadJobFromDisk(ownerKey, summary.id);
+        if (job) {
+          state.loadedJobs.set(job.id, job);
+        }
+      }
+      return state;
+    }
+
+    if (hasLegacyFile) {
+      this.migrateLegacyOwnerFile(ownerKey, state);
+      for (const summary of state.summaries) {
+        if (summary.status !== 'running' || state.loadedJobs.has(summary.id)) continue;
+        const job = this.loadJobFromDisk(ownerKey, summary.id);
+        if (job) {
+          state.loadedJobs.set(job.id, job);
+        }
+      }
+    }
+    return state;
   }
 
   private ensureLoadedFromDisk(): void {
     if (this.initializedFromDisk) return;
     this.initializedFromDisk = true;
     const dir = this.jobsDir();
-    if (!dir) return;
-    let files: string[];
+    if (!dir || !existsSync(dir)) return;
+
+    let entries;
     try {
-      files = readdirSync(dir).filter((name) => name.endsWith('.json'));
+      entries = readdirSync(dir, { withFileTypes: true });
     } catch {
       return;
     }
-    for (const file of files) {
-      const ownerKey = file.replace(/\.json$/, '');
-      if (this.jobs.has(ownerKey)) continue;
-      const job = this.loadJobFromDisk(ownerKey);
-      if (!job) continue;
-      for (const item of job.items) {
-        if (item.status === 'running') item.status = 'pending';
+
+    const ownerKeys = new Set<string>();
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith('.json') && !entry.name.endsWith('.tmp')) {
+        const ownerKey = entry.name.slice(0, -5);
+        if (OWNER_KEY_RE.test(ownerKey)) ownerKeys.add(ownerKey);
+      } else if (entry.isDirectory() && OWNER_KEY_RE.test(entry.name)) {
+        ownerKeys.add(entry.name);
       }
-      this.jobs.set(ownerKey, job);
+    }
+
+    for (const ownerKey of ownerKeys) {
+      this.getOrLoadOwnerState(ownerKey);
     }
   }
 
@@ -1262,9 +1703,16 @@ export class OrganizerService {
    */
   public resumeFromDiskOnStartup(): void {
     this.ensureLoadedFromDisk();
-    for (const [ownerKey, job] of this.jobs) {
-      if (job.status !== 'running') continue;
-      if (this.activeLoops.has(ownerKey)) continue;
+    if (!this.isEnabled()) return;
+    for (const [ownerKey, state] of this.owners) {
+      const runningSummary = state.summaries.find((s) => s.status === 'running');
+      if (!runningSummary || this.activeLoops.has(ownerKey)) continue;
+      let job = state.loadedJobs.get(runningSummary.id);
+      if (!job) {
+        job = this.loadJobFromDisk(ownerKey, runningSummary.id) ?? undefined;
+        if (job) state.loadedJobs.set(job.id, job);
+      }
+      if (!job || job.status !== 'running') continue;
       const savedEntry = noteCache.loadSavedEntryByOwnerKey(ownerKey);
       if (savedEntry) {
         this.startWorkerLoop(ownerKey, job, undefined, savedEntry);
@@ -1281,19 +1729,17 @@ export class OrganizerService {
     const ownerKey = noteCache.getOwnerKey(sessionId);
     this.activeSessions.set(ownerKey, sessionId);
 
-    let job = this.jobs.get(ownerKey);
-    if (!job) {
-      job = this.loadJobFromDisk(ownerKey) ?? undefined;
-      if (job) {
-        for (const item of job.items) {
-          if (item.status === 'running') item.status = 'pending';
-        }
-        this.jobs.set(ownerKey, job);
+    const state = this.getOrLoadOwnerState(ownerKey);
+    const runningSummary = state.summaries.find((s) => s.status === 'running');
+    if (runningSummary && this.isEnabled() && !this.activeLoops.has(ownerKey)) {
+      let job = state.loadedJobs.get(runningSummary.id);
+      if (!job) {
+        job = this.loadJobFromDisk(ownerKey, runningSummary.id) ?? undefined;
+        if (job) state.loadedJobs.set(job.id, job);
       }
-    }
-
-    if (job && job.status === 'running' && !this.activeLoops.has(ownerKey)) {
-      this.startWorkerLoop(ownerKey, job, sessionId);
+      if (job && job.status === 'running') {
+        this.startWorkerLoop(ownerKey, job, sessionId);
+      }
     }
     return ownerKey;
   }
@@ -1317,9 +1763,32 @@ export class OrganizerService {
     });
   }
 
+  private findRunningJobId(ownerKey: string, state: OwnerJobState, excludeJobId?: string): string | null {
+    const activeId = this.activeRunningJobIds.get(ownerKey);
+    if (activeId && activeId !== excludeJobId) return activeId;
+    const summaryRunning = state.summaries.find((s) => s.status === 'running' && s.id !== excludeJobId);
+    return summaryRunning ? summaryRunning.id : null;
+  }
+
+  public listJobs(sessionId: string): { jobs: OrganizeJobSummary[] } {
+    const ownerKey = this.attachSession(sessionId);
+    const state = this.getOrLoadOwnerState(ownerKey);
+    for (const job of state.loadedJobs.values()) {
+      this.upsertSummary(state, job);
+    }
+    sortSummariesNewestFirst(state.summaries);
+    return {
+      jobs: state.summaries.map((s) => ({
+        ...s,
+        progress: { ...s.progress },
+        usage: { ...s.usage },
+      })),
+    };
+  }
+
   /**
-   * Creates and starts an Auto-organize background job for `noteIds`. Replaces any existing running
-   * job for the same user.
+   * Creates and starts an Auto-organize background job for `noteIds`. Refuses with 409 when another
+   * job for the same owner is already running.
    */
   public async startJob(
     sessionId: string,
@@ -1360,20 +1829,14 @@ export class OrganizerService {
       }
     }
 
-    // Cancel previous job for this user if one is running
-    const prevController = this.activeControllers.get(ownerKey);
-    if (prevController) {
-      prevController.abort();
-      this.activeControllers.delete(ownerKey);
-    }
-    const prevLoop = this.activeLoops.get(ownerKey);
-    if (prevLoop) {
-      const prevJob = this.jobs.get(ownerKey);
-      if (prevJob && prevJob.status === 'running') {
-        prevJob.status = 'cancelled';
-        prevJob.updatedAt = Date.now();
-      }
-      await prevLoop.catch(() => undefined);
+    const state = this.getOrLoadOwnerState(ownerKey);
+    const runningJobId = this.findRunningJobId(ownerKey, state);
+    if (runningJobId) {
+      throw new OrganizeValidationError(
+        `Another Auto-organize job (${runningJobId}) is already running. Cancel it before starting a new job.`,
+        409,
+        { runningJobId }
+      );
     }
 
     const entry = await noteCache.ensureFresh(sessionId, 'stale-ok');
@@ -1389,6 +1852,7 @@ export class OrganizerService {
           currentNotebookPath: '',
           updatedTime: 0,
           status: 'failed',
+          skipped: true,
           error: 'Note not found',
         };
       }
@@ -1397,20 +1861,22 @@ export class OrganizerService {
           noteId,
           currentTitle: 'Encrypted note',
           currentNotebookId: note.parentId || '',
-          currentNotebookPath: pathById.get(note.parentId || '') ?? '',
+          currentNotebookPath: resolveNotebookPath(entry, note.parentId || '', pathById),
           updatedTime: note.updatedTime,
           status: 'failed',
+          skipped: true,
           error: 'Encrypted notes cannot be read or organized',
         };
       }
-      if (note.deletedTime > 0 || isConflictNote(note)) {
+      if (note.deletedTime > 0 || isConflictNote(note) || (note.parentId && isNotebookTrashed(entry, note.parentId))) {
         return {
           noteId,
           currentTitle: note.title,
           currentNotebookId: note.parentId || '',
-          currentNotebookPath: pathById.get(note.parentId || '') ?? '',
+          currentNotebookPath: resolveNotebookPath(entry, note.parentId || '', pathById),
           updatedTime: note.updatedTime,
           status: 'failed',
+          skipped: true,
           error: isConflictNote(note) ? 'Conflict copies cannot be auto-organized here' : 'Trashed notes cannot be organized',
         };
       }
@@ -1425,7 +1891,7 @@ export class OrganizerService {
     });
 
     const hasPending = items.some((i) => i.status === 'pending');
-    const now = Date.now();
+    const createdAt = Math.max(Date.now(), (state.summaries[0]?.createdAt ?? 0) + 1);
     const job: InternalOrganizeJob = {
       id: randomUUID().replace(/-/g, ''),
       ownerKey,
@@ -1436,12 +1902,12 @@ export class OrganizerService {
       items,
       usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       lastUndo: null,
-      createdAt: now,
-      updatedAt: now,
+      createdAt,
+      updatedAt: createdAt,
     };
 
-    this.jobs.set(ownerKey, job);
-    this.saveJobNow(ownerKey);
+    state.loadedJobs.set(job.id, job);
+    this.saveJobNow(ownerKey, job.id);
 
     if (hasPending) {
       const similarityIndex = buildNoteSimilarityIndex(entry, {
@@ -1449,6 +1915,8 @@ export class OrganizerService {
         excludeNoteIds: seenNoteIds,
       });
       this.startWorkerLoop(ownerKey, job, sessionId, undefined, similarityIndex);
+    } else {
+      this.markJobAccessed(ownerKey, state, job);
     }
 
     return { jobId: job.id };
@@ -1465,6 +1933,7 @@ export class OrganizerService {
 
     const controller = new AbortController();
     this.activeControllers.set(ownerKey, controller);
+    this.activeRunningJobIds.set(ownerKey, job.id);
 
     const cfg = this.resolveConfig();
     const concurrency = Math.max(1, cfg.aiConcurrency);
@@ -1516,7 +1985,6 @@ export class OrganizerService {
               }
 
               if (!entry) {
-                // Keep pending if no session/cache available yet; next user access will resume
                 item.status = 'pending';
                 controller.abort('waiting-for-session');
                 return;
@@ -1525,16 +1993,32 @@ export class OrganizerService {
               const note = entry.notes.get(item.noteId);
               if (!note) {
                 item.status = 'failed';
+                item.skipped = true;
                 item.error = 'Note not found';
                 job.updatedAt = Date.now();
-                this.scheduleSave(ownerKey);
+                this.scheduleSave(ownerKey, job.id);
                 continue;
               }
               if (note.properties.encryption_applied === '1') {
                 item.status = 'failed';
+                item.skipped = true;
                 item.error = 'Encrypted notes cannot be read or organized';
                 job.updatedAt = Date.now();
-                this.scheduleSave(ownerKey);
+                this.scheduleSave(ownerKey, job.id);
+                continue;
+              }
+              if (
+                note.deletedTime > 0 ||
+                isConflictNote(note) ||
+                (note.parentId && isNotebookTrashed(entry, note.parentId))
+              ) {
+                item.status = 'failed';
+                item.skipped = true;
+                item.error = isConflictNote(note)
+                  ? 'Conflict copies cannot be auto-organized here'
+                  : 'Trashed notes cannot be organized';
+                job.updatedAt = Date.now();
+                this.scheduleSave(ownerKey, job.id);
                 continue;
               }
 
@@ -1623,6 +2107,8 @@ export class OrganizerService {
                 item.error = 'Model returned invalid suggestion JSON';
               } else {
                 item.status = 'done';
+                delete item.error;
+                delete item.skipped;
                 item.suggestion = validation.suggestion;
               }
             } catch (err) {
@@ -1635,7 +2121,7 @@ export class OrganizerService {
             }
 
             job.updatedAt = Date.now();
-            this.scheduleSave(ownerKey);
+            this.scheduleSave(ownerKey, job.id);
           }
         };
 
@@ -1651,29 +2137,46 @@ export class OrganizerService {
         }
         if (loopPromise && this.activeLoops.get(ownerKey) === loopPromise) {
           this.activeLoops.delete(ownerKey);
+          this.activeRunningJobIds.delete(ownerKey);
           this.activeIndexes.delete(ownerKey);
         } else if (similarityIndex && this.activeIndexes.get(ownerKey) === similarityIndex) {
           this.activeIndexes.delete(ownerKey);
         }
         similarityIndex = null;
         initialSimilarityIndex = undefined;
-        this.saveJobNow(ownerKey);
+        this.saveJobNow(ownerKey, job.id);
+        const ownerState = this.owners.get(ownerKey);
+        if (ownerState && job.status !== 'running') {
+          this.markJobAccessed(ownerKey, ownerState, job);
+        }
       }
     })();
 
     this.activeLoops.set(ownerKey, loopPromise);
   }
 
-  private assertOwnerJob(sessionId: string, jobId: string): { ownerKey: string; job: InternalOrganizeJob } {
+  private assertOwnerJob(
+    sessionId: string,
+    jobId: string
+  ): { ownerKey: string; state: OwnerJobState; job: InternalOrganizeJob } {
     if (!SAFE_JOB_ID_RE.test(jobId)) {
       throw new OrganizeValidationError('Invalid job id');
     }
     const ownerKey = this.attachSession(sessionId);
-    const job = this.jobs.get(ownerKey);
-    if (!job || job.id !== jobId) {
+    const state = this.getOrLoadOwnerState(ownerKey);
+    const hasSummary = state.summaries.some((s) => s.id === jobId);
+    let job = state.loadedJobs.get(jobId);
+    if (!job && hasSummary) {
+      job = this.loadJobFromDisk(ownerKey, jobId) ?? undefined;
+      if (job) {
+        state.loadedJobs.set(job.id, job);
+      }
+    }
+    if (!hasSummary || !job) {
       throw new OrganizeValidationError(`Organize job not found: ${jobId}`, 404);
     }
-    return { ownerKey, job };
+    this.markJobAccessed(ownerKey, state, job);
+    return { ownerKey, state, job };
   }
 
   public async getJob(
@@ -1687,13 +2190,6 @@ export class OrganizerService {
     const rawLimit = Number.isFinite(query.limit) ? Math.floor(query.limit!) : 100;
     const limit = Math.max(1, Math.min(500, rawLimit || 100));
 
-    let done = 0;
-    let failed = 0;
-    for (const item of job.items) {
-      if (item.status === 'done') done++;
-      else if (item.status === 'failed') failed++;
-    }
-
     const entry = noteCache.peekEntry(sessionId) ?? noteCache.loadSavedEntryByOwnerKey(ownerKey);
     const pathById = entry ? buildNotebookPaths(entry).pathById : null;
     const existingTags = new Set(
@@ -1703,6 +2199,21 @@ export class OrganizerService {
     );
     const keepTag = recurringTagFilter(job.items, existingTags);
 
+    let done = 0;
+    let failed = 0;
+    let appliedCount = 0;
+    let retryableFailedCount = 0;
+    for (const item of job.items) {
+      if (item.status === 'done') done++;
+      else if (item.status === 'failed') {
+        failed++;
+        if (classifyRetryability(item, entry).retryable) {
+          retryableFailedCount++;
+        }
+      }
+      if (item.applied) appliedCount++;
+    }
+
     const slice = job.items.slice(offset, offset + limit).map((item): OrganizeJobItem => {
       const liveNote = entry?.notes.get(item.noteId);
       const currentTitle = liveNote ? liveNote.title : item.currentTitle;
@@ -1710,8 +2221,10 @@ export class OrganizerService {
       const currentNotebookPath =
         (pathById && currentNotebookId ? pathById.get(currentNotebookId) : undefined) ?? item.currentNotebookPath;
       const updatedTime = liveNote ? liveNote.updatedTime : item.updatedTime;
+      const isNonRetryableFailed = item.status === 'failed' && !classifyRetryability(item, entry).retryable;
       return {
         ...item,
+        ...(isNonRetryableFailed ? { skipped: true } : {}),
         currentTitle,
         currentNotebookId,
         currentNotebookPath,
@@ -1730,6 +2243,8 @@ export class OrganizerService {
         done,
         failed,
       },
+      appliedCount,
+      retryableFailedCount,
       usage: { ...job.usage },
       offset,
       limit,
@@ -1742,16 +2257,150 @@ export class OrganizerService {
   }
 
   public async cancelJob(sessionId: string, jobId: string): Promise<{ id: string; status: OrganizeJobStatus }> {
-    const { ownerKey, job } = this.assertOwnerJob(sessionId, jobId);
+    const { ownerKey, state, job } = this.assertOwnerJob(sessionId, jobId);
     if (job.status === 'running') {
       job.status = 'cancelled';
       job.updatedAt = Date.now();
-      this.activeControllers.get(ownerKey)?.abort('cancelled');
-      await this.activeLoops.get(ownerKey)?.catch(() => undefined);
-      this.activeIndexes.delete(ownerKey);
-      this.saveJobNow(ownerKey);
+      if (this.activeRunningJobIds.get(ownerKey) === job.id) {
+        this.activeControllers.get(ownerKey)?.abort('cancelled');
+        await this.activeLoops.get(ownerKey)?.catch(() => undefined);
+        this.activeIndexes.delete(ownerKey);
+      }
+      for (const item of job.items) {
+        if (item.status === 'running') item.status = 'pending';
+      }
+      this.saveJobNow(ownerKey, job.id);
+      this.markJobAccessed(ownerKey, state, job);
     }
     return { id: job.id, status: job.status };
+  }
+
+  public async deleteJob(sessionId: string, jobId: string): Promise<OrganizeDeleteResponse> {
+    if (!SAFE_JOB_ID_RE.test(jobId)) {
+      throw new OrganizeValidationError('Invalid job id');
+    }
+    const ownerKey = this.attachSession(sessionId);
+    const state = this.getOrLoadOwnerState(ownerKey);
+    const summaryIdx = state.summaries.findIndex((s) => s.id === jobId);
+    if (summaryIdx < 0) {
+      throw new OrganizeValidationError(`Organize job not found: ${jobId}`, 404);
+    }
+    const summary = state.summaries[summaryIdx];
+    if (summary.status === 'running' || this.activeRunningJobIds.get(ownerKey) === jobId) {
+      throw new OrganizeValidationError(
+        `Cancel the running job (${jobId}) before deleting it.`,
+        409,
+        { runningJobId: jobId }
+      );
+    }
+
+    const pKey = this.persistKey(ownerKey, jobId);
+    const pending = this.persistTimers.get(pKey);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.persistTimers.delete(pKey);
+    }
+
+    state.summaries.splice(summaryIdx, 1);
+    state.loadedJobs.delete(jobId);
+    if (state.lastViewedFinishedJobId === jobId) {
+      state.lastViewedFinishedJobId = null;
+    }
+
+    const jobFile = this.jobFilePath(ownerKey, jobId);
+    if (jobFile && existsSync(jobFile)) {
+      unlinkSync(jobFile);
+    }
+    if (this.jobsDir()) {
+      this.writeIndexFileSync(ownerKey, state.summaries);
+    }
+
+    return { id: jobId, deleted: true };
+  }
+
+  public async retryJob(sessionId: string, jobId: string): Promise<OrganizeRetryResponse> {
+    if (!this.isEnabled()) {
+      throw new OrganizeValidationError('Auto-organize is not configured on this server', 503);
+    }
+    const { ownerKey, state, job } = this.assertOwnerJob(sessionId, jobId);
+    if (job.status === 'running') {
+      throw new OrganizeValidationError('This Auto-organize job is already running.', 409, {
+        runningJobId: job.id,
+      });
+    }
+    const otherRunningId = this.findRunningJobId(ownerKey, state, job.id);
+    if (otherRunningId) {
+      throw new OrganizeValidationError(
+        `Another Auto-organize job (${otherRunningId}) is already running. Cancel it before retrying this job.`,
+        409,
+        { runningJobId: otherRunningId }
+      );
+    }
+
+    const entry = await noteCache.ensureFresh(sessionId, 'stale-ok');
+    const excludeSet = new Set(job.excludeNotebookIds);
+    const { systemPrompt, allowedNotebookIds, pathById } = buildOrganizeSystemPrompt(entry, excludeSet);
+
+    const retryTargets: Array<{ item: InternalJobItem; liveNote: RawJoplinItem }> = [];
+    const liveSkipUpdates: Array<{ item: InternalJobItem; reason: string }> = [];
+
+    for (const item of job.items) {
+      if (item.status !== 'failed') continue;
+      const verdict = classifyRetryability(item, entry);
+      if (verdict.retryable && verdict.liveNote) {
+        retryTargets.push({ item, liveNote: verdict.liveNote });
+      } else if (!verdict.retryable && verdict.reason && !item.skipped && !NON_RETRYABLE_ERROR_RE.test(item.error ?? '')) {
+        liveSkipUpdates.push({ item, reason: verdict.reason });
+      }
+    }
+
+    if (retryTargets.length === 0) {
+      for (const { item, reason } of liveSkipUpdates) {
+        item.skipped = true;
+        item.error = reason;
+      }
+      if (liveSkipUpdates.length > 0) {
+        job.updatedAt = Date.now();
+        this.saveJobNow(ownerKey, job.id);
+      }
+      throw new OrganizeValidationError('No failed items can be retried for this job.', 409);
+    }
+
+    for (const { item, reason } of liveSkipUpdates) {
+      item.skipped = true;
+      item.error = reason;
+    }
+
+    for (const { item, liveNote } of retryTargets) {
+      item.status = 'pending';
+      delete item.error;
+      delete item.skipped;
+      delete item.systemRetryCount;
+      item.currentTitle = liveNote.title;
+      item.currentNotebookId = liveNote.parentId || '';
+      item.currentNotebookPath = pathById.get(item.currentNotebookId) ?? '';
+      item.updatedTime = liveNote.updatedTime;
+    }
+
+    job.systemPrompt = systemPrompt;
+    job.allowedNotebookIds = allowedNotebookIds;
+    job.status = 'running';
+    delete job.error;
+    job.updatedAt = Date.now();
+
+    this.saveJobNow(ownerKey, job.id);
+
+    const similarityIndex = buildNoteSimilarityIndex(entry, {
+      excludeNotebookIds: excludeSet,
+      excludeNoteIds: new Set(job.items.map((it) => it.noteId)),
+    });
+    this.startWorkerLoop(ownerKey, job, sessionId, undefined, similarityIndex);
+
+    return {
+      id: job.id,
+      status: job.status,
+      requeuedCount: retryTargets.length,
+    };
   }
 
   public async applyJob(
@@ -1893,7 +2542,7 @@ export class OrganizerService {
       };
     }
     job.updatedAt = Date.now();
-    this.saveJobNow(ownerKey);
+    this.saveJobNow(ownerKey, job.id);
 
     return {
       results: allResults,
@@ -1958,7 +2607,7 @@ export class OrganizerService {
 
     job.lastUndo = null;
     job.updatedAt = Date.now();
-    this.saveJobNow(ownerKey);
+    this.saveJobNow(ownerKey, job.id);
 
     return {
       results: allResults,
@@ -1983,8 +2632,14 @@ export class OrganizerService {
     }
     await Promise.all([...this.activeLoops.values()].map((p) => p.catch(() => undefined)));
     this.activeIndexes.clear();
-    for (const ownerKey of this.jobs.keys()) {
-      this.saveJobNow(ownerKey);
+    const pendingEntries = [...this.persistTimers.values()];
+    for (const entry of pendingEntries) {
+      this.saveJobNow(entry.ownerKey, entry.jobId);
+    }
+    for (const [ownerKey, state] of this.owners) {
+      for (const jobId of [...state.loadedJobs.keys()]) {
+        this.saveJobNow(ownerKey, jobId);
+      }
     }
   }
 }
