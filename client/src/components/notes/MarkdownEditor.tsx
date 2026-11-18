@@ -2,6 +2,7 @@ import { forwardRef, useCallback, useImperativeHandle, useMemo, useRef, useState
 import CodeMirror, { EditorView } from "@uiw/react-codemirror";
 import { toast } from "sonner";
 import { uploadResource } from "@/lib/api";
+import { announceWrite } from "@/lib/cross-tab";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
@@ -147,6 +148,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
       uploadResource(file)
         .then((resource) => {
           replaceToken(token, resourceLink(resource, isImage, htmlRef.current));
+          announceWrite();
         })
         .catch((err) => {
           replaceToken(token, "");

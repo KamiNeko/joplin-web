@@ -21,15 +21,17 @@ import { BatchNoteRequest, BatchNoteResult, Note, NoteListItem, SearchResult } f
 import { NOTES_QUERY_KEY } from "./use-notes";
 import { NOTEBOOKS_QUERY_KEY } from "./use-notebooks";
 import { TAGS_QUERY_KEY } from "./use-tags";
+import { announceWrite } from "@/lib/cross-tab";
 
 /**
- * Refreshes every list that can change after a write.
+ * Refreshes every list that can change after a write and alerts other tabs.
  */
 export function invalidateLists(queryClient: QueryClient) {
   queryClient.invalidateQueries({ queryKey: NOTES_QUERY_KEY });
   queryClient.invalidateQueries({ queryKey: NOTEBOOKS_QUERY_KEY });
   queryClient.invalidateQueries({ queryKey: TAGS_QUERY_KEY });
   queryClient.invalidateQueries({ queryKey: ["search"] });
+  announceWrite();
 }
 
 /**

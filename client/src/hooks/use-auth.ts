@@ -17,8 +17,10 @@ import {
   clearStoredSession,
   waitForPendingWrites,
 } from "@/lib/api";
-import { resetConnection } from "@/lib/connection";
+import { getConnectionSnapshot, resetConnection } from "@/lib/connection";
+import { onRemoteWrite, setCrossTabUser } from "@/lib/cross-tab";
 import { clearAllDrafts, draftOwner, setDraftOwner } from "@/lib/drafts";
+import { invalidateAllExceptUnsaved } from "./use-connection";
 
 export interface AuthContextType {
   isAuthenticated: boolean;
@@ -61,11 +63,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
         if (cancelled) return;
         if (session) {
           const storedEmail = getStoredEmail();
-          setDraftOwner(draftOwner(storedEmail, session.serverHost));
+          const owner = draftOwner(storedEmail, session.serverHost);
+          setDraftOwner(owner);
+          setCrossTabUser(owner);
           setIsAuthenticated(true);
           setEmail(storedEmail);
           setServerHost(session.serverHost);
         } else {
+          setCrossTabUser(null);
           clearStoredSession();
         }
       })
@@ -77,6 +82,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    return onRemoteWrite(() => {
+      if (getConnectionSnapshot().sessionExpired) return;
+      void invalidateAllExceptUnsaved(queryClient);
+    });
+  }, [isAuthenticated, queryClient]);
 
   const login = useCallback(
     async (email: string, password: string) => {
@@ -90,7 +103,9 @@ export function AuthProvider({ children }: AuthProviderProps) {
         clearResourceCache();
         resetConnection();
         // Drafts of another account (or server) are dropped, not offered
-        setDraftOwner(draftOwner(email, host));
+        const owner = draftOwner(email, host);
+        setDraftOwner(owner);
+        setCrossTabUser(owner);
         setStoredEmail(email);
         setEmail(email);
         setServerHost(host);
@@ -107,6 +122,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     queryClient.clear();
     clearResourceCache();
     clearStoredSession();
+    setCrossTabUser(null);
     // Unmount the pages now: open editors close (their drafts are already stored)
     flushSync(() => {
       setIsAuthenticated(false);
@@ -145,6 +161,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       // Drafts of unsaved text must not outlive the session on a shared device
       clearAllDrafts();
       setDraftOwner(null);
+      setCrossTabUser(null);
       setLastEmail(null);
       setIsAuthenticated(false);
       setEmail(null);
