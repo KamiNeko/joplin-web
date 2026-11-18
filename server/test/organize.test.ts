@@ -1,21 +1,26 @@
 import assert from 'node:assert/strict';
+import express from 'express';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, afterEach, before, describe, test } from 'node:test';
 import { demoId } from '../demo/seed.js';
+import type { errorHandler as ErrorHandlerFn } from '../src/middleware/error-handler.js';
+import type { createOrganizeRouter as CreateOrganizeRouterFn } from '../src/routes/organize.js';
 import type { CacheEntry, noteCache as NoteCacheInstance } from '../src/services/note-cache.js';
 import type {
   buildNoteSimilarityIndex as BuildNoteSimilarityIndexFn,
   buildOrganizeSystemPrompt as BuildOrganizeSystemPromptFn,
   buildOrganizeUserPrompt as BuildOrganizeUserPromptFn,
   isScannerStyleTitle as IsScannerStyleTitleFn,
+  MAX_RETAINED_JOBS as MaxRetainedJobsConst,
   normalizeOrganizeTag as NormalizeOrganizeTagFn,
   ORGANIZE_DOCUMENT_TYPE_TAGS as OrganizeDocumentTypeTagsConst,
   OrganizerService as OrganizerServiceClass,
   organizerService as OrganizerServiceInstance,
+  OrganizeValidationError as OrganizeValidationErrorClass,
   parseAndValidateSuggestion as ParseAndValidateSuggestionFn,
   recurringTagFilter as RecurringTagFilterFn,
   stripLinksFromBody as StripLinksFromBodyFn,
@@ -28,14 +33,18 @@ import { mockItem, putMockItem, startTestApp, type TestApp } from './helpers.js'
 const TEST_TIMEOUT_MS = 30_000;
 
 let noteCache: typeof NoteCacheInstance;
+let errorHandler: typeof ErrorHandlerFn;
+let createOrganizeRouter: typeof CreateOrganizeRouterFn;
 let buildNoteSimilarityIndex: typeof BuildNoteSimilarityIndexFn;
 let buildOrganizeSystemPrompt: typeof BuildOrganizeSystemPromptFn;
 let buildOrganizeUserPrompt: typeof BuildOrganizeUserPromptFn;
 let isScannerStyleTitle: typeof IsScannerStyleTitleFn;
+let MAX_RETAINED_JOBS: typeof MaxRetainedJobsConst;
 let normalizeOrganizeTag: typeof NormalizeOrganizeTagFn;
 let ORGANIZE_DOCUMENT_TYPE_TAGS: typeof OrganizeDocumentTypeTagsConst;
 let OrganizerService: typeof OrganizerServiceClass;
 let organizerService: typeof OrganizerServiceInstance;
+let OrganizeValidationError: typeof OrganizeValidationErrorClass;
 let parseAndValidateSuggestion: typeof ParseAndValidateSuggestionFn;
 let recurringTagFilter: typeof RecurringTagFilterFn;
 let stripLinksFromBody: typeof StripLinksFromBodyFn;
@@ -60,15 +69,19 @@ before(async () => {
 
   app = await startTestApp({ cacheDir: tempCacheDir, pageSize: 50 });
   ({ noteCache } = await import('../src/services/note-cache.js'));
+  ({ errorHandler } = await import('../src/middleware/error-handler.js'));
+  ({ createOrganizeRouter } = await import('../src/routes/organize.js'));
   ({
     buildNoteSimilarityIndex,
     buildOrganizeSystemPrompt,
     buildOrganizeUserPrompt,
     isScannerStyleTitle,
+    MAX_RETAINED_JOBS,
     normalizeOrganizeTag,
     ORGANIZE_DOCUMENT_TYPE_TAGS,
     OrganizerService,
     organizerService,
+    OrganizeValidationError,
     parseAndValidateSuggestion,
     recurringTagFilter,
     stripLinksFromBody,
@@ -1024,10 +1037,15 @@ describe('OrganizerService: OpenAI HTTP client, retries, repairs, persistence an
       await svc1.shutdown();
       assert.equal(svc1.hasSimilarityIndex(session), false);
 
-      // Confirm persisted file shows job still running with item 0 done and item 1 pending (and no similarity index on disk)
-      const persistedPath = join(tempCacheDir, 'organize', `${ownerKey}.json`);
-      const persistedRaw = readFileSync(persistedPath, 'utf8');
+      // Confirm persisted v2 files show job still running with item 0 done and item 1 pending (and no similarity index on disk)
+      const persistedIndexPath = join(tempCacheDir, 'organize', ownerKey, 'index.json');
+      const persistedJobPath = join(tempCacheDir, 'organize', ownerKey, `${jobId}.json`);
+      const persistedIndex = JSON.parse(readFileSync(persistedIndexPath, 'utf8'));
+      const persistedRaw = readFileSync(persistedJobPath, 'utf8');
       const persisted = JSON.parse(persistedRaw);
+      assert.equal(persistedIndex.version, 2);
+      assert.equal(persistedIndex.jobs[0].id, jobId);
+      assert.equal(persisted.version, 2);
       assert.equal(persisted.job.id, jobId);
       assert.equal(persisted.job.status, 'running');
       assert.equal(persisted.job.items[0].status, 'done');
@@ -1326,5 +1344,460 @@ describe('HTTP /api/organize endpoints: lifecycle, cancel, apply with conflict, 
     assert.equal(finalA.title, 'Concurrent edit on A');
     assert.equal(finalB.title, 'Edited externally B');
     assert.equal(finalB.parentId, demoId('nb-work'));
+  });
+
+  test('lists jobs via GET /api/organize/jobs and deletes finished jobs via ?remove=1', { timeout: TEST_TIMEOUT_MS }, async () => {
+    const startRes = await app.api('/api/organize/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ noteIds: [demoId('note-ramen')] }),
+    });
+    assert.equal(startRes.status, 201);
+    const jobId = startRes.data.jobId as string;
+    await pollUntilDone(jobId);
+
+    const listRes = await app.api('/api/organize/jobs');
+    assert.equal(listRes.status, 200);
+    assert.ok(Array.isArray(listRes.data.jobs));
+    const entry = listRes.data.jobs.find((j: any) => j.id === jobId);
+    assert.ok(entry);
+    assert.equal(entry.status, 'done');
+    assert.equal(entry.progress.done, 1);
+    assert.equal(typeof entry.createdAt, 'number');
+    assert.equal(typeof entry.appliedCount, 'number');
+    assert.equal(typeof entry.canUndo, 'boolean');
+
+    const delRes = await app.api(`/api/organize/jobs/${jobId}?remove=1`, { method: 'DELETE' });
+    assert.equal(delRes.status, 200);
+    assert.deepEqual(delRes.data, { id: jobId, deleted: true });
+
+    const missingRes = await app.api(`/api/organize/jobs/${jobId}`);
+    assert.equal(missingRes.status, 404);
+  });
+});
+
+describe('multi-job storage, v1 migration, lazy loading, 409 exclusivity, and retry', () => {
+  test('migrates legacy v1 file atomically with zero data loss and lazy-loads finished jobs', { timeout: TEST_TIMEOUT_MS }, async () => {
+    const migDir = mkdtempSync(join(tmpdir(), 'joplin-organize-mig-'));
+    try {
+      await noteCache.ensureFresh(session, 'force');
+      const ownerKey = noteCache.getOwnerKey(session);
+      const legacyDir = join(migDir, 'organize');
+      mkdirSync(legacyDir, { recursive: true });
+
+      const v1JobId = 'a1'.repeat(16);
+      const v1Fixture = {
+        version: 1,
+        job: {
+          id: v1JobId,
+          ownerKey,
+          status: 'done',
+          excludeNotebookIds: [demoId('nb-work')],
+          allowedNotebookIds: [demoId('nb-projects'), demoId('nb-reading')],
+          systemPrompt: 'v1-system-prompt',
+          usage: { promptTokens: 1200, completionTokens: 340, totalTokens: 1540 },
+          lastUndo: {
+            appliedAt: 1_700_000_009_000,
+            items: [
+              {
+                noteId: demoId('note-scanned-invoice'),
+                baseUpdatedTime: 2222,
+                previousTitle: '2024_03_11.pdf',
+                previousNotebookId: demoId('nb-work'),
+                addedTags: ['invoice'],
+              },
+            ],
+          },
+          createdAt: 1_700_000_000_000,
+          updatedAt: 1_700_000_010_000,
+          items: [
+            {
+              noteId: demoId('note-scanned-invoice'),
+              currentTitle: '2024_03_11.pdf',
+              currentNotebookId: demoId('nb-work'),
+              currentNotebookPath: 'Work',
+              updatedTime: 2222,
+              status: 'done',
+              applied: true,
+              applyStatus: 'ok',
+              suggestion: {
+                title: '2024-03-11 Acme Cloud – Invoice',
+                notebookId: demoId('nb-projects'),
+                tags: ['invoice', 'acme-cloud'],
+                confidence: 0.92,
+                documentDate: '2024-03-11',
+                reason: 'Invoice OCR match.',
+              },
+            },
+            {
+              noteId: demoId('note-markdown-extras'),
+              currentTitle: 'Markdown Extras: Math, Diagrams & More',
+              currentNotebookId: demoId('nb-work'),
+              currentNotebookPath: 'Work',
+              updatedTime: 3333,
+              status: 'failed',
+              error: 'AI provider returned HTTP 402',
+            },
+            {
+              noteId: demoId('note-roadmap'),
+              currentTitle: 'Website Relaunch Roadmap',
+              currentNotebookId: demoId('nb-projects'),
+              currentNotebookPath: 'Work / Projects',
+              updatedTime: 4444,
+              status: 'failed',
+              error: 'Duplicate copy (trashed)',
+            },
+          ],
+        },
+      };
+      const legacyPath = join(legacyDir, `${ownerKey}.json`);
+      writeFileSync(legacyPath, JSON.stringify(v1Fixture));
+
+      const svc = trackService(
+        new OrganizerService({
+          aiBaseUrl: 'http://127.0.0.1:18317/v1',
+          aiModel: 'deepseek-flash',
+          aiFake: true,
+          cacheDir: migDir,
+        })
+      );
+
+      // Migration happens cleanly on list/attach; finished job stays out of RAM until accessed
+      const listed = svc.listJobs(session);
+      assert.equal(listed.jobs.length, 1);
+      assert.equal(listed.jobs[0].id, v1JobId);
+      assert.equal(listed.jobs[0].appliedCount, 1);
+      assert.equal(listed.jobs[0].canUndo, true);
+      assert.equal(existsSync(legacyPath), false, 'legacy v1 file removed after v2 writes succeed');
+      assert.ok(existsSync(join(legacyDir, ownerKey, 'index.json')));
+      assert.ok(existsSync(join(legacyDir, ownerKey, `${v1JobId}.json`)));
+      assert.equal(svc.isJobLoadedInMemory(session, v1JobId), false, 'finished job is not loaded eagerly');
+
+      // Lazy load restores every item, suggestion, applied flag, error, usage & undo record
+      const loaded = await svc.getJob(session, v1JobId);
+      assert.equal(svc.isJobLoadedInMemory(session, v1JobId), true);
+      assert.equal(loaded.appliedCount, 1);
+      assert.equal(loaded.retryableFailedCount, 1, 'excludes Duplicate copy (trashed)');
+      assert.equal(loaded.canUndo, true);
+      assert.deepEqual(loaded.usage, { promptTokens: 1200, completionTokens: 340, totalTokens: 1540 });
+      assert.equal(loaded.items[0].applied, true);
+      assert.equal(loaded.items[0].applyStatus, 'ok');
+      assert.equal(loaded.items[0].suggestion?.title, '2024-03-11 Acme Cloud – Invoice');
+      assert.equal(loaded.items[1].error, 'AI provider returned HTTP 402');
+      assert.equal(loaded.items[2].error, 'Duplicate copy (trashed)');
+
+      // Starting & finishing a second job keeps both and evicts the earlier finished job from RAM
+      const second = await svc.startJob(session, { noteIds: [demoId('note-ramen')] });
+      await svc.waitForIdle(session);
+      assert.equal(svc.isJobLoadedInMemory(session, v1JobId), false, 'older finished job evicted from RAM');
+      assert.equal(svc.isJobLoadedInMemory(session, second.jobId), true);
+
+      const both = svc.listJobs(session);
+      assert.equal(both.jobs.length, 2);
+      assert.equal(both.jobs[0].id, second.jobId, 'newest first');
+      assert.equal(both.jobs[1].id, v1JobId);
+
+      // Re-reading v1 job reloads it cleanly from disk
+      const reloaded = await svc.getJob(session, v1JobId);
+      assert.equal(reloaded.id, v1JobId);
+      assert.equal(svc.isJobLoadedInMemory(session, v1JobId), true);
+    } finally {
+      rmSync(migDir, { recursive: true, force: true });
+    }
+  });
+
+  test('enforces one running job per user with 409, coexists finished jobs, caps retention at MAX_RETAINED_JOBS, and deletes finished jobs', { timeout: TEST_TIMEOUT_MS }, async () => {
+    const capDir = mkdtempSync(join(tmpdir(), 'joplin-organize-cap-'));
+    let server: Server | undefined;
+    try {
+      await noteCache.ensureFresh(session, 'force');
+      const ownerKey = noteCache.getOwnerKey(session);
+
+      let releaseRunning!: () => void;
+      const runningStarted = new Promise<void>((resolve) => {
+        releaseRunning = resolve;
+      });
+      let unblock!: () => void;
+      const holdPromise = new Promise<void>((resolve) => {
+        unblock = resolve;
+      });
+
+      const svc = trackService(
+        new OrganizerService({
+          aiBaseUrl: 'http://127.0.0.1:18317/v1',
+          aiModel: 'deepseek-flash',
+          aiConcurrency: 1,
+          aiFake: false,
+          cacheDir: capDir,
+          completionFn: async (_msgs, signal) => {
+            releaseRunning();
+            await new Promise<void>((resolve, reject) => {
+              holdPromise.then(resolve);
+              if (signal.aborted) {
+                reject(new DOMException('Aborted', 'AbortError'));
+                return;
+              }
+              signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+            });
+            return {
+              content: JSON.stringify({
+                title: 'Done Title',
+                notebookId: demoId('nb-projects'),
+                tags: ['other'],
+                confidence: 0.9,
+                documentDate: null,
+                reason: 'Completed.',
+              }),
+              usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+            };
+          },
+        })
+      );
+
+      // Mount HTTP router with real auth + errorHandler for deterministic 409 testing
+      const testExpress = express();
+      testExpress.use(express.json());
+      testExpress.use('/api/organize', createOrganizeRouter(svc));
+      testExpress.use(errorHandler);
+      server = testExpress.listen(0, '127.0.0.1');
+      await new Promise<void>((resolve) => server!.once('listening', resolve));
+      const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+      const req = async (path: string, init: RequestInit = {}): Promise<{ status: number; data: any }> => {
+        const res = await fetch(`${baseUrl}${path}`, {
+          ...init,
+          headers: {
+            Authorization: `Bearer ${session}`,
+            ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+            ...(init.headers as Record<string, string> | undefined),
+          },
+        });
+        return { status: res.status, data: await res.json() };
+      };
+
+      const first = await req('/api/organize/jobs', {
+        method: 'POST',
+        body: JSON.stringify({ noteIds: [demoId('note-ramen')] }),
+      });
+      assert.equal(first.status, 201);
+      await runningStarted;
+
+      // Second job while first is running -> 409 with details.runningJobId
+      const conflict = await req('/api/organize/jobs', {
+        method: 'POST',
+        body: JSON.stringify({ noteIds: [demoId('note-scanned-invoice')] }),
+      });
+      assert.equal(conflict.status, 409);
+      assert.equal(conflict.data.details.runningJobId, first.data.jobId);
+
+      // Attempting to delete a running job with ?remove=1 -> 409
+      const delRunning = await req(`/api/organize/jobs/${first.data.jobId}?remove=1`, { method: 'DELETE' });
+      assert.equal(delRunning.status, 409);
+
+      // Cancel running job, then start second job cleanly
+      const cancelRes = await req(`/api/organize/jobs/${first.data.jobId}`, { method: 'DELETE' });
+      assert.equal(cancelRes.status, 200);
+      assert.equal(cancelRes.data.status, 'cancelled');
+      unblock();
+
+      const second = await req('/api/organize/jobs', {
+        method: 'POST',
+        body: JSON.stringify({ noteIds: [demoId('note-scanned-invoice')] }),
+      });
+      assert.equal(second.status, 201);
+
+      const listRes = await req('/api/organize/jobs');
+      assert.equal(listRes.status, 200);
+      assert.equal(listRes.data.jobs.length, 2);
+      assert.equal(listRes.data.jobs[0].id, second.data.jobId);
+      assert.equal(listRes.data.jobs[1].id, first.data.jobId);
+
+      // Delete first finished job cleanly
+      const delFinished = await req(`/api/organize/jobs/${first.data.jobId}?remove=1`, { method: 'DELETE' });
+      assert.equal(delFinished.status, 200);
+      assert.equal(listRes.data.jobs.length - 1, (await req('/api/organize/jobs')).data.jobs.length);
+
+      // Retention cap drops oldest finished jobs first while keeping up to MAX_RETAINED_JOBS (20)
+      await svc.waitForIdle(session);
+      await svc.shutdown();
+      const capSvc = trackService(
+        new OrganizerService({
+          aiBaseUrl: 'http://127.0.0.1:18317/v1',
+          aiModel: 'deepseek-flash',
+          aiFake: true,
+          cacheDir: capDir,
+        })
+      );
+      const createdIds: string[] = [second.data.jobId];
+      for (let i = 0; i < MAX_RETAINED_JOBS + 2; i++) {
+        const res = await capSvc.startJob(session, { noteIds: [demoId('note-ramen')] });
+        createdIds.push(res.jobId);
+        await capSvc.waitForIdle(session);
+      }
+      const retained = capSvc.listJobs(session).jobs;
+      assert.equal(retained.length, MAX_RETAINED_JOBS);
+      assert.equal(retained[0].id, createdIds[createdIds.length - 1]);
+      assert.equal(
+        existsSync(join(capDir, 'organize', ownerKey, `${createdIds[0]}.json`)),
+        false,
+        'oldest finished job unlinked from disk'
+      );
+    } finally {
+      if (server) {
+        server.closeAllConnections();
+        await new Promise((resolve) => server!.close(resolve));
+      }
+      rmSync(capDir, { recursive: true, force: true });
+    }
+  });
+
+  test('retryJob re-queues only retryable failed items (not trashed/skipped), checks 409, and rebuilds system prompt from current notebooks byte-identically', { timeout: TEST_TIMEOUT_MS }, async () => {
+    const retryDir = mkdtempSync(join(tmpdir(), 'joplin-organize-retry-'));
+    let extraNbId = '';
+    const extraNoteIds: string[] = [];
+    try {
+      // Create 3 notes cleanly in the mock Joplin Server
+      const createNote = async (title: string, body: string) => {
+        const res = await app.api('/api/notes', {
+          method: 'POST',
+          body: JSON.stringify({ parentId: demoId('nb-work'), title, body }),
+        });
+        assert.equal(res.status, 201);
+        extraNoteIds.push(res.data.id);
+        return res.data.id as string;
+      };
+
+      const retryNote1 = await createNote('Retry note 1', 'Invoice from Acme Cloud dated 2024-05-01.');
+      const retryNote2 = await createNote('Retry note 2', 'Electricity utility statement.');
+      const willTrashNote = await createNote('Will trash before retry', 'Temp document.');
+      const skippedDuplicateNote = await createNote('Dup duplicate copy', 'Trashed duplicate content.');
+
+      let phase: 'initial' | 'retry' = 'initial';
+      const seenPromptsDuringRetry = new Set<string>();
+      const seenUserTitlesDuringRetry: string[] = [];
+
+      const svc = trackService(
+        new OrganizerService({
+          aiBaseUrl: 'http://127.0.0.1:18317/v1',
+          aiModel: 'deepseek-flash',
+          aiConcurrency: 1,
+          aiFake: false,
+          cacheDir: retryDir,
+          completionFn: async (messages) => {
+            const sys = messages.find((m) => m.role === 'system')?.content ?? '';
+            const usr = messages.find((m) => m.role === 'user')?.content ?? '';
+            if (phase === 'initial') {
+              throw new Error('AI provider returned HTTP 503');
+            }
+            seenPromptsDuringRetry.add(sys);
+            const m = /^Current title:\s*(.+)$/m.exec(usr);
+            if (m) seenUserTitlesDuringRetry.push(m[1].trim());
+            return {
+              content: JSON.stringify({
+                title: `Reorganized ${m?.[1]?.trim() ?? 'Doc'}`,
+                notebookId: extraNbId || demoId('nb-projects'),
+                tags: ['invoice'],
+                confidence: 0.91,
+                documentDate: '2024-05-01',
+                reason: 'Retried after balance restored.',
+              }),
+              usage: { promptTokens: 100, completionTokens: 25, totalTokens: 125 },
+            };
+          },
+        })
+      );
+
+      // Run initial job so notes fail with 503, plus seed one pre-existing non-retryable 'Duplicate copy (trashed)' error
+      const { jobId } = await svc.startJob(session, {
+        noteIds: [retryNote1, retryNote2, willTrashNote, skippedDuplicateNote],
+        excludeNotebookIds: [demoId('nb-work')],
+      });
+      await svc.waitForIdle(session);
+
+      // Simulate legacy/preflight "Duplicate copy (trashed)" error persisted on disk for skippedDuplicateNote
+      await svc.shutdown();
+      const ownerKey = noteCache.getOwnerKey(session);
+      const jobPath = join(retryDir, 'organize', ownerKey, `${jobId}.json`);
+      const persisted = JSON.parse(readFileSync(jobPath, 'utf8'));
+      const dupItem = persisted.job.items.find((it: any) => it.noteId === skippedDuplicateNote);
+      dupItem.error = 'Duplicate copy (trashed)';
+      writeFileSync(jobPath, JSON.stringify(persisted));
+
+      // Now create a brand-new notebook and trash willTrashNote in Joplin BEFORE retrying
+      const nbRes = await app.api('/api/notebooks', {
+        method: 'POST',
+        body: JSON.stringify({ title: 'Tax Archive 2026' }),
+      });
+      assert.equal(nbRes.status, 201);
+      extraNbId = nbRes.data.id;
+      const trashRes = await app.api(`/api/notes/${willTrashNote}`, { method: 'DELETE' });
+      assert.equal(trashRes.status, 204);
+
+      // Fresh service loading from disk checks retryableFailedCount == 2 (not 4)
+      const svc2 = trackService(
+        new OrganizerService({
+          aiBaseUrl: 'http://127.0.0.1:18317/v1',
+          aiModel: 'deepseek-flash',
+          aiConcurrency: 1,
+          aiFake: false,
+          cacheDir: retryDir,
+          completionFn: async (messages) => {
+            const sys = messages.find((m) => m.role === 'system')?.content ?? '';
+            const usr = messages.find((m) => m.role === 'user')?.content ?? '';
+            seenPromptsDuringRetry.add(sys);
+            const m = /^Current title:\s*(.+)$/m.exec(usr);
+            if (m) seenUserTitlesDuringRetry.push(m[1].trim());
+            return {
+              content: JSON.stringify({
+                title: `Reorganized ${m?.[1]?.trim() ?? 'Doc'}`,
+                notebookId: extraNbId,
+                tags: ['invoice'],
+                confidence: 0.91,
+                documentDate: '2024-05-01',
+                reason: 'Retried into new Tax Archive 2026 notebook.',
+              }),
+              usage: { promptTokens: 100, completionTokens: 25, totalTokens: 125 },
+            };
+          },
+        })
+      );
+
+      phase = 'retry';
+      const beforeRetry = await svc2.getJob(session, jobId);
+      assert.equal(beforeRetry.retryableFailedCount, 2);
+
+      const retried = await svc2.retryJob(session, jobId);
+      assert.equal(retried.status, 'running');
+      assert.equal(retried.requeuedCount, 2);
+
+      // Calling retryJob or startJob while retry is running -> 409
+      await assert.rejects(
+        () => svc2.retryJob(session, jobId),
+        (err: unknown) => err instanceof OrganizeValidationError && err.status === 409
+      );
+
+      await svc2.waitForIdle(session);
+      const afterRetry = await svc2.getJob(session, jobId);
+      assert.equal(afterRetry.status, 'done');
+      assert.equal(afterRetry.progress.done, 2);
+      assert.equal(afterRetry.progress.failed, 2);
+      assert.equal(afterRetry.retryableFailedCount, 0);
+
+      // Byte-identical system prompt across the entire resumed run, containing the brand new notebook
+      assert.equal(seenPromptsDuringRetry.size, 1);
+      const [retryPrompt] = [...seenPromptsDuringRetry];
+      assert.match(retryPrompt, /Tax Archive 2026/);
+      assert.deepEqual(seenUserTitlesDuringRetry.sort(), ['Retry note 1', 'Retry note 2']);
+      assert.equal(afterRetry.items[0].suggestion?.notebookId, extraNbId);
+      assert.equal(afterRetry.items[2].skipped, true);
+    } finally {
+      for (const nid of extraNoteIds) {
+        app.mock.items.delete(`${nid}.md`);
+      }
+      if (extraNbId) {
+        app.mock.items.delete(`${extraNbId}.md`);
+      }
+      await app.api('/api/notebooks/refresh', { method: 'POST' });
+      rmSync(retryDir, { recursive: true, force: true });
+    }
   });
 });

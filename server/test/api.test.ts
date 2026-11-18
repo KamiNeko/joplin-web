@@ -907,6 +907,13 @@ describe('security', () => {
       body: JSON.stringify({ noteIds: [demoId('note-roadmap')] }),
     });
     assert.equal(startRes.status, 503);
+
+    const listRes = await api('/api/organize/jobs');
+    assert.equal(listRes.status, 200);
+    assert.deepEqual(listRes.data, { jobs: [] });
+
+    const retryRes = await api(`/api/organize/jobs/${'a'.repeat(32)}/retry`, { method: 'POST' });
+    assert.equal(retryRes.status, 503);
   });
 });
 

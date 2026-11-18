@@ -284,6 +284,7 @@ export interface OrganizeJobItem {
   updatedTime: number;
   status: OrganizeItemStatus;
   error?: string;
+  skipped?: boolean;
   suggestion?: OrganizeSuggestion;
   applied?: boolean;
   applyStatus?: 'ok' | 'conflict' | 'error';
@@ -300,6 +301,18 @@ export interface OrganizeJobProgress {
   total: number;
   done: number;
   failed: number;
+}
+
+export interface OrganizeJobSummary {
+  id: string;
+  status: OrganizeJobStatus;
+  error?: string;
+  progress: OrganizeJobProgress;
+  appliedCount: number;
+  usage: OrganizeUsage;
+  canUndo: boolean;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface OrganizeUndoItem {
@@ -321,6 +334,8 @@ export interface OrganizeJobResponse {
   error?: string;
   excludeNotebookIds: string[];
   progress: OrganizeJobProgress;
+  appliedCount: number;
+  retryableFailedCount: number;
   usage: OrganizeUsage;
   offset: number;
   limit: number;
@@ -329,6 +344,17 @@ export interface OrganizeJobResponse {
   createdAt: number;
   updatedAt: number;
   items: OrganizeJobItem[];
+}
+
+export interface OrganizeRetryResponse {
+  id: string;
+  status: OrganizeJobStatus;
+  requeuedCount: number;
+}
+
+export interface OrganizeDeleteResponse {
+  id: string;
+  deleted: boolean;
 }
 
 export interface OrganizeApplyItemInput {
