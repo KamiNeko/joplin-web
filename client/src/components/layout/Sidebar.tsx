@@ -1,6 +1,6 @@
 import { useNotebooks } from "@/hooks/use-notebooks";
 import { useTags } from "@/hooks/use-tags";
-import { useState } from "react";
+import { useId, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { NotebookTree, NotebookAction } from "@/components/notebooks/NotebookTree";
 import { MoveNotebookDialog } from "@/components/notebooks/MoveNotebookDialog";
@@ -20,6 +20,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import {
   BookOpen,
+  ChevronRight,
   Files,
   GitCompareArrows,
   Hash,
@@ -32,12 +33,33 @@ import {
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { QueryError } from "@/components/common/QueryError";
-import { MOBILE_SEARCH_INPUT_ID, SEARCH_SYNTAX_HINT } from "@/lib/ui-constants";
+import { MOBILE_SEARCH_INPUT_ID, SEARCH_SYNTAX_HINT, TAGS_EXPANDED_STORAGE_KEY } from "@/lib/ui-constants";
 import { ConnectionStatus } from "./ConnectionStatus";
 import { StaleDataHint } from "@/components/common/QueryError";
 
+const tagsExpandedListeners = new Set<() => void>();
+
+function loadTagsExpanded(): boolean {
+  try {
+    return localStorage.getItem(TAGS_EXPANDED_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function saveTagsExpanded(expanded: boolean) {
+  try {
+    localStorage.setItem(TAGS_EXPANDED_STORAGE_KEY, String(expanded));
+  } catch {
+    // storage unavailable
+  }
+  tagsExpandedListeners.forEach((cb) => cb());
+}
+
 interface SidebarProps {
   selectedNotebookId?: string | null;
+  /** Notebook containing the currently open note, so its ancestors stay expanded */
+  openNoteNotebookId?: string | null;
   selectedTagId?: string | null;
   isAllNotesSelected?: boolean;
   isTrashSelected?: boolean;
@@ -59,6 +81,7 @@ interface SidebarProps {
 
 export function Sidebar({
   selectedNotebookId,
+  openNoteNotebookId,
   selectedTagId,
   isAllNotesSelected,
   isTrashSelected,
@@ -84,6 +107,41 @@ export function Sidebar({
   const deleteNotebook = useDeleteNotebook();
   const renameTag = useRenameTag();
   const deleteTag = useDeleteTag();
+  const tagsContentId = useId();
+  const [persistedTagsExpanded, setPersistedTagsExpanded] = useState<boolean>(loadTagsExpanded);
+  const [prevSelectedTagId, setPrevSelectedTagId] = useState<string | null | undefined>(selectedTagId);
+  const [tagCollapsedInSession, setTagCollapsedInSession] = useState(false);
+  if (prevSelectedTagId !== selectedTagId) {
+    setPrevSelectedTagId(selectedTagId);
+    if (tagCollapsedInSession) setTagCollapsedInSession(false);
+  }
+
+  useEffect(() => {
+    const sync = () => setPersistedTagsExpanded(loadTagsExpanded());
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === TAGS_EXPANDED_STORAGE_KEY || e.key === null) sync();
+    };
+    tagsExpandedListeners.add(sync);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      tagsExpandedListeners.delete(sync);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
+
+  const isTagsExpanded = persistedTagsExpanded || (Boolean(selectedTagId) && !tagCollapsedInSession);
+
+  const handleToggleTags = () => {
+    if (isTagsExpanded) {
+      saveTagsExpanded(false);
+      setPersistedTagsExpanded(false);
+      setTagCollapsedInSession(Boolean(selectedTagId));
+      return;
+    }
+    saveTagsExpanded(true);
+    setPersistedTagsExpanded(true);
+    setTagCollapsedInSession(false);
+  };
 
   // Which notebook dialog is open: create (optionally under a parent), rename, or delete
   const [dialog, setDialog] = useState<
@@ -369,6 +427,7 @@ export function Sidebar({
               <NotebookTree
                 notebooks={notebooks || []}
                 selectedNotebookId={selectedNotebookId}
+                openNoteNotebookId={openNoteNotebookId}
                 onSelectNotebook={onSelectNotebook}
                 onNotebookAction={readOnly ? undefined : handleNotebookAction}
               />
@@ -377,46 +436,68 @@ export function Sidebar({
 
           {/* Tags Section */}
           <div className="space-y-1.5 pt-2">
-            <div className="flex items-center justify-between px-2 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
+            <button
+              type="button"
+              onClick={handleToggleTags}
+              aria-expanded={isTagsExpanded}
+              aria-controls={tagsContentId}
+              className="w-full flex items-center justify-between pl-2 pr-2.5 py-0.5 rounded-md text-[11px] font-semibold text-muted-foreground uppercase tracking-wider hover:text-foreground hover:bg-sidebar-accent/60 transition-colors outline-hidden focus-visible:ring-1 focus-visible:ring-sidebar-ring"
+            >
               <span className="flex items-center gap-1.5">
-                <Hash className="h-3 w-3" />
-                Tags
+                <ChevronRight
+                  className={cn(
+                    "h-3 w-3 shrink-0 transition-transform duration-200",
+                    isTagsExpanded && "rotate-90"
+                  )}
+                  aria-hidden="true"
+                />
+                <Hash className="h-3 w-3 shrink-0" aria-hidden="true" />
+                <span>Tags</span>
+                {tags && tags.length > 0 && (
+                  <span className="sr-only">
+                    , {tags.length} {tags.length === 1 ? "tag" : "tags"}
+                  </span>
+                )}
               </span>
               {tags && tags.length > 0 && (
-                <span className="text-[10px] text-muted-foreground font-mono">
+                <span aria-hidden="true" className="text-[10px] text-muted-foreground font-mono shrink-0">
                   {tags.length}
                 </span>
               )}
-            </div>
+            </button>
 
-            {isLoadingTags ? (
-              <div className="space-y-2 px-2 py-1">
-                <Skeleton className="h-4 w-1/2" />
-                <Skeleton className="h-4 w-2/3" />
-              </div>
-            ) : tagsQuery.isError && !tags ? (
-              <QueryError
-                compact
-                message="Couldn't load tags"
-                onRetry={() => void tagsQuery.refetch()}
-                isRetrying={tagsQuery.isFetching}
-              />
-            ) : !tags || tags.length === 0 ? (
-              <div className="px-2 py-1 text-xs text-muted-foreground italic">
-                No tags
-              </div>
-            ) : (
-              <div className="space-y-0.5">
-                {tags.map((tag) => (
-                  <TagListItem
-                    key={tag.id}
-                    tag={tag}
-                    isSelected={selectedTagId === tag.id}
-                    onSelect={() => onSelectTag(tag.id)}
-                    onRename={readOnly ? undefined : () => setDialog({ kind: "rename-tag", tag })}
-                    onDelete={readOnly ? undefined : () => setDialog({ kind: "delete-tag", tag })}
+            {isTagsExpanded && (
+              <div id={tagsContentId}>
+                {isLoadingTags ? (
+                  <div className="space-y-2 px-2 py-1">
+                    <Skeleton className="h-4 w-1/2" />
+                    <Skeleton className="h-4 w-2/3" />
+                  </div>
+                ) : tagsQuery.isError && !tags ? (
+                  <QueryError
+                    compact
+                    message="Couldn't load tags"
+                    onRetry={() => void tagsQuery.refetch()}
+                    isRetrying={tagsQuery.isFetching}
                   />
-                ))}
+                ) : !tags || tags.length === 0 ? (
+                  <div className="px-2 py-1 text-xs text-muted-foreground italic">
+                    No tags
+                  </div>
+                ) : (
+                  <div className="space-y-0.5">
+                    {tags.map((tag) => (
+                      <TagListItem
+                        key={tag.id}
+                        tag={tag}
+                        isSelected={selectedTagId === tag.id}
+                        onSelect={() => onSelectTag(tag.id)}
+                        onRename={readOnly ? undefined : () => setDialog({ kind: "rename-tag", tag })}
+                        onDelete={readOnly ? undefined : () => setDialog({ kind: "delete-tag", tag })}
+                      />
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>

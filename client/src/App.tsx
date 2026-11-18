@@ -5,6 +5,7 @@ import {
   Route,
   Navigate,
   useLocation,
+  useParams,
 } from "react-router-dom";
 import { MutationCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider, useAuth } from "@/hooks/use-auth";
@@ -75,6 +76,11 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+function TagRedirect() {
+  const { id } = useParams();
+  return <Navigate to={id ? `/notes?tag=${encodeURIComponent(id)}` : "/notes"} replace />;
+}
+
 export function App() {
   return (
     <QueryClientProvider client={queryClient}>
@@ -116,6 +122,14 @@ export function App() {
                   element={
                     <ProtectedRoute>
                       <NotesPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/tags/:id"
+                  element={
+                    <ProtectedRoute>
+                      <TagRedirect />
                     </ProtectedRoute>
                   }
                 />

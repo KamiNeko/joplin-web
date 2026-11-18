@@ -57,3 +57,41 @@ export function findNotebookById(notebooks: Notebook[] | undefined, id: string |
   }
   return null;
 }
+
+function findPathToNotebook(notebooks: Notebook[] | undefined, targetId: string): string[] | null {
+  if (!notebooks) return null;
+  for (const nb of notebooks) {
+    if (nb.id === targetId) return [];
+    const childPath = findPathToNotebook(nb.children, targetId);
+    if (childPath) return [nb.id, ...childPath];
+  }
+  return null;
+}
+
+/**
+ * Returns the ancestor IDs (excluding the target itself) leading to a notebook in the tree,
+ * or an empty array when the notebook is top-level or not found.
+ */
+export function findNotebookAncestors(
+  notebooks: Notebook[] | undefined,
+  targetId: string | null | undefined
+): string[] {
+  if (!notebooks || !targetId) return [];
+  return findPathToNotebook(notebooks, targetId) ?? [];
+}
+
+/**
+ * Collects every notebook ID present in the tree.
+ */
+export function collectNotebookIds(notebooks: Notebook[] | undefined): Set<string> {
+  const ids = new Set<string>();
+  const walk = (nodes: Notebook[] | undefined) => {
+    if (!nodes) return;
+    for (const nb of nodes) {
+      ids.add(nb.id);
+      walk(nb.children);
+    }
+  };
+  walk(notebooks);
+  return ids;
+}

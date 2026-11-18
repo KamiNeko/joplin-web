@@ -222,4 +222,34 @@ describe("NotesPage", () => {
 
     await waitFor(() => expect(location()).toBe(`/notebooks/${work.id}`));
   });
+
+  it("auto-expands the open note's notebook ancestors and URL-selected Tags in the sidebar", async () => {
+    const backend: Notebook = { id: id("5"), title: "Backend", parentId: work.id, children: [], noteCount: 1 };
+    const workWithChild: Notebook = { ...work, children: [backend] };
+    const nestedNote = fullNote("e", "Nested API", backend, "Inside backend.");
+    mockNotesApi((call) => {
+      const url = new URL(call.path, "http://localhost");
+      if (url.pathname === "/api/notebooks") return jsonResponse([workWithChild, personal]);
+      if (url.pathname === "/api/notes" && !url.searchParams.get("notebookId") && !url.searchParams.get("tagId") && !url.searchParams.get("is_trash")) {
+        return jsonResponse([...notes, nestedNote].map(listItem));
+      }
+      if (url.pathname === `/api/notes/${nestedNote.id}`) return jsonResponse(nestedNote);
+      return undefined;
+    });
+
+    renderPage("/notes");
+    expect(await noteRow("Nested API")).toBeTruthy();
+    expect(sidebar().queryByRole("button", { name: "Backend, 1 note" })).toBeNull();
+    expect(sidebar().getByRole("button", { name: /^Tags\b/i }).getAttribute("aria-expanded")).toBe("false");
+
+    // Opening the nested note from All Notes auto-expands its parent notebook
+    fireEvent.click(await noteRow("Nested API"));
+    expect(await sidebar().findByRole("button", { name: "Backend, 1 note" })).toBeTruthy();
+
+    cleanup();
+    mockNotesApi();
+    renderPage(`/notes?tag=${planning.id}`);
+    expect(sidebar().getByRole("button", { name: /^Tags\b/i }).getAttribute("aria-expanded")).toBe("true");
+    expect((await sidebar().findByRole("button", { name: "planning, 1 note" })).getAttribute("aria-current")).toBe("page");
+  });
 });
