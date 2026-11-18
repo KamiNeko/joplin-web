@@ -381,6 +381,7 @@ export interface OrganizeUndoResponse {
   conflictCount: number;
   errorCount: number;
   canUndo: boolean;
+}
 
 import type { AppConfig } from '../config.js';
 import type { TwoFactorStore } from '../services/two-factor-store.js';
