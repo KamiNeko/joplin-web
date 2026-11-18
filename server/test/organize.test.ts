@@ -17,6 +17,7 @@ import type {
   OrganizerService as OrganizerServiceClass,
   organizerService as OrganizerServiceInstance,
   parseAndValidateSuggestion as ParseAndValidateSuggestionFn,
+  recurringTagFilter as RecurringTagFilterFn,
   stripLinksFromBody as StripLinksFromBodyFn,
   LlmCompletionFn,
 } from '../src/services/organizer.js';
@@ -36,6 +37,7 @@ let ORGANIZE_DOCUMENT_TYPE_TAGS: typeof OrganizeDocumentTypeTagsConst;
 let OrganizerService: typeof OrganizerServiceClass;
 let organizerService: typeof OrganizerServiceInstance;
 let parseAndValidateSuggestion: typeof ParseAndValidateSuggestionFn;
+let recurringTagFilter: typeof RecurringTagFilterFn;
 let stripLinksFromBody: typeof StripLinksFromBodyFn;
 
 let tempCacheDir = '';
@@ -68,6 +70,7 @@ before(async () => {
     OrganizerService,
     organizerService,
     parseAndValidateSuggestion,
+    recurringTagFilter,
     stripLinksFromBody,
   } = await import('../src/services/organizer.js'));
   session = await app.login();
@@ -205,6 +208,23 @@ describe('Auto-organize unit checks: prompts, similarity & validation', () => {
       ],
     });
     assert.ok(!noOcrPrompt.includes('Similar notes already filed by the user'));
+  });
+
+  test('shows issuer tags only once they recur in the job; type and existing tags always', { timeout: TEST_TIMEOUT_MS }, () => {
+    const job = [
+      { suggestion: { tags: ['statement', 'hsbc'] } },
+      { suggestion: { tags: ['statement', 'hsbc'] } },
+      { suggestion: { tags: ['letter', 'hsbc'] } },
+      { suggestion: { tags: ['letter', 'kindertons'] } },
+      { suggestion: { tags: ['receipt', 'important'] } },
+      {},
+    ];
+    const keep = recurringTagFilter(job, new Set(['important']));
+    assert.equal(keep('hsbc'), true); // 3 notes
+    assert.equal(keep('kindertons'), false); // one-off issuer
+    assert.equal(keep('letter'), true); // document type
+    assert.equal(keep('important'), true); // already in the account
+    assert.equal(recurringTagFilter(job, new Set(), 4)('hsbc'), false);
   });
 
   test('validates JSON schema, strips extensions, enforces allowed notebooks, tag vocabulary & confidence fallback', { timeout: TEST_TIMEOUT_MS }, () => {
