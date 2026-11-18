@@ -21,6 +21,32 @@ import { assertValidId, MAX_BATCH_SIZE, noteWriter, WriteValidationError } from 
 import { extractLinkedResourceIds } from './search-query.js';
 import { markupLanguageOf } from './serializer.js';
 
+/** Fixed document-type tag vocabulary allowed for Auto-organize suggestions. */
+export const ORGANIZE_DOCUMENT_TYPE_TAGS = [
+  'statement',
+  'invoice',
+  'receipt',
+  'bill',
+  'letter',
+  'contract',
+  'policy',
+  'payslip',
+  'tax',
+  'certificate',
+  'id-document',
+  'manual',
+  'warranty',
+  'booking',
+  'ticket',
+  'quote',
+  'report',
+  'form',
+  'medical',
+  'other',
+] as const;
+
+const ORGANIZE_DOCUMENT_TYPE_TAG_SET = new Set<string>(ORGANIZE_DOCUMENT_TYPE_TAGS);
+
 /** Verbatim system prompt instructions template kept byte-identical across every request in a job. */
 export const ORGANIZE_SYSTEM_INSTRUCTIONS = `You organize personal notes and scanned document notes into a user's existing Joplin taxonomy.
 Return ONLY a valid JSON object matching this exact schema:
@@ -36,13 +62,17 @@ Return ONLY a valid JSON object matching this exact schema:
 Rules:
 - "title": ALWAYS write titles in English, formatted as "YYYY-MM-DD Issuer – Document type" (using an en-dash " – "), where the date is the document's own date (from the document text, OCR, or filename) or else the note's created date. Keep titles concise (max ~80 characters) and NEVER include a file extension (.pdf, .png, .jpg, etc.). When the note's current title is already meaningful and descriptive, keep the current title unchanged (return it verbatim).
 - "notebookId": MUST be one of the allowed target notebook IDs listed below. NEVER suggest an excluded notebook ID.
-- "tags": 0 to 3 concise lowercase tags describing the document or topic. Strongly prefer existing tags listed below when they fit.
+- "tags": At most 2 lowercase-hyphenated tags: first, exactly one document type from [${ORGANIZE_DOCUMENT_TYPE_TAGS.join(', ')}]; plus optionally one issuer tag (lowercase, hyphenated, e.g. "hsbc", "hang-seng", "john-lewis"). Existing account tags listed below may still be used when they clearly fit.
 - "confidence": Number from 0 to 1 reflecting your certainty (use < 0.7 when ambiguous or uncertain).
 - "documentDate": Document date formatted as "YYYY-MM-DD", or null if none is found.
 - "reason": One short English sentence explaining the suggestion.`;
 
 const MAX_BODY_CHARS = 2000;
 const MAX_OCR_CHARS = 6000;
+const MIN_INDEX_OCR_CHARS = 150;
+const MAX_SIMILAR_NOTES = 5;
+const SIMILARITY_THRESHOLD = 0.05;
+const SIMILARITY_TOKEN_SOURCE = '[a-z]{3,}|\\d{4,}|[\\u4e00-\\u9fff]{2}';
 const MAX_EXAMPLES_PER_NOTEBOOK = 8;
 const MAX_SYSTEM_TAGS = 300;
 const MAX_TITLE_CHARS = 80;
@@ -340,9 +370,195 @@ export function buildOrganizeSystemPrompt(
   };
 }
 
+export interface SimilarNoteHint {
+  noteId: string;
+  notebookId: string;
+  notebookPath: string;
+  title: string;
+  similarity: number;
+}
+
+export interface NoteSimilarityIndex {
+  readonly size: number;
+  findSimilar(ocrText: string, limit?: number): SimilarNoteHint[];
+}
+
+function detachTokenString(token: string): string {
+  // Break V8 SlicedString references >= 13 chars so vocabulary maps never retain 6 KB OCR buffers
+  return token.length >= 13 ? Buffer.from(token, 'utf8').toString('utf8') : token;
+}
+
+/**
+ * Builds an in-memory TF-IDF cosine-similarity index over already-filed notes that have at least
+ * 150 characters of attachment OCR text. Uses flat typed arrays for inverted postings so indexing
+ * ~3,000 notes fits comfortably inside the container's 768 MB memory budget.
+ */
+export function buildNoteSimilarityIndex(
+  entry: CacheEntry,
+  options: {
+    excludeNotebookIds?: ReadonlySet<string>;
+    excludeNoteIds?: ReadonlySet<string>;
+  } = {}
+): NoteSimilarityIndex {
+  const excludeNotebookIds = options.excludeNotebookIds ?? new Set<string>();
+  const excludeNoteIds = options.excludeNoteIds ?? new Set<string>();
+  const { pathById, activeNonEncryptedIds } = buildNotebookPaths(entry);
+
+  const docNoteIds: string[] = [];
+  const docNotebookIds: string[] = [];
+  const docTitles: string[] = [];
+  const rawDf = new Map<string, number>();
+
+  for (const note of entry.notes.values()) {
+    if (note.deletedTime > 0 || isConflictNote(note) || note.properties.encryption_applied === '1') {
+      continue;
+    }
+    if (!note.parentId || !activeNonEncryptedIds.has(note.parentId)) continue;
+    if (excludeNotebookIds.has(note.parentId) || excludeNoteIds.has(note.id)) continue;
+
+    const ocr = noteCache.getAttachmentTextFromEntry(entry, note.id, { maxChars: MAX_OCR_CHARS });
+    if (ocr.length < MIN_INDEX_OCR_CHARS) continue;
+
+    docNoteIds.push(note.id);
+    docNotebookIds.push(note.parentId);
+    const cleanTitle = sanitizeLine(note.title) || '(untitled)';
+    docTitles.push(cleanTitle.length > MAX_TITLE_CHARS ? `${cleanTitle.slice(0, MAX_TITLE_CHARS - 1)}…` : cleanTitle);
+
+    const lower = ocr.toLowerCase();
+    const re = new RegExp(SIMILARITY_TOKEN_SOURCE, 'g');
+    const seen = new Set<string>();
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(lower)) !== null) {
+      seen.add(match[0]);
+    }
+    for (const token of seen) {
+      const prev = rawDf.get(token);
+      if (prev === undefined) {
+        rawDf.set(detachTokenString(token), 1);
+      } else {
+        rawDf.set(token, prev + 1);
+      }
+    }
+  }
+
+  const N = docNoteIds.length;
+  const termToId = new Map<string, number>();
+  const dfList: number[] = [];
+  for (const [token, df] of rawDf) {
+    if (df < 2 || df >= N) continue;
+    termToId.set(token, dfList.length);
+    dfList.push(df);
+  }
+  rawDf.clear();
+
+  const V = dfList.length;
+  if (N < 2 || V === 0) {
+    return {
+      size: N,
+      findSimilar: () => [],
+    };
+  }
+
+  const idf = new Float64Array(V);
+  const termOffsets = new Uint32Array(V + 1);
+  let nnz = 0;
+  for (let t = 0; t < V; t++) {
+    const df = dfList[t];
+    idf[t] = Math.log(N / df);
+    termOffsets[t] = nnz;
+    nnz += df;
+  }
+  termOffsets[V] = nnz;
+
+  const cursor = new Uint32Array(termOffsets);
+  const postingDocIds = new Uint32Array(nnz);
+  const postingWeights = new Float64Array(nnz);
+  const docNorms = new Float64Array(N);
+
+  const tfMap = new Map<number, number>();
+  for (let docIdx = 0; docIdx < N; docIdx++) {
+    const ocr = noteCache.getAttachmentTextFromEntry(entry, docNoteIds[docIdx], { maxChars: MAX_OCR_CHARS });
+    const lower = ocr.toLowerCase();
+    const re = new RegExp(SIMILARITY_TOKEN_SOURCE, 'g');
+    tfMap.clear();
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(lower)) !== null) {
+      const termId = termToId.get(match[0]);
+      if (termId !== undefined) {
+        tfMap.set(termId, (tfMap.get(termId) ?? 0) + 1);
+      }
+    }
+
+    let sumSq = 0;
+    for (const [termId, tf] of tfMap) {
+      const weight = (1 + Math.log(tf)) * idf[termId];
+      sumSq += weight * weight;
+      const pos = cursor[termId]++;
+      postingDocIds[pos] = docIdx;
+      postingWeights[pos] = weight;
+    }
+    docNorms[docIdx] = Math.sqrt(sumSq) || 1;
+  }
+
+  return {
+    size: N,
+    findSimilar(ocrText: string, limit = MAX_SIMILAR_NOTES): SimilarNoteHint[] {
+      if (!ocrText || limit <= 0) return [];
+      const lower = ocrText.toLowerCase();
+      const re = new RegExp(SIMILARITY_TOKEN_SOURCE, 'g');
+      const qTf = new Map<number, number>();
+      let match: RegExpExecArray | null;
+      while ((match = re.exec(lower)) !== null) {
+        const termId = termToId.get(match[0]);
+        if (termId !== undefined) {
+          qTf.set(termId, (qTf.get(termId) ?? 0) + 1);
+        }
+      }
+      if (qTf.size === 0) return [];
+
+      let qNormSq = 0;
+      const dots = new Float64Array(N);
+      for (const [termId, tf] of qTf) {
+        const qw = (1 + Math.log(tf)) * idf[termId];
+        qNormSq += qw * qw;
+        const start = termOffsets[termId];
+        const end = termOffsets[termId + 1];
+        for (let p = start; p < end; p++) {
+          dots[postingDocIds[p]] += qw * postingWeights[p];
+        }
+      }
+      const qNorm = Math.sqrt(qNormSq) || 1;
+
+      const candidates: Array<{ docIdx: number; similarity: number }> = [];
+      for (let docIdx = 0; docIdx < N; docIdx++) {
+        const dot = dots[docIdx];
+        if (dot <= 0) continue;
+        const similarity = dot / (qNorm * docNorms[docIdx]);
+        if (similarity > SIMILARITY_THRESHOLD) {
+          candidates.push({ docIdx, similarity });
+        }
+      }
+      candidates.sort(
+        (a, b) => b.similarity - a.similarity || docNoteIds[a.docIdx].localeCompare(docNoteIds[b.docIdx])
+      );
+
+      return candidates.slice(0, limit).map(({ docIdx, similarity }) => {
+        const notebookId = docNotebookIds[docIdx];
+        return {
+          noteId: docNoteIds[docIdx],
+          notebookId,
+          notebookPath: pathById.get(notebookId) ?? notebookId,
+          title: docTitles[docIdx],
+          similarity,
+        };
+      });
+    },
+  };
+}
+
 /**
  * Builds the per-note user message with current title, notebook path, created date, stripped body,
- * attachment filenames, and OCR text.
+ * attachment filenames, OCR text, and optional similar filed notes.
  */
 export function buildOrganizeUserPrompt(input: {
   currentTitle: string;
@@ -352,8 +568,9 @@ export function buildOrganizeUserPrompt(input: {
   bodyText: string;
   attachmentFilenames: string[];
   ocrText: string;
+  similarNotes?: SimilarNoteHint[];
 }): string {
-  return [
+  const lines = [
     `Current title: ${sanitizeLine(input.currentTitle) || '(untitled)'}`,
     `Current notebook: ${input.currentNotebookPath || '(none)'} (id: ${input.currentNotebookId || 'none'})`,
     `Created date: ${input.createdDate}`,
@@ -363,7 +580,26 @@ export function buildOrganizeUserPrompt(input: {
     input.attachmentFilenames.length > 0 ? input.attachmentFilenames.join(', ') : '(none)',
     'Attachment OCR text:',
     input.ocrText || '(none)',
-  ].join('\n');
+  ];
+
+  const neighbours = input.ocrText.trim()
+    ? (input.similarNotes ?? []).filter((n) => n.similarity > SIMILARITY_THRESHOLD).slice(0, MAX_SIMILAR_NOTES)
+    : [];
+
+  if (neighbours.length > 0) {
+    lines.push(
+      '',
+      'Similar notes already filed by the user (by attachment text; usually the same issuer belongs in the same notebook):',
+      ...neighbours.map((n) => {
+        const cleanTitle = sanitizeLine(n.title) || '(untitled)';
+        const shortTitle =
+          cleanTitle.length > MAX_TITLE_CHARS ? `${cleanTitle.slice(0, MAX_TITLE_CHARS - 1)}…` : cleanTitle;
+        return `- ${n.notebookPath} (id: ${n.notebookId}) | "${shortTitle}" | similarity ${n.similarity.toFixed(2)}`;
+      })
+    );
+  }
+
+  return lines.join('\n');
 }
 
 function unwrapJsonContent(raw: string): string {
@@ -397,8 +633,23 @@ export interface ValidationFailure {
 }
 
 /**
+ * Normalizes a suggested tag to lowercase-hyphenated form (`"John Lewis"` -> `"john-lewis"`).
+ */
+export function normalizeOrganizeTag(raw: string): string {
+  return sanitizeLine(raw)
+    .toLowerCase()
+    .replace(/^#+/, '')
+    .replace(/[\s_/]+/g, '-')
+    .replace(/[^\p{L}\p{N}-]+/gu, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+/**
  * Strictly validates and normalizes a model's JSON output. Unknown or excluded `notebookId`
  * values fall back to `currentNotebookId` with `confidence = 0`.
+ * Tags are normalized to lowercase-hyphenated and capped to at most one document type from
+ * `ORGANIZE_DOCUMENT_TYPE_TAGS` plus at most one other (issuer/existing) tag.
  */
 export function parseAndValidateSuggestion(
   rawContent: string,
@@ -447,15 +698,21 @@ export function parseAndValidateSuggestion(
   const notebookId = validNotebook ? rawNotebookId : context.currentNotebookId;
   const confidence = validNotebook ? Math.round(obj.confidence * 100) / 100 : 0;
 
-  const seenTags = new Set<string>();
-  const tags: string[] = [];
+  let typeTag: string | null = null;
+  let otherTag: string | null = null;
   for (const rawTag of obj.tags) {
-    const clean = sanitizeLine(rawTag).toLowerCase();
-    if (!clean || seenTags.has(clean)) continue;
-    seenTags.add(clean);
-    tags.push(clean);
-    if (tags.length >= 3) break;
+    const clean = normalizeOrganizeTag(rawTag);
+    if (!clean) continue;
+    if (ORGANIZE_DOCUMENT_TYPE_TAG_SET.has(clean)) {
+      if (!typeTag) typeTag = clean;
+    } else if (!otherTag) {
+      otherTag = clean;
+    }
+    if (typeTag && otherTag) break;
   }
+  const tags: string[] = [];
+  if (typeTag) tags.push(typeTag);
+  if (otherTag) tags.push(otherTag);
 
   const title = normalizeSuggestedTitle(obj.title, context.currentTitle);
   const rawReason = sanitizeLine(obj.reason);
@@ -684,7 +941,10 @@ export function createFakeCompletionClient(
     const nbMatch = /^Current notebook:\s*(.*?)\s*\(id:\s*([^)]+)\)$/m.exec(userMsg);
     const createdMatch = /^Created date:\s*(\d{4}-\d{2}-\d{2})$/m.exec(userMsg);
     const bodyMatch = /Body text:\n([\s\S]*?)\nAttachment filenames:/m.exec(userMsg);
-    const ocrMatch = /Attachment OCR text:\n([\s\S]*)$/m.exec(userMsg);
+    const ocrMatch =
+      /Attachment OCR text:\n([\s\S]*?)(?=\n+Similar notes already filed by the user \(by attachment text;|$)/.exec(
+        userMsg
+      );
 
     const currentTitle = titleMatch?.[1]?.trim() === '(untitled)' ? '' : titleMatch?.[1]?.trim() ?? '';
     const currentNotebookId = nbMatch?.[2]?.trim() === 'none' ? '' : nbMatch?.[2]?.trim() ?? '';
@@ -709,13 +969,19 @@ export function createFakeCompletionClient(
     };
 
     const pickTags = (candidates: string[]): string[] => {
-      const picked: string[] = [];
+      let typeTag: string | null = null;
+      let otherTag: string | null = null;
       for (const c of candidates) {
-        const clean = c.toLowerCase();
-        if (!picked.includes(clean)) picked.push(clean);
-        if (picked.length >= 3) break;
+        const clean = normalizeOrganizeTag(c);
+        if (!clean) continue;
+        if (ORGANIZE_DOCUMENT_TYPE_TAG_SET.has(clean)) {
+          if (!typeTag) typeTag = clean;
+        } else if (!otherTag) {
+          otherTag = clean;
+        }
+        if (typeTag && otherTag) break;
       }
-      return picked;
+      return [...(typeTag ? [typeTag] : []), ...(otherTag ? [otherTag] : [])];
     };
 
     let suggestion: OrganizeSuggestion;
@@ -724,7 +990,7 @@ export function createFakeCompletionClient(
       suggestion = {
         title: `${datePrefix} Acme Cloud Services – Dedicated Backup Storage Invoice`,
         notebookId: pickNotebook([/invoice|finance|bill/i, /projects/i, /personal/i, /work/i]),
-        tags: pickTags([existingTags.includes('important') ? 'important' : 'finance', 'invoice', 'cloud']),
+        tags: pickTags(['invoice', 'acme-cloud']),
         confidence: 0.94,
         documentDate,
         reason: 'Extracted issuer, invoice date, and backup storage renewal details from attachment OCR.',
@@ -733,7 +999,7 @@ export function createFakeCompletionClient(
       suggestion = {
         title: isScannerStyleTitle(currentTitle) ? `${datePrefix} Utility Provider – Electricity Bill` : currentTitle,
         notebookId: pickNotebook([/bill|finance|personal/i, /reading|work/i], false),
-        tags: pickTags([existingTags.includes('important') ? 'important' : 'bills', 'utilities']),
+        tags: pickTags(['bill', existingTags.includes('important') ? 'important' : 'utility-provider']),
         confidence: 0.88,
         documentDate,
         reason: 'Matched utility bill content and kept the descriptive note title.',
@@ -742,7 +1008,7 @@ export function createFakeCompletionClient(
       suggestion = {
         title: currentTitle,
         notebookId: pickNotebook([/projects/i, /ideas|reading/i]),
-        tags: pickTags([existingTags.includes('ideas') ? 'ideas' : 'notes', 'reference']),
+        tags: pickTags(['other', existingTags.includes('ideas') ? 'ideas' : 'reference']),
         confidence: 0.58,
         documentDate: null,
         reason: 'Reference note spans work and general syntax examples; please confirm destination.',
@@ -770,8 +1036,8 @@ export function createFakeCompletionClient(
         title: `${datePrefix} ${shortSubject} – Document`,
         notebookId: pickNotebook(notebookPatterns),
         tags: pickTags([
+          'other',
           existingTags.find((t) => lowerHint.includes(t)) ?? 'scanned',
-          documentDate ? 'archive' : 'notes',
         ]),
         confidence: ocrText ? 0.86 : 0.62,
         documentDate,
@@ -801,7 +1067,7 @@ export function createFakeCompletionClient(
       suggestion = {
         title: currentTitle,
         notebookId: candidateNb,
-        tags: pickTags([matchedTag ?? 'notes', existingTags.includes('planning') && /roadmap|sync|plan/.test(lowerHint) ? 'planning' : 'review'].filter(Boolean)),
+        tags: pickTags(['other', matchedTag ?? (existingTags.includes('planning') && /roadmap|sync|plan/.test(lowerHint) ? 'planning' : '')].filter(Boolean)),
         confidence: highCertainty ? 0.85 : 0.61,
         documentDate,
         reason: highCertainty
@@ -830,12 +1096,19 @@ export class OrganizerService {
   private jobs = new Map<string, InternalOrganizeJob>();
   private activeControllers = new Map<string, AbortController>();
   private activeLoops = new Map<string, Promise<void>>();
+  private activeIndexes = new Map<string, NoteSimilarityIndex>();
   private activeSessions = new Map<string, string>();
   private persistTimers = new Map<string, NodeJS.Timeout>();
   private initializedFromDisk = false;
 
   constructor(deps: OrganizerDeps = {}) {
     this.deps = deps;
+  }
+
+  /** Whether an in-memory similarity index is currently held for this user's active job. */
+  public hasSimilarityIndex(sessionId: string): boolean {
+    const ownerKey = noteCache.getOwnerKey(sessionId);
+    return this.activeIndexes.has(ownerKey);
   }
 
   private resolveConfig() {
@@ -1150,7 +1423,11 @@ export class OrganizerService {
     this.saveJobNow(ownerKey);
 
     if (hasPending) {
-      this.startWorkerLoop(ownerKey, job, sessionId);
+      const similarityIndex = buildNoteSimilarityIndex(entry, {
+        excludeNotebookIds: excludeSet,
+        excludeNoteIds: seenNoteIds,
+      });
+      this.startWorkerLoop(ownerKey, job, sessionId, undefined, similarityIndex);
     }
 
     return { jobId: job.id };
@@ -1160,7 +1437,8 @@ export class OrganizerService {
     ownerKey: string,
     job: InternalOrganizeJob,
     initialSessionId?: string,
-    initialEntry?: CacheEntry
+    initialEntry?: CacheEntry,
+    initialSimilarityIndex?: NoteSimilarityIndex
   ): void {
     if (this.activeLoops.has(ownerKey)) return;
 
@@ -1170,7 +1448,25 @@ export class OrganizerService {
     const cfg = this.resolveConfig();
     const concurrency = Math.max(1, cfg.aiConcurrency);
     const allowedSet = new Set(job.allowedNotebookIds);
+    const excludeSet = new Set(job.excludeNotebookIds);
+    const jobNoteIds = new Set(job.items.map((it) => it.noteId));
     const completionFn = this.getCompletionClient();
+
+    let similarityIndex: NoteSimilarityIndex | null = initialSimilarityIndex ?? null;
+    if (similarityIndex) {
+      this.activeIndexes.set(ownerKey, similarityIndex);
+    }
+
+    const ensureSimilarityIndex = (entry: CacheEntry): NoteSimilarityIndex => {
+      if (!similarityIndex) {
+        similarityIndex = buildNoteSimilarityIndex(entry, {
+          excludeNotebookIds: excludeSet,
+          excludeNoteIds: jobNoteIds,
+        });
+        this.activeIndexes.set(ownerKey, similarityIndex);
+      }
+      return similarityIndex;
+    };
 
     let loopPromise: Promise<void> | undefined;
     loopPromise = (async () => {
@@ -1221,6 +1517,7 @@ export class OrganizerService {
                 continue;
               }
 
+              const index = ensureSimilarityIndex(entry);
               const bodyText = stripLinksFromBody(note.body, markupLanguageOf(note.properties), MAX_BODY_CHARS);
               const attachmentFilenames: string[] = [];
               const seenFilenames = new Set<string>();
@@ -1242,6 +1539,7 @@ export class OrganizerService {
                 return;
               }
 
+              const similarNotes = ocrText.trim() ? index.findSimilar(ocrText, MAX_SIMILAR_NOTES) : [];
               const userPrompt = buildOrganizeUserPrompt({
                 currentTitle: note.title,
                 currentNotebookId: note.parentId || '',
@@ -1250,6 +1548,7 @@ export class OrganizerService {
                 bodyText,
                 attachmentFilenames,
                 ocrText,
+                similarNotes,
               });
 
               const messages: LlmMessage[] = [
@@ -1331,7 +1630,12 @@ export class OrganizerService {
         }
         if (loopPromise && this.activeLoops.get(ownerKey) === loopPromise) {
           this.activeLoops.delete(ownerKey);
+          this.activeIndexes.delete(ownerKey);
+        } else if (similarityIndex && this.activeIndexes.get(ownerKey) === similarityIndex) {
+          this.activeIndexes.delete(ownerKey);
         }
+        similarityIndex = null;
+        initialSimilarityIndex = undefined;
         this.saveJobNow(ownerKey);
       }
     })();
@@ -1417,6 +1721,7 @@ export class OrganizerService {
       job.updatedAt = Date.now();
       this.activeControllers.get(ownerKey)?.abort('cancelled');
       await this.activeLoops.get(ownerKey)?.catch(() => undefined);
+      this.activeIndexes.delete(ownerKey);
       this.saveJobNow(ownerKey);
     }
     return { id: job.id, status: job.status };
@@ -1650,6 +1955,7 @@ export class OrganizerService {
       controller.abort('shutdown');
     }
     await Promise.all([...this.activeLoops.values()].map((p) => p.catch(() => undefined)));
+    this.activeIndexes.clear();
     for (const ownerKey of this.jobs.keys()) {
       this.saveJobNow(ownerKey);
     }

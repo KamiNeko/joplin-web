@@ -4,13 +4,16 @@ import type { AddressInfo } from 'node:net';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { after, before, describe, test } from 'node:test';
+import { after, afterEach, before, describe, test } from 'node:test';
 import { demoId } from '../demo/seed.js';
-import type { noteCache as NoteCacheInstance } from '../src/services/note-cache.js';
+import type { CacheEntry, noteCache as NoteCacheInstance } from '../src/services/note-cache.js';
 import type {
+  buildNoteSimilarityIndex as BuildNoteSimilarityIndexFn,
   buildOrganizeSystemPrompt as BuildOrganizeSystemPromptFn,
   buildOrganizeUserPrompt as BuildOrganizeUserPromptFn,
   isScannerStyleTitle as IsScannerStyleTitleFn,
+  normalizeOrganizeTag as NormalizeOrganizeTagFn,
+  ORGANIZE_DOCUMENT_TYPE_TAGS as OrganizeDocumentTypeTagsConst,
   OrganizerService as OrganizerServiceClass,
   organizerService as OrganizerServiceInstance,
   parseAndValidateSuggestion as ParseAndValidateSuggestionFn,
@@ -18,13 +21,18 @@ import type {
   LlmCompletionFn,
 } from '../src/services/organizer.js';
 import { serialize } from '../src/services/serializer.js';
-import { JoplinItemType } from '../src/types/index.js';
+import { JoplinItemType, type RawJoplinItem, type ResourceMetadata } from '../src/types/index.js';
 import { mockItem, putMockItem, startTestApp, type TestApp } from './helpers.js';
 
+const TEST_TIMEOUT_MS = 30_000;
+
 let noteCache: typeof NoteCacheInstance;
+let buildNoteSimilarityIndex: typeof BuildNoteSimilarityIndexFn;
 let buildOrganizeSystemPrompt: typeof BuildOrganizeSystemPromptFn;
 let buildOrganizeUserPrompt: typeof BuildOrganizeUserPromptFn;
 let isScannerStyleTitle: typeof IsScannerStyleTitleFn;
+let normalizeOrganizeTag: typeof NormalizeOrganizeTagFn;
+let ORGANIZE_DOCUMENT_TYPE_TAGS: typeof OrganizeDocumentTypeTagsConst;
 let OrganizerService: typeof OrganizerServiceClass;
 let organizerService: typeof OrganizerServiceInstance;
 let parseAndValidateSuggestion: typeof ParseAndValidateSuggestionFn;
@@ -33,6 +41,12 @@ let stripLinksFromBody: typeof StripLinksFromBodyFn;
 let tempCacheDir = '';
 let app: TestApp;
 let session = '';
+const trackedServices = new Set<OrganizerServiceClass>();
+
+function trackService<T extends OrganizerServiceClass>(svc: T): T {
+  trackedServices.add(svc);
+  return svc;
+}
 
 before(async () => {
   tempCacheDir = mkdtempSync(join(tmpdir(), 'joplin-organize-test-'));
@@ -45,9 +59,12 @@ before(async () => {
   app = await startTestApp({ cacheDir: tempCacheDir, pageSize: 50 });
   ({ noteCache } = await import('../src/services/note-cache.js'));
   ({
+    buildNoteSimilarityIndex,
     buildOrganizeSystemPrompt,
     buildOrganizeUserPrompt,
     isScannerStyleTitle,
+    normalizeOrganizeTag,
+    ORGANIZE_DOCUMENT_TYPE_TAGS,
     OrganizerService,
     organizerService,
     parseAndValidateSuggestion,
@@ -56,7 +73,18 @@ before(async () => {
   session = await app.login();
 });
 
+afterEach(async () => {
+  for (const svc of trackedServices) {
+    await svc.shutdown();
+  }
+  trackedServices.clear();
+});
+
 after(async () => {
+  for (const svc of trackedServices) {
+    await svc.shutdown();
+  }
+  trackedServices.clear();
   if (organizerService) {
     await organizerService.shutdown();
   }
@@ -67,7 +95,7 @@ after(async () => {
 });
 
 async function pollUntilDone(jobId: string, apiFn = app.api): Promise<any> {
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 200; i++) {
     const res = await apiFn(`/api/organize/jobs/${jobId}?offset=0&limit=100`);
     assert.equal(res.status, 200);
     if (res.data.status !== 'running') return res.data;
@@ -76,8 +104,8 @@ async function pollUntilDone(jobId: string, apiFn = app.api): Promise<any> {
   throw new Error('Organize job did not finish in time');
 }
 
-describe('Auto-organize unit checks: prompts & validation', () => {
-  test('builds deterministic byte-identical system prompt, skips scanner titles, and excludes requested notebooks', async () => {
+describe('Auto-organize unit checks: prompts, similarity & validation', () => {
+  test('builds deterministic byte-identical system prompt with fixed tag vocabulary, skips scanner titles, and excludes requested notebooks', { timeout: TEST_TIMEOUT_MS }, async () => {
     await app.api('/api/notebooks');
     const entry = await noteCache.ensureFresh(session, 'stale-ok');
     const excludeSet = new Set([demoId('nb-work')]);
@@ -92,6 +120,9 @@ describe('Auto-organize unit checks: prompts & validation', () => {
     assert.match(first.systemPrompt, new RegExp(demoId('nb-work')));
     assert.match(first.systemPrompt, /Existing tags:/);
     assert.match(first.systemPrompt, /important/);
+    for (const typeTag of ORGANIZE_DOCUMENT_TYPE_TAGS) {
+      assert.ok(first.systemPrompt.includes(typeTag), `system prompt includes vocabulary tag ${typeTag}`);
+    }
     // Descriptive note title in Projects appears in examples; scanner filename in Work/elsewhere does not
     assert.match(first.systemPrompt, /Website Relaunch Roadmap/);
     assert.doesNotMatch(first.systemPrompt, /2024_03_11\.pdf/);
@@ -102,7 +133,7 @@ describe('Auto-organize unit checks: prompts & validation', () => {
     assert.equal(isScannerStyleTitle('Website Relaunch Roadmap'), false);
   });
 
-  test('strips links and caps body/OCR text cleanly in user prompt', async () => {
+  test('strips links, caps body/OCR text, and renders exact similar-notes hint section in user prompt', { timeout: TEST_TIMEOUT_MS }, async () => {
     const body = `See [Invoice Portal](https://billing.example.com/pay) and ![scan](:/${'a'.repeat(32)}) for ${'x'.repeat(2500)}`;
     const stripped = stripLinksFromBody(body, 1, 2000);
     assert.ok(stripped.length <= 2000);
@@ -110,6 +141,7 @@ describe('Auto-organize unit checks: prompts & validation', () => {
     assert.ok(!stripped.includes(`:/${'a'.repeat(32)}`));
     assert.ok(stripped.includes('Invoice Portal'));
 
+    const longTitle = `2024-02-01 ${'HSBC UK Bank Statement '.repeat(5)}End`;
     const userPrompt = buildOrganizeUserPrompt({
       currentTitle: '2024_03_11.pdf',
       currentNotebookId: demoId('nb-work'),
@@ -118,17 +150,70 @@ describe('Auto-organize unit checks: prompts & validation', () => {
       bodyText: stripped,
       attachmentFilenames: ['2024_03_11.pdf'],
       ocrText: 'ACME CLOUD SERVICES INC. Total Paid: $420.00',
+      similarNotes: [
+        {
+          noteId: demoId('sim-1'),
+          notebookId: demoId('nb-projects'),
+          notebookPath: 'Finance / Banking',
+          title: longTitle,
+          similarity: 0.834,
+        },
+        {
+          noteId: demoId('sim-2'),
+          notebookId: demoId('nb-personal'),
+          notebookPath: 'Personal',
+          title: 'Older Related Receipt',
+          similarity: 0.42,
+        },
+        {
+          noteId: demoId('sim-ignored'),
+          notebookId: demoId('nb-personal'),
+          notebookPath: 'Personal',
+          title: 'Too Weak Match',
+          similarity: 0.05,
+        },
+      ],
     });
     assert.match(userPrompt, /Current title: 2024_03_11\.pdf/);
     assert.match(userPrompt, /Current notebook: Work \(id: /);
     assert.match(userPrompt, /Attachment filenames:\n2024_03_11\.pdf/);
     assert.match(userPrompt, /ACME CLOUD SERVICES INC/);
+    const expectedHeader =
+      'Similar notes already filed by the user (by attachment text; usually the same issuer belongs in the same notebook):';
+    const expectedLine1 = `- Finance / Banking (id: ${demoId('nb-projects')}) | "${longTitle.slice(0, 79)}…" | similarity 0.83`;
+    const expectedLine2 = `- Personal (id: ${demoId('nb-personal')}) | "Older Related Receipt" | similarity 0.42`;
+    assert.ok(userPrompt.endsWith(`${expectedHeader}\n${expectedLine1}\n${expectedLine2}`));
+    assert.ok(!userPrompt.includes('Too Weak Match'));
+
+    // Hint section is omitted when there is no OCR text or no neighbours above threshold
+    const noOcrPrompt = buildOrganizeUserPrompt({
+      currentTitle: 'Note without OCR',
+      currentNotebookId: demoId('nb-work'),
+      currentNotebookPath: 'Work',
+      createdDate: '2024-03-11',
+      bodyText: 'Plain markdown body.',
+      attachmentFilenames: [],
+      ocrText: '',
+      similarNotes: [
+        {
+          noteId: demoId('sim-1'),
+          notebookId: demoId('nb-projects'),
+          notebookPath: 'Finance / Banking',
+          title: 'Should Be Omitted',
+          similarity: 0.9,
+        },
+      ],
+    });
+    assert.ok(!noOcrPrompt.includes('Similar notes already filed by the user'));
   });
 
-  test('validates JSON schema, strips extensions, enforces allowed notebooks & confidence fallback', () => {
+  test('validates JSON schema, strips extensions, enforces allowed notebooks, tag vocabulary & confidence fallback', { timeout: TEST_TIMEOUT_MS }, () => {
     const allowed = new Set([demoId('nb-projects'), demoId('nb-personal')]);
+    assert.equal(ORGANIZE_DOCUMENT_TYPE_TAGS.length, 20);
+    assert.equal(normalizeOrganizeTag(' John Lewis / UK '), 'john-lewis-uk');
+    assert.equal(normalizeOrganizeTag('##Hang__Seng'), 'hang-seng');
 
-    // Valid JSON wrapped in markdown fence + .pdf suffix + duplicate/mixed-case tags + 4 tags
+    // Valid JSON wrapped in markdown fence + .pdf suffix + 1 vocab type tag + 1 issuer/other tag (drops extras)
     const good = parseAndValidateSuggestion(
       '```json\n' +
         JSON.stringify({
@@ -150,9 +235,72 @@ describe('Auto-organize unit checks: prompts & validation', () => {
     if (good.ok) {
       assert.equal(good.suggestion.title, '2024-03-11 Acme – Invoice');
       assert.equal(good.suggestion.notebookId, demoId('nb-projects'));
-      assert.deepEqual(good.suggestion.tags, ['finance', 'invoice', 'cloud']);
+      assert.deepEqual(good.suggestion.tags, ['invoice', 'finance']);
       assert.equal(good.suggestion.confidence, 0.91);
       assert.equal(good.suggestion.documentDate, '2024-03-11');
+    }
+
+    // Keeps at most one vocabulary document type + one lowercase-hyphenated issuer tag, drops excess types & issuers
+    const vocabCheck = parseAndValidateSuggestion(
+      JSON.stringify({
+        title: '2024-05-01 John Lewis – Invoice',
+        notebookId: demoId('nb-projects'),
+        tags: ['INVOICE', 'receipt', 'John Lewis', 'retail', 'warranty'],
+        confidence: 0.89,
+        documentDate: '2024-05-01',
+        reason: 'Matched invoice.',
+      }),
+      {
+        currentTitle: 'scan.pdf',
+        currentNotebookId: demoId('nb-work'),
+        allowedNotebookIds: allowed,
+      }
+    );
+    assert.equal(vocabCheck.ok, true);
+    if (vocabCheck.ok) {
+      assert.deepEqual(vocabCheck.suggestion.tags, ['invoice', 'john-lewis']);
+    }
+
+    // Handles reversed order (issuer first, vocabulary type second) and normalizes hyphenated vocab tag
+    const idCheck = parseAndValidateSuggestion(
+      JSON.stringify({
+        title: '2024-06-01 HSBC – ID Document',
+        notebookId: demoId('nb-personal'),
+        tags: ['Hang Seng', 'ID Document', 'other', 'extra-issuer'],
+        confidence: 0.9,
+        documentDate: '2024-06-01',
+        reason: 'ID check.',
+      }),
+      {
+        currentTitle: 'scan2.pdf',
+        currentNotebookId: demoId('nb-work'),
+        allowedNotebookIds: allowed,
+      }
+    );
+    assert.equal(idCheck.ok, true);
+    if (idCheck.ok) {
+      assert.deepEqual(idCheck.suggestion.tags, ['id-document', 'hang-seng']);
+    }
+
+    // Only one non-vocab tag kept when no vocab type matches
+    const noTypeCheck = parseAndValidateSuggestion(
+      JSON.stringify({
+        title: '2024-06-01 HSBC – Note',
+        notebookId: demoId('nb-personal'),
+        tags: ['HSBC Bank', 'barclays'],
+        confidence: 0.75,
+        documentDate: '2024-06-01',
+        reason: 'Bank note.',
+      }),
+      {
+        currentTitle: 'scan3.pdf',
+        currentNotebookId: demoId('nb-work'),
+        allowedNotebookIds: allowed,
+      }
+    );
+    assert.equal(noTypeCheck.ok, true);
+    if (noTypeCheck.ok) {
+      assert.deepEqual(noTypeCheck.suggestion.tags, ['hsbc-bank']);
     }
 
     // Unknown/excluded notebookId falls back to currentNotebookId and forces confidence = 0
@@ -202,10 +350,250 @@ describe('Auto-organize unit checks: prompts & validation', () => {
     );
     assert.equal(badDate.ok, false);
   });
+
+  test('similarity index ranks same-issuer note first and excludes job notes, excluded notebooks, trashed/encrypted/conflict notes and short/missing OCR', { timeout: TEST_TIMEOUT_MS }, () => {
+    const nbFinance = demoId('idx-nb-finance');
+    const nbBanking = demoId('idx-nb-banking');
+    const nbUtilities = demoId('idx-nb-utilities');
+    const nbInbox = demoId('idx-nb-inbox');
+    const nbTrashed = demoId('idx-nb-trashed');
+    const nbEncrypted = demoId('idx-nb-encrypted');
+
+    const makeFolder = (
+      id: string,
+      title: string,
+      parentId = '',
+      deletedTime = 0,
+      properties: Record<string, string> = {}
+    ): RawJoplinItem => ({
+      id,
+      type_: JoplinItemType.Folder,
+      title,
+      body: '',
+      parentId,
+      createdTime: 1,
+      updatedTime: 1,
+      userCreatedTime: 1,
+      userUpdatedTime: 1,
+      deletedTime,
+      isTodo: false,
+      todoDue: 0,
+      todoCompleted: 0,
+      properties,
+    });
+
+    const notebooks = new Map<string, RawJoplinItem>([
+      [nbFinance, makeFolder(nbFinance, 'Finance')],
+      [nbBanking, makeFolder(nbBanking, 'Banking', nbFinance)],
+      [nbUtilities, makeFolder(nbUtilities, 'Utilities')],
+      [nbInbox, makeFolder(nbInbox, 'Inbox')],
+      [nbTrashed, makeFolder(nbTrashed, 'Old', '', 1000)],
+      [nbEncrypted, makeFolder(nbEncrypted, '', '', 0, { encryption_applied: '1' })],
+    ]);
+
+    const notes = new Map<string, RawJoplinItem>();
+    const resources = new Map<string, ResourceMetadata>();
+    const addFiledNote = (
+      key: string,
+      opts: {
+        parentId: string;
+        title: string;
+        ocrText: string | null;
+        deletedTime?: number;
+        props?: Record<string, string>;
+      }
+    ) => {
+      const noteId = demoId(`idx-note-${key}`);
+      const resId = demoId(`idx-res-${key}`);
+      notes.set(noteId, {
+        id: noteId,
+        type_: JoplinItemType.Note,
+        title: opts.title,
+        body: opts.ocrText === null ? 'No attachment link here.' : `Scan ![doc](:/${resId})`,
+        parentId: opts.parentId,
+        createdTime: 1000,
+        updatedTime: 1000,
+        userCreatedTime: 1000,
+        userUpdatedTime: 1000,
+        deletedTime: opts.deletedTime ?? 0,
+        isTodo: false,
+        todoDue: 0,
+        todoCompleted: 0,
+        properties: opts.props ?? {},
+      });
+      if (opts.ocrText !== null) {
+        resources.set(resId, {
+          id: resId,
+          title: `${key}.pdf`,
+          mime: 'application/pdf',
+          filename: `${key}.pdf`,
+          fileExtension: 'pdf',
+          size: 100,
+          updatedTime: 1000,
+          ocrText: opts.ocrText,
+        });
+      }
+      return noteId;
+    };
+
+    const hsbcPrimary = addFiledNote('hsbc-primary', {
+      parentId: nbBanking,
+      title: '2025-01-15 HSBC UK – Current Account Statement 400011',
+      ocrText:
+        'HSBC Bank UK plc monthly current account statement sorting code 400011 account number 12345678 closing balance GBP 2450.00 direct debit summary london',
+    });
+    const hsbcSecondary = addFiledNote('hsbc-secondary', {
+      parentId: nbBanking,
+      title: '2025-02-01 HSBC UK – Savings Statement',
+      ocrText:
+        'HSBC Bank UK plc quarterly savings statement opening balance GBP 9000.00 sorting code 400011 interest earned bonus saver branch address birmingham summary',
+    });
+    const utilityOne = addFiledNote('utility-1', {
+      parentId: nbUtilities,
+      title: '2025-01-20 Thames Water – Quarterly Bill',
+      ocrText:
+        'Thames Water Utilities Limited wastewater sewerage supply bill account reference 99118877 meter reading usage period summary statement of charges london',
+    });
+    const utilityTwo = addFiledNote('utility-2', {
+      parentId: nbUtilities,
+      title: '2025-02-20 Thames Water – Metered Bill',
+      ocrText:
+        'Thames Water Utilities Limited annual supply charges meter reading 44556677 direct debit plan statement summary customer helpline reading berkshire water services uk',
+    });
+    const cjkOne = addFiledNote('cjk-1', {
+      parentId: nbFinance,
+      title: '2025-01-30 中銀香港 – 月結單',
+      ocrText:
+        '中國銀行香港有限公司 綜合戶口月結單 客戶編號 98765432 結餘港元 180000 交易紀錄摘要 每月通知書 香港中環花園道一號 銀行服務熱線 定期存款結算詳情 戶口轉賬紀錄及電子通知書服務條款 敬請查閱附件明細資料並妥善保存以作日後核對用途 本月結單已全面核實無誤 如對上述交易內容有任何疑問 請於三十天內聯絡本行客戶服務代表查詢跟進',
+    });
+    const cjkTwo = addFiledNote('cjk-2', {
+      parentId: nbFinance,
+      title: '2025-02-28 中銀香港 – 儲蓄月結單',
+      ocrText:
+        '中國銀行香港有限公司 儲蓄存款月結單 客戶編號 98765432 利息結算 250000 結餘查詢摘要 每月通知書 香港九龍旺角分行 銀行客戶服務熱線 存款利息計算詳情 自動轉賬紀錄及電子結單服務條款 敬請核對本期收支明細並保留備查 銀行客戶服務中心敬上 如對本期月結單任何項目有所疑問 請致電本行熱線電話查詢詳情',
+    });
+
+    // Notes that must be excluded from the index:
+    const jobOwnId = addFiledNote('job-own', {
+      parentId: nbBanking,
+      title: '2025-03-01 HSBC UK – Job Target Note',
+      ocrText:
+        'HSBC Bank UK plc monthly current account statement sorting code 400011 account number 12345678 exact duplicate text that must not self-match inside the same job',
+    });
+    const excludedNbNote = addFiledNote('excluded-nb', {
+      parentId: nbInbox,
+      title: 'HSBC Inbox Note',
+      ocrText:
+        'HSBC Bank UK plc monthly current account statement sorting code 400011 inbox copy that belongs to an excluded notebook and must not influence suggestions',
+    });
+    const trashedNote = addFiledNote('trashed', {
+      parentId: nbBanking,
+      title: 'Trashed HSBC Note',
+      deletedTime: 2000,
+      ocrText:
+        'HSBC Bank UK plc monthly current account statement sorting code 400011 deleted note sitting in trash waiting to be purged forever',
+    });
+    const trashedNbNote = addFiledNote('trashed-nb', {
+      parentId: nbTrashed,
+      title: 'Note in Trashed Notebook',
+      ocrText:
+        'HSBC Bank UK plc monthly current account statement sorting code 400011 sitting inside a trashed notebook and therefore excluded',
+    });
+    const conflictNote = addFiledNote('conflict', {
+      parentId: nbBanking,
+      title: 'Conflict HSBC Note',
+      props: { is_conflict: '1' },
+      ocrText:
+        'HSBC Bank UK plc monthly current account statement sorting code 400011 conflict copy produced by Joplin sync and excluded from search/index',
+    });
+    const encryptedNote = addFiledNote('encrypted-note', {
+      parentId: nbBanking,
+      title: '',
+      props: { encryption_applied: '1' },
+      ocrText:
+        'HSBC Bank UK plc monthly current account statement sorting code 400011 ciphered note text that must never enter similarity index',
+    });
+    const encryptedNbNote = addFiledNote('encrypted-nb', {
+      parentId: nbEncrypted,
+      title: 'Encrypted Notebook Note',
+      ocrText:
+        'HSBC Bank UK plc monthly current account statement sorting code 400011 inside encrypted notebook must not enter similarity index',
+    });
+    const shortOcrNote = addFiledNote('short-ocr', {
+      parentId: nbBanking,
+      title: 'Short OCR HSBC Note',
+      ocrText: 'HSBC 400011 short text under 150 chars',
+    });
+    addFiledNote('no-ocr', {
+      parentId: nbBanking,
+      title: 'No OCR Note',
+      ocrText: null,
+    });
+
+    const entry: CacheEntry = {
+      lastFetched: Date.now(),
+      lastAccessed: Date.now(),
+      fetchPromise: null,
+      lastRefreshFailed: false,
+      notebooks,
+      notes,
+      tags: new Map(),
+      noteTags: [],
+      resources,
+      itemTimestamps: new Map(),
+      syncInfoUpdatedTime: null,
+      deltaCursor: null,
+      encryptedItemIds: new Set([encryptedNote, nbEncrypted]),
+      masterKeyIds: new Set(),
+      unreadableItems: new Set(),
+      localChanges: new Map(),
+    };
+
+    const index = buildNoteSimilarityIndex(entry, {
+      excludeNotebookIds: new Set([nbInbox]),
+      excludeNoteIds: new Set([jobOwnId]),
+    });
+
+    assert.equal(index.size, 6);
+
+    const hits = index.findSimilar(
+      'HSBC Bank UK plc current account statement sorting code 400011 balance summary direct debit',
+      5
+    );
+    assert.ok(hits.length >= 2);
+    assert.equal(hits[0].noteId, hsbcPrimary);
+    assert.equal(hits[0].notebookId, nbBanking);
+    assert.equal(hits[0].notebookPath, 'Finance / Banking');
+    assert.equal(hits[1].noteId, hsbcSecondary);
+    assert.ok(hits[0].similarity > hits[1].similarity);
+
+    const hitIds = new Set(hits.map((h) => h.noteId));
+    for (const forbidden of [
+      jobOwnId,
+      excludedNbNote,
+      trashedNote,
+      trashedNbNote,
+      conflictNote,
+      encryptedNote,
+      encryptedNbNote,
+      shortOcrNote,
+    ]) {
+      assert.ok(!hitIds.has(forbidden), `expected note ${forbidden} to be excluded`);
+    }
+    if (hits.length > 2) {
+      assert.ok(hits[1].similarity > hits[2].similarity);
+    }
+    assert.ok(!hitIds.has(cjkOne) && !hitIds.has(cjkTwo));
+
+    // CJK bigrams and 4+ digit numbers match too
+    const cjkHits = index.findSimilar('中國銀行香港 戶口月結單 客戶編號 98765432', 5);
+    assert.equal(cjkHits.length, 2);
+    assert.deepEqual(new Set(cjkHits.map((h) => h.noteId)), new Set([cjkOne, cjkTwo]));
+  });
 });
 
 describe('OrganizerService: OpenAI HTTP client, retries, repairs, persistence and resume', () => {
-  test('calls OpenAI-compatible Chat Completions with json_object format, retries 429/500 with backoff, never logs content or key', async () => {
+  test('calls OpenAI-compatible Chat Completions with json_object format, retries 429/500 with backoff, never logs content or key', { timeout: TEST_TIMEOUT_MS }, async () => {
     const requests: Array<{ auth?: string; body: any }> = [];
     let attempt = 0;
 
@@ -260,16 +648,18 @@ describe('OrganizerService: OpenAI HTTP client, retries, repairs, persistence an
     console.warn = (...args: unknown[]) => logs.push(args.map(String).join(' '));
 
     try {
-      const svc = new OrganizerService({
-        aiBaseUrl: `http://127.0.0.1:${llmPort}/v1`,
-        aiApiKey: 'sk-super-secret-value',
-        aiModel: 'deepseek-flash',
-        aiConcurrency: 1,
-        aiFake: false,
-        cacheDir: null,
-        sleep: async () => {},
-        retryBaseDelayMs: 0,
-      });
+      const svc = trackService(
+        new OrganizerService({
+          aiBaseUrl: `http://127.0.0.1:${llmPort}/v1`,
+          aiApiKey: 'sk-super-secret-value',
+          aiModel: 'deepseek-flash',
+          aiConcurrency: 1,
+          aiFake: false,
+          cacheDir: null,
+          sleep: async () => {},
+          retryBaseDelayMs: 0,
+        })
+      );
 
       const { jobId } = await svc.startJob(session, {
         noteIds: [demoId('note-scanned-invoice'), demoId('note-markdown-extras')],
@@ -295,11 +685,211 @@ describe('OrganizerService: OpenAI HTTP client, retries, repairs, persistence an
       console.log = origLog;
       console.error = origError;
       console.warn = origWarn;
+      llmServer.closeAllConnections?.();
       await new Promise((resolve) => llmServer.close(resolve));
     }
   });
 
-  test('repairs invalid JSON once, then marks item failed if second response is still invalid', async () => {
+  test('injects similar-notes hint into user prompt only, preserves byte-identical system prompt, and drops index on finish/cancel', { timeout: TEST_TIMEOUT_MS }, async () => {
+    const addedKeys: string[] = [];
+    const now = Date.now();
+    const putDoc = (key: string, notebookId: string, title: string, ocrText: string) => {
+      const noteId = demoId(`svc-hint-note-${key}`);
+      const resId = demoId(`svc-hint-res-${key}`);
+      putMockItem(
+        app.mock,
+        {
+          type_: JoplinItemType.Resource,
+          id: resId,
+          title: `${key}.pdf`,
+          properties: {
+            id: resId,
+            mime: 'application/pdf',
+            filename: `${key}.pdf`,
+            file_extension: 'pdf',
+            size: '128',
+            encryption_applied: '0',
+            ocr_status: '2',
+            ocr_text: ocrText,
+            updated_time: new Date(now).toISOString(),
+            deleted_time: '0',
+          },
+        },
+        now
+      );
+      putMockItem(
+        app.mock,
+        {
+          type_: JoplinItemType.Note,
+          id: noteId,
+          title,
+          body: `Attachment ![doc](:/${resId})`,
+          properties: {
+            id: noteId,
+            parent_id: notebookId,
+            updated_time: new Date(now).toISOString(),
+            deleted_time: '0',
+            encryption_applied: '0',
+          },
+        },
+        now
+      );
+      addedKeys.push(`${resId}.md`, `${noteId}.md`);
+      return noteId;
+    };
+
+    try {
+      const filedHsbc1 = putDoc(
+        'hsbc-filed-1',
+        demoId('nb-personal'),
+        '2025-01-10 HSBC – Current Account Statement',
+        'HSBC UK Bank plc monthly current account statement sorting code 400011 balance GBP 3100.00 customer notice direct debit reference 551100 standing order summary london branch uk'
+      );
+      putDoc(
+        'hsbc-filed-2',
+        demoId('nb-personal'),
+        '2025-02-10 HSBC – Savings Account Statement',
+        'HSBC UK Bank plc quarterly savings statement sorting code 400011 interest summary GBP 9200.00 bonus saver account branch birmingham customer helpline uk banking'
+      );
+      putDoc(
+        'water-filed-1',
+        demoId('nb-reading'),
+        '2025-01-15 Thames Water – Bill',
+        'Thames Water Utilities Limited sewerage supply charges meter reading 88776655 statement period summary direct debit customer helpline berkshire united kingdom'
+      );
+      const targetNoteId = putDoc(
+        'hsbc-target',
+        demoId('nb-work'),
+        '2025_03_10.pdf',
+        'HSBC UK Bank plc monthly current account statement sorting code 400011 balance GBP 3450.00 direct debit reference 551100 standing order summary london branch uk'
+      );
+
+      await app.api('/api/notebooks/refresh', { method: 'POST' });
+
+      const capturedPrompts: Array<{ system: string; user: string }> = [];
+      let releaseFirst!: () => void;
+      const firstEntered = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let allowFinish!: () => void;
+      const finishGate = new Promise<void>((resolve) => {
+        allowFinish = resolve;
+      });
+
+      let callIdx = 0;
+      const svc = trackService(
+        new OrganizerService({
+          aiBaseUrl: 'http://127.0.0.1:18317/v1',
+          aiModel: 'deepseek-flash',
+          aiConcurrency: 1,
+          aiFake: false,
+          cacheDir: null,
+          completionFn: async (messages, signal) => {
+            capturedPrompts.push({
+              system: messages[0]?.content ?? '',
+              user: messages[1]?.content ?? '',
+            });
+            callIdx++;
+            if (callIdx === 1) {
+              releaseFirst();
+              await new Promise<void>((resolve, reject) => {
+                if (signal.aborted) {
+                  reject(new DOMException('Aborted', 'AbortError'));
+                  return;
+                }
+                const onAbort = () => reject(new DOMException('Aborted', 'AbortError'));
+                signal.addEventListener('abort', onAbort, { once: true });
+                void finishGate.then(() => {
+                  signal.removeEventListener('abort', onAbort);
+                  resolve();
+                });
+              });
+            }
+            return {
+              content: JSON.stringify({
+                title: '2025-03-10 HSBC – Current Account Statement',
+                notebookId: demoId('nb-personal'),
+                tags: ['statement', 'hsbc'],
+                confidence: 0.94,
+                documentDate: '2025-03-10',
+                reason: 'Matched HSBC OCR and similar filed statements.',
+              }),
+              usage: { promptTokens: 80, completionTokens: 25, totalTokens: 105 },
+            };
+          },
+        })
+      );
+
+      const { jobId } = await svc.startJob(session, {
+        noteIds: [targetNoteId, demoId('note-markdown-extras')],
+        excludeNotebookIds: [demoId('nb-work')],
+      });
+      await firstEntered;
+      assert.equal(svc.hasSimilarityIndex(session), true);
+
+      allowFinish();
+      await svc.waitForIdle(session);
+      assert.equal(svc.hasSimilarityIndex(session), false);
+
+      const job = await svc.getJob(session, jobId);
+      assert.equal(job.status, 'done');
+      assert.equal(capturedPrompts.length, 2);
+      // System prompt stays byte-identical across the entire job and holds no per-note hint section
+      assert.equal(capturedPrompts[0].system, capturedPrompts[1].system);
+      assert.ok(!capturedPrompts[0].system.includes('Similar notes already filed by the user'));
+
+      // Target OCR note receives exact similar-notes hint section (best match first, never target itself)
+      assert.match(
+        capturedPrompts[0].user,
+        new RegExp(
+          `Similar notes already filed by the user \\(by attachment text; usually the same issuer belongs in the same notebook\\):\\n- Personal \\(id: ${demoId('nb-personal')}\\) \\| "2025-01-10 HSBC – Current Account Statement" \\| similarity [01]\\.\\d{2}`
+        )
+      );
+      assert.ok(!capturedPrompts[0].user.includes('2025_03_10.pdf" | similarity'));
+      assert.ok(filedHsbc1);
+
+      // Non-OCR note omits the similar-notes hint section completely
+      assert.ok(!capturedPrompts[1].user.includes('Similar notes already filed by the user'));
+
+      // Cancel also drops the in-memory similarity index immediately
+      let releaseCancelStart!: () => void;
+      const cancelStarted = new Promise<void>((resolve) => {
+        releaseCancelStart = resolve;
+      });
+      const cancelSvc = trackService(
+        new OrganizerService({
+          aiBaseUrl: 'http://127.0.0.1:18317/v1',
+          aiModel: 'deepseek-flash',
+          aiConcurrency: 1,
+          aiFake: false,
+          cacheDir: null,
+          completionFn: async (_msgs, signal) => {
+            releaseCancelStart();
+            await new Promise<void>((_resolve, reject) => {
+              if (signal.aborted) {
+                reject(new DOMException('Aborted', 'AbortError'));
+                return;
+              }
+              signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+            });
+            throw new Error('unreachable');
+          },
+        })
+      );
+      const cancelledJob = await cancelSvc.startJob(session, { noteIds: [targetNoteId] });
+      await cancelStarted;
+      assert.equal(cancelSvc.hasSimilarityIndex(session), true);
+      await cancelSvc.cancelJob(session, cancelledJob.jobId);
+      assert.equal(cancelSvc.hasSimilarityIndex(session), false);
+    } finally {
+      for (const k of addedKeys) {
+        app.mock.items.delete(k);
+      }
+      await app.api('/api/notebooks/refresh', { method: 'POST' });
+    }
+  });
+
+  test('repairs invalid JSON once, then marks item failed if second response is still invalid', { timeout: TEST_TIMEOUT_MS }, async () => {
     let callsForFirst = 0;
     let callsForSecond = 0;
     const completionFn: LlmCompletionFn = async (messages) => {
@@ -326,13 +916,15 @@ describe('OrganizerService: OpenAI HTTP client, retries, repairs, persistence an
       return { content: '{still broken', usage: { promptTokens: 40, completionTokens: 5, totalTokens: 45 } };
     };
 
-    const svc = new OrganizerService({
-      aiBaseUrl: 'http://127.0.0.1:18317/v1',
-      aiModel: 'deepseek-flash',
-      aiConcurrency: 1,
-      cacheDir: null,
-      completionFn,
-    });
+    const svc = trackService(
+      new OrganizerService({
+        aiBaseUrl: 'http://127.0.0.1:18317/v1',
+        aiModel: 'deepseek-flash',
+        aiConcurrency: 1,
+        cacheDir: null,
+        completionFn,
+      })
+    );
 
     const { jobId } = await svc.startJob(session, {
       noteIds: [demoId('note-scanned-invoice'), demoId('note-markdown-extras')],
@@ -353,7 +945,7 @@ describe('OrganizerService: OpenAI HTTP client, retries, repairs, persistence an
     assert.equal(job.usage.totalTokens, 60 + 90 + 45 + 45);
   });
 
-  test('persists job under CACHE_DIR and resumes unfinished items on startup and session attach', async () => {
+  test('persists job under CACHE_DIR and resumes unfinished items on startup and session attach', { timeout: TEST_TIMEOUT_MS }, async () => {
     const isolatedCacheDir = mkdtempSync(join(tmpdir(), 'joplin-organize-resume-'));
     try {
       // Ensure user note cache exists in tempCacheDir so resumeFromDiskOnStartup can read saved entry
@@ -393,14 +985,16 @@ describe('OrganizerService: OpenAI HTTP client, retries, repairs, persistence an
         throw new Error('unreachable');
       };
 
-      const svc1 = new OrganizerService({
-        aiBaseUrl: 'http://127.0.0.1:18317/v1',
-        aiModel: 'deepseek-flash',
-        aiConcurrency: 1,
-        aiFake: false,
-        cacheDir: tempCacheDir, // shares noteCache's ownerKey and saved cache file
-        completionFn: interruptingClient,
-      });
+      const svc1 = trackService(
+        new OrganizerService({
+          aiBaseUrl: 'http://127.0.0.1:18317/v1',
+          aiModel: 'deepseek-flash',
+          aiConcurrency: 1,
+          aiFake: false,
+          cacheDir: tempCacheDir, // shares noteCache's ownerKey and saved cache file
+          completionFn: interruptingClient,
+        })
+      );
 
       const { jobId } = await svc1.startJob(session, {
         noteIds: [demoId('note-scanned-invoice'), demoId('note-markdown-extras')],
@@ -408,36 +1002,44 @@ describe('OrganizerService: OpenAI HTTP client, retries, repairs, persistence an
       });
       await secondStarted;
       await svc1.shutdown();
+      assert.equal(svc1.hasSimilarityIndex(session), false);
 
-      // Confirm persisted file shows job still running with item 0 done and item 1 pending
+      // Confirm persisted file shows job still running with item 0 done and item 1 pending (and no similarity index on disk)
       const persistedPath = join(tempCacheDir, 'organize', `${ownerKey}.json`);
-      const persisted = JSON.parse(readFileSync(persistedPath, 'utf8'));
+      const persistedRaw = readFileSync(persistedPath, 'utf8');
+      const persisted = JSON.parse(persistedRaw);
       assert.equal(persisted.job.id, jobId);
       assert.equal(persisted.job.status, 'running');
       assert.equal(persisted.job.items[0].status, 'done');
       assert.equal(persisted.job.items[1].status, 'pending');
+      assert.ok(!persistedRaw.includes('similarityIndex'));
 
       // New service instance simulates server restart -> resumeFromDiskOnStartup finishes remaining work
-      const svc2 = new OrganizerService({
-        aiBaseUrl: 'http://127.0.0.1:18317/v1',
-        aiModel: 'deepseek-flash',
-        aiConcurrency: 2,
-        aiFake: true,
-        cacheDir: tempCacheDir,
-      });
+      const svc2 = trackService(
+        new OrganizerService({
+          aiBaseUrl: 'http://127.0.0.1:18317/v1',
+          aiModel: 'deepseek-flash',
+          aiConcurrency: 2,
+          aiFake: true,
+          cacheDir: tempCacheDir,
+        })
+      );
       svc2.resumeFromDiskOnStartup();
       await svc2.waitForIdle(session);
       const resumed = await svc2.getJob(session, jobId);
       assert.equal(resumed.status, 'done');
       assert.equal(resumed.progress.done, 2);
+      assert.equal(svc2.hasSimilarityIndex(session), false);
 
       // Isolate cross-session ownership with session-<sha256> when CACHE_DIR is omitted/custom session
-      const svcSession = new OrganizerService({
-        aiBaseUrl: 'http://127.0.0.1:18317/v1',
-        aiModel: 'deepseek-flash',
-        aiFake: true,
-        cacheDir: isolatedCacheDir,
-      });
+      const svcSession = trackService(
+        new OrganizerService({
+          aiBaseUrl: 'http://127.0.0.1:18317/v1',
+          aiModel: 'deepseek-flash',
+          aiFake: true,
+          cacheDir: isolatedCacheDir,
+        })
+      );
       const { jobId: ownedJobId } = await svcSession.startJob(session, {
         noteIds: [demoId('note-scanned-invoice')],
       });
@@ -450,13 +1052,13 @@ describe('OrganizerService: OpenAI HTTP client, retries, repairs, persistence an
 });
 
 describe('HTTP /api/organize endpoints: lifecycle, cancel, apply with conflict, and undo', () => {
-  test('status returns enabled & model without leaking provider URL or key', async () => {
+  test('status returns enabled & model without leaking provider URL or key', { timeout: TEST_TIMEOUT_MS }, async () => {
     const res = await app.api('/api/organize/status');
     assert.equal(res.status, 200);
     assert.deepEqual(res.data, { enabled: true, model: 'deepseek-flash' });
   });
 
-  test('starts a job, pages suggestions, avoids excluded notebook, and supports cancel', async () => {
+  test('starts a job, pages suggestions, avoids excluded notebook, and supports cancel', { timeout: TEST_TIMEOUT_MS }, async () => {
     const startRes = await app.api('/api/organize/jobs', {
       method: 'POST',
       body: JSON.stringify({
@@ -533,7 +1135,7 @@ describe('HTTP /api/organize endpoints: lifecycle, cancel, apply with conflict, 
     }
   });
 
-  test('cancels an in-flight running job via DELETE /api/organize/jobs/:id', async () => {
+  test('cancels an in-flight running job via DELETE /api/organize/jobs/:id', { timeout: TEST_TIMEOUT_MS }, async () => {
     const created = await app.api('/api/organize/jobs', {
       method: 'POST',
       body: JSON.stringify({
@@ -552,7 +1154,7 @@ describe('HTTP /api/organize endpoints: lifecycle, cancel, apply with conflict, 
     assert.ok(['cancelled', 'done'].includes(delRes.data.status));
   });
 
-  test('applies suggestions with conflict isolation and reverts cleanly on undo (skipping changed notes)', async () => {
+  test('applies suggestions with conflict isolation and reverts cleanly on undo (skipping changed notes)', { timeout: TEST_TIMEOUT_MS }, async () => {
     // Create two isolated test notes: noteA has pre-existing tag 'planning'
     const c1 = await app.api('/api/notes', {
       method: 'POST',
