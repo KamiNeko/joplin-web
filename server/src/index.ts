@@ -1,5 +1,6 @@
 import { createApp } from './app.js';
 import { config } from './config.js';
+import { organizerService } from './services/organizer.js';
 
 const app = createApp(config);
 
@@ -25,9 +26,11 @@ export const server = config.host
 // Graceful shutdown handling
 const shutdown = (signal: string) => {
   console.log(`\n[Server] Received ${signal}. Shutting down gracefully...`);
-  server.close(() => {
-    console.log('[Server] HTTP server closed.');
-    process.exit(0);
+  void organizerService.shutdown().finally(() => {
+    server.close(() => {
+      console.log('[Server] HTTP server closed.');
+      process.exit(0);
+    });
   });
 
   // Force shutdown if taking too long
@@ -36,6 +39,10 @@ const shutdown = (signal: string) => {
     process.exit(1);
   }, 10000);
 };
+
+server.on('close', () => {
+  void organizerService.shutdown();
+});
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));

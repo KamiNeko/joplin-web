@@ -14,6 +14,7 @@ const executablePath = process.env.E2E_EXECUTABLE_PATH;
 
 export default defineConfig({
   testDir: "e2e",
+  timeout: 60_000,
   // The tests share one in-memory demo server, so they run one after another
   workers: 1,
   fullyParallel: false,

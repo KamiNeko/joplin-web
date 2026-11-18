@@ -408,4 +408,56 @@ describe("bulk selection and actions", () => {
       restore: true,
     });
   });
+
+  it("shows Auto-organize only when enabled, pre-excludes uniform source notebook, and navigates to /organize/:jobId", async () => {
+    let organizeEnabled = false;
+    const calls = mockNotesApi((call) => {
+      if (call.path === "/api/organize/status") {
+        return jsonResponse(organizeEnabled ? { enabled: true, model: "deepseek-flash" } : { enabled: false });
+      }
+      if (call.method === "POST" && call.path === "/api/organize/jobs") {
+        return jsonResponse({ jobId: "abc1234567890abcdef1234567890abc" }, 201);
+      }
+      return undefined;
+    });
+
+    const first = renderPage(`/notebooks/${work.id}`);
+    await noteRow("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Select" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select all (2)" }));
+    const barDisabled = screen.getByRole("region", { name: "Bulk actions" });
+    expect(within(barDisabled).queryByRole("button", { name: "Auto-organize" })).toBeNull();
+    first.unmount();
+
+    organizeEnabled = true;
+    renderWithProviders(
+      <>
+        <Routes>
+          <Route path="/notebooks/:id" element={<NotesPage />} />
+          <Route path="/organize/:jobId" element={<div>Organize View</div>} />
+        </Routes>
+        <LocationProbe />
+      </>,
+      { route: `/notebooks/${work.id}` }
+    );
+    await noteRow("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Select" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select all (2)" }));
+
+    const barEnabled = screen.getByRole("region", { name: "Bulk actions" });
+    const btn = await within(barEnabled).findByRole("button", { name: "Auto-organize" });
+    fireEvent.click(btn);
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Auto-organize 2 notes")).toBeTruthy();
+    expect((within(dialog).getByRole("checkbox", { name: /Work/ }) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start organizing (2)" }));
+
+    await waitFor(() => expect(location()).toBe("/organize/abc1234567890abcdef1234567890abc"));
+    const post = calls.find((c) => c.method === "POST" && c.path === "/api/organize/jobs")!;
+    expect(post.body).toEqual({
+      noteIds: [notes[0].id, notes[1].id],
+      excludeNotebookIds: [work.id],
+    });
+  });
 });

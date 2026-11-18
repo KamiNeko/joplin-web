@@ -127,16 +127,6 @@ test("creates, edits, tags, finds, trashes and restores a note", async ({ page }
   await expect(page.getByText(title).first()).toBeVisible();
 });
 
-test("finds a note via its attachment OCR text", async ({ page }) => {
-  await signIn(page);
-  await page.getByRole("searchbox", { name: "Search notes" }).fill("Backup Storage");
-  await expect(page.getByText("1 found")).toBeVisible();
-  await expect(page.getByText("Found in attachment:")).toBeVisible();
-  await page.getByRole("button", { name: /2024_03_11\.pdf/ }).click();
-  await expect(page.getByRole("heading", { level: 1, name: "2024_03_11.pdf" })).toBeVisible();
-  await page.getByRole("button", { name: "Clear search" }).first().click();
-});
-
 test("selects multiple notes, moves them in bulk and undoes the move", async ({ page }) => {
   await signIn(page);
   const sidebar = page.getByRole("complementary").first();
@@ -162,6 +152,62 @@ test("selects multiple notes, moves them in bulk and undoes the move", async ({ 
   await expect(page.getByRole("heading", { level: 3, name: "Weeknight Miso Ramen", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { level: 3, name: "Sourdough Starter Schedule", exact: true })).toBeVisible();
   await expect(sidebar.getByRole("button", { name: /^Recipes\s*, 2 notes$/ })).toBeVisible();
+});
+
+test("selects multiple notes, runs Auto-organize, applies and undoes", async ({ page }) => {
+  await signIn(page);
+  const sidebar = page.getByRole("complementary").first();
+
+  await sidebar.getByRole("button", { name: /^Work\s*, 2 notes$/ }).click();
+  await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-work")}(/|$)`));
+  await expect(page.getByRole("heading", { level: 2, name: "Work" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await page.getByRole("checkbox", { name: "Select 2024_03_11.pdf" }).click();
+  await page.getByRole("checkbox", { name: "Select Markdown Extras: Math, Diagrams & More" }).click();
+  await expect(page.getByText("2 selected")).toBeVisible();
+
+  await page.getByRole("region", { name: "Bulk actions" }).getByRole("button", { name: "Auto-organize" }).click();
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("Auto-organize 2 notes")).toBeVisible();
+  await expect(dialog.getByRole("checkbox", { name: /Work/ })).toBeChecked();
+  await expect(dialog.getByRole("note")).toContainText("OCR text");
+  await dialog.getByRole("button", { name: "Start organizing (2)" }).click();
+
+  await expect(page).toHaveURL(/\/organize\/[0-9a-f]+$/);
+  await expect(page.getByText("Analysed 2 / 2")).toBeVisible();
+
+  // High-confidence OCR invoice starts ticked; low-confidence reference note starts unticked
+  await expect(page.getByRole("checkbox", { name: "Select 2024_03_11.pdf" })).toBeChecked();
+  await expect(page.getByLabel("Suggested title for 2024_03_11.pdf")).toHaveValue(
+    "2024-03-11 Acme Cloud Services – Dedicated Backup Storage Invoice"
+  );
+  await expect(page.getByRole("checkbox", { name: "Select Markdown Extras: Math, Diagrams & More" })).not.toBeChecked();
+
+  await page.getByRole("button", { name: "Apply selected (1)" }).click();
+  await expect(page.getByText("Applied changes to 1 note")).toBeVisible();
+  await expect(page.getByText("Applied", { exact: true })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: /^Work\s*, 1 note$/ })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: /^Projects\s*, 3 notes$/ })).toBeVisible();
+
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(page.getByText("Reverted 1 note")).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: /^Work\s*, 2 notes$/ })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: /^Projects\s*, 2 notes$/ })).toBeVisible();
+
+  await sidebar.getByRole("button", { name: /^Work\s*, 2 notes$/ }).click();
+  await expect(page.getByText("2024_03_11.pdf").first()).toBeVisible();
+});
+
+test("finds a note via its attachment OCR text", async ({ page }) => {
+  await signIn(page);
+  await page.getByRole("searchbox", { name: "Search notes" }).fill("Backup Storage");
+  await expect(page.getByText("1 found")).toBeVisible();
+  await expect(page.getByText("Found in attachment:")).toBeVisible();
+  await page.getByRole("button", { name: /2024_03_11\.pdf/ }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "2024_03_11.pdf" })).toBeVisible();
+  await page.getByRole("button", { name: "Clear search" }).first().click();
 });
 
 test("attaches a file to a note", async ({ page }) => {
