@@ -10,6 +10,9 @@ export const TRUSTED_DEVICE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const SETUP_TTL_MS = 10 * 60 * 1000;
 export const WEBAUTHN_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 export const RECOVERY_CODE_COUNT = 10;
+export const LOCKOUT_THRESHOLD = 5;
+export const LOCKOUT_BASE_MS = 60 * 1000;
+export const LOCKOUT_MAX_MS = 60 * 60 * 1000;
 
 const MAX_PENDING_LOGINS = 1000;
 const MAX_TRUSTED_DEVICES = 50;
@@ -55,6 +58,8 @@ export interface UserTwoFactorRecord {
   recoverySalt: string | null;
   recoveryCodes: StoredRecoveryCode[];
   trustedDevices: StoredTrustedDevice[];
+  failedAttempts: number;
+  lockedUntil: number | null;
 }
 
 export interface WebAuthnChallengeRecord {
@@ -70,8 +75,6 @@ export interface PendingLogin {
   joplinSessionId: string;
   userId: string;
   email: string;
-  mustEnroll: boolean;
-  methods: TwoFactorMethod[];
   attempts: number;
   maxAttempts: number;
   createdAt: number;
@@ -117,6 +120,8 @@ function emptyUserRecord(userId: string): UserTwoFactorRecord {
     recoverySalt: null,
     recoveryCodes: [],
     trustedDevices: [],
+    failedAttempts: 0,
+    lockedUntil: null,
   };
 }
 
@@ -224,6 +229,43 @@ export function hasPrimaryFactor(record: UserTwoFactorRecord): boolean {
   return Boolean(record.totp) || record.passkeys.length > 0;
 }
 
+/**
+ * Returns remaining lockout duration in whole seconds (minimum 1) if `record` is currently locked,
+ * or `null` if no active lock applies at `now`.
+ */
+export function getLockoutRetryAfterSeconds(record: UserTwoFactorRecord, now = Date.now()): number | null {
+  if (record.lockedUntil === null || record.lockedUntil <= now) {
+    return null;
+  }
+  return Math.max(1, Math.ceil((record.lockedUntil - now) / 1000));
+}
+
+/**
+ * Increments `record.failedAttempts` after a failed second-factor verification and applies
+ * exponential backoff (`1, 2, 4, ...` minutes up to `60` minutes) once `LOCKOUT_THRESHOLD`
+ * consecutive failures are reached. Returns the applied lock duration in seconds, or `null`.
+ */
+export function recordFailedSecondFactor(record: UserTwoFactorRecord, now = Date.now()): number | null {
+  const nextAttempts = record.failedAttempts + 1;
+  record.failedAttempts = nextAttempts;
+  if (nextAttempts >= LOCKOUT_THRESHOLD) {
+    const exponent = Math.min(nextAttempts - LOCKOUT_THRESHOLD, 10);
+    const lockMs = Math.min(LOCKOUT_MAX_MS, LOCKOUT_BASE_MS * 2 ** exponent);
+    record.lockedUntil = now + lockMs;
+    return Math.max(1, Math.ceil(lockMs / 1000));
+  }
+  record.lockedUntil = null;
+  return null;
+}
+
+/**
+ * Clears consecutive second-factor failure tracking after a successful second-factor check.
+ */
+export function clearFailedSecondFactor(record: UserTwoFactorRecord): void {
+  record.failedAttempts = 0;
+  record.lockedUntil = null;
+}
+
 function validateUserRecord(raw: unknown, expectedUserId: string): UserTwoFactorRecord {
   if (!raw || typeof raw !== 'object') {
     throw new Error('Invalid 2FA record: expected object');
@@ -235,6 +277,17 @@ function validateUserRecord(raw: unknown, expectedUserId: string): UserTwoFactor
   if (!Array.isArray(obj.passkeys) || !Array.isArray(obj.recoveryCodes) || !Array.isArray(obj.trustedDevices)) {
     throw new Error('Invalid 2FA record lists');
   }
+  const failedAttempts = obj.failedAttempts === undefined ? 0 : obj.failedAttempts;
+  if (typeof failedAttempts !== 'number' || !Number.isInteger(failedAttempts) || failedAttempts < 0) {
+    throw new Error('Invalid 2FA record failedAttempts');
+  }
+  const lockedUntil = obj.lockedUntil === undefined ? null : obj.lockedUntil;
+  if (
+    lockedUntil !== null &&
+    (typeof lockedUntil !== 'number' || !Number.isFinite(lockedUntil) || lockedUntil < 0)
+  ) {
+    throw new Error('Invalid 2FA record lockedUntil');
+  }
   return {
     version: 1,
     userId: obj.userId,
@@ -243,6 +296,8 @@ function validateUserRecord(raw: unknown, expectedUserId: string): UserTwoFactor
     recoverySalt: (obj.recoverySalt as string | null) ?? null,
     recoveryCodes: obj.recoveryCodes as StoredRecoveryCode[],
     trustedDevices: obj.trustedDevices as StoredTrustedDevice[],
+    failedAttempts,
+    lockedUntil,
   };
 }
 
@@ -254,6 +309,8 @@ export class TwoFactorStore {
   private readonly userLocks = new Map<string, Promise<unknown>>();
   private readonly pendingLogins = new Map<string, PendingLogin>();
   private readonly inMemorySessions = new Map<string, SessionRecord>();
+  // In-memory only (never persisted to sessions.json) so active sessions can be cleaned up upstream and from caches
+  private readonly sessionTokensByHash = new Map<string, string>();
   private readonly pendingTotpSetups = new Map<string, { secret: string; expiresAt: number }>();
   private readonly sessionChallenges = new Map<string, WebAuthnChallengeRecord>();
 
@@ -335,6 +392,45 @@ export class TwoFactorStore {
   }
 
   /**
+   * Verifies and consumes a single-use recovery code against an already-loaded user record inside
+   * `withUserLock` (mutates `record.recoveryCodes` in memory on match without persisting).
+   */
+  public verifyAndConsumeRecoveryCodeLocked(
+    record: UserTwoFactorRecord,
+    inputCode: string,
+    now = Date.now()
+  ): { valid: boolean; remaining: number } {
+    if (!record.recoverySalt || record.recoveryCodes.length === 0) {
+      return { valid: false, remaining: 0 };
+    }
+    const normalized = normalizeRecoveryCode(inputCode);
+    if (!/^[A-Z2-7]{16}$/.test(normalized)) {
+      const remaining = record.recoveryCodes.filter((c) => c.usedAt === null).length;
+      return { valid: false, remaining };
+    }
+    const candidateBuf = Buffer.from(hashRecoveryCode(record.recoverySalt, normalized), 'hex');
+    let matchedIndex = -1;
+    for (let i = 0; i < record.recoveryCodes.length; i++) {
+      const entry = record.recoveryCodes[i];
+      if (entry.usedAt !== null) continue;
+      const storedBuf = Buffer.from(entry.hash, 'hex');
+      if (storedBuf.length === candidateBuf.length && timingSafeEqual(storedBuf, candidateBuf)) {
+        matchedIndex = i;
+      }
+    }
+    if (matchedIndex === -1) {
+      const remaining = record.recoveryCodes.filter((c) => c.usedAt === null).length;
+      return { valid: false, remaining };
+    }
+    record.recoveryCodes[matchedIndex] = {
+      ...record.recoveryCodes[matchedIndex],
+      usedAt: now,
+    };
+    const remaining = record.recoveryCodes.filter((c) => c.usedAt === null).length;
+    return { valid: true, remaining };
+  }
+
+  /**
    * Verifies and consumes a single-use recovery code for the given user.
    */
   public async verifyAndConsumeRecoveryCode(
@@ -342,36 +438,13 @@ export class TwoFactorStore {
     inputCode: string
   ): Promise<{ valid: boolean; remaining: number }> {
     return this.withUserLock(userId, () => {
+      const now = Date.now();
       const record = this.getUserRecord(userId);
-      if (!record.recoverySalt || record.recoveryCodes.length === 0) {
-        return { valid: false, remaining: 0 };
+      const outcome = this.verifyAndConsumeRecoveryCodeLocked(record, inputCode, now);
+      if (outcome.valid) {
+        this.saveUserRecord(record, now);
       }
-      const normalized = normalizeRecoveryCode(inputCode);
-      if (!/^[A-Z2-7]{16}$/.test(normalized)) {
-        const remaining = record.recoveryCodes.filter((c) => c.usedAt === null).length;
-        return { valid: false, remaining };
-      }
-      const candidateBuf = Buffer.from(hashRecoveryCode(record.recoverySalt, normalized), 'hex');
-      let matchedIndex = -1;
-      for (let i = 0; i < record.recoveryCodes.length; i++) {
-        const entry = record.recoveryCodes[i];
-        if (entry.usedAt !== null) continue;
-        const storedBuf = Buffer.from(entry.hash, 'hex');
-        if (storedBuf.length === candidateBuf.length && timingSafeEqual(storedBuf, candidateBuf)) {
-          matchedIndex = i;
-        }
-      }
-      if (matchedIndex === -1) {
-        const remaining = record.recoveryCodes.filter((c) => c.usedAt === null).length;
-        return { valid: false, remaining };
-      }
-      record.recoveryCodes[matchedIndex] = {
-        ...record.recoveryCodes[matchedIndex],
-        usedAt: Date.now(),
-      };
-      this.saveUserRecord(record);
-      const remaining = record.recoveryCodes.filter((c) => c.usedAt === null).length;
-      return { valid: true, remaining };
+      return outcome;
     });
   }
 
@@ -403,6 +476,44 @@ export class TwoFactorStore {
   }
 
   /**
+   * Checks a trusted-device token against an already-loaded record inside `withUserLock`.
+   * Mutates `record.trustedDevices` in place and returns `dirty: true` when persistence is needed.
+   */
+  public verifyTrustedDeviceLocked(
+    record: UserTwoFactorRecord,
+    token: string,
+    now = Date.now()
+  ): { matchedId: string | null; dirty: boolean } {
+    if (!token || token.length > 256 || record.trustedDevices.length === 0) {
+      return { matchedId: null, dirty: false };
+    }
+
+    const candidateBuf = Buffer.from(hashToken(token), 'hex');
+    const active = record.trustedDevices.filter((d) => d.expiresAt > now);
+    const prunedExpired = active.length !== record.trustedDevices.length;
+
+    let matchedIndex = -1;
+    for (let i = 0; i < active.length; i++) {
+      const storedBuf = Buffer.from(active[i].tokenHash, 'hex');
+      if (storedBuf.length === candidateBuf.length && timingSafeEqual(storedBuf, candidateBuf)) {
+        matchedIndex = i;
+      }
+    }
+
+    if (matchedIndex === -1) {
+      if (prunedExpired) {
+        record.trustedDevices = active;
+        return { matchedId: null, dirty: true };
+      }
+      return { matchedId: null, dirty: false };
+    }
+
+    active[matchedIndex] = { ...active[matchedIndex], lastUsedAt: now };
+    record.trustedDevices = active;
+    return { matchedId: active[matchedIndex].id, dirty: true };
+  }
+
+  /**
    * Checks whether a trusted-device cookie token is valid and non-expired for the user.
    * Updates lastUsedAt on match.
    */
@@ -414,32 +525,11 @@ export class TwoFactorStore {
     if (!token || token.length > 256) return null;
     return this.withUserLock(userId, () => {
       const record = this.getUserRecord(userId);
-      if (record.trustedDevices.length === 0) return null;
-
-      const candidateBuf = Buffer.from(hashToken(token), 'hex');
-      const active = record.trustedDevices.filter((d) => d.expiresAt > now);
-      const prunedExpired = active.length !== record.trustedDevices.length;
-
-      let matchedIndex = -1;
-      for (let i = 0; i < active.length; i++) {
-        const storedBuf = Buffer.from(active[i].tokenHash, 'hex');
-        if (storedBuf.length === candidateBuf.length && timingSafeEqual(storedBuf, candidateBuf)) {
-          matchedIndex = i;
-        }
+      const { matchedId, dirty } = this.verifyTrustedDeviceLocked(record, token, now);
+      if (dirty) {
+        this.saveUserRecord(record, now);
       }
-
-      if (matchedIndex === -1) {
-        if (prunedExpired) {
-          record.trustedDevices = active;
-          this.saveUserRecord(record, now);
-        }
-        return null;
-      }
-
-      active[matchedIndex] = { ...active[matchedIndex], lastUsedAt: now };
-      record.trustedDevices = active;
-      this.saveUserRecord(record, now);
-      return active[matchedIndex].id;
+      return matchedId;
     });
   }
 
@@ -474,8 +564,6 @@ export class TwoFactorStore {
     joplinSessionId: string;
     userId: string;
     email: string;
-    mustEnroll: boolean;
-    methods: TwoFactorMethod[];
     now?: number;
   }): { token: string; pending: PendingLogin; evictedSessions: string[] } {
     const now = input.now ?? Date.now();
@@ -496,8 +584,6 @@ export class TwoFactorStore {
       joplinSessionId: input.joplinSessionId,
       userId: input.userId,
       email: input.email,
-      mustEnroll: input.mustEnroll,
-      methods: input.methods,
       attempts: 0,
       maxAttempts: PENDING_LOGIN_MAX_ATTEMPTS,
       createdAt: now,
@@ -577,6 +663,11 @@ export class TwoFactorStore {
     for (const [hash, rec] of Object.entries(sessions)) {
       if (rec && typeof rec.userId === 'string' && now - rec.lastAccessedAt <= TRUSTED_DEVICE_TTL_MS) {
         pruned[hash] = rec;
+      } else {
+        this.inMemorySessions.delete(hash);
+        this.sessionTokensByHash.delete(hash);
+        this.pendingTotpSetups.delete(hash);
+        this.sessionChallenges.delete(hash);
       }
     }
     atomicWriteJson(filePath, pruned);
@@ -600,6 +691,7 @@ export class TwoFactorStore {
       lastAccessedAt: now,
     };
     this.inMemorySessions.set(sessionHash, record);
+    this.sessionTokensByHash.set(sessionHash, sessionId);
     if (this.cacheDir) {
       const map = this.loadSessionsMap();
       map[sessionHash] = record;
@@ -618,12 +710,18 @@ export class TwoFactorStore {
       const diskRecord = map[sessionHash];
       if (diskRecord) {
         this.inMemorySessions.set(sessionHash, diskRecord);
+        this.sessionTokensByHash.set(sessionHash, sessionId);
         return diskRecord;
       }
       this.inMemorySessions.delete(sessionHash);
+      this.sessionTokensByHash.delete(sessionHash);
       return null;
     }
-    return this.inMemorySessions.get(sessionHash) ?? null;
+    const mem = this.inMemorySessions.get(sessionHash) ?? null;
+    if (mem) {
+      this.sessionTokensByHash.set(sessionHash, sessionId);
+    }
+    return mem;
   }
 
   /**
@@ -638,6 +736,7 @@ export class TwoFactorStore {
         const updated = { ...existing, twoFactorPassed: true, lastSecondFactorAt: now, lastAccessedAt: now };
         map[sessionHash] = updated;
         this.inMemorySessions.set(sessionHash, updated);
+        this.sessionTokensByHash.set(sessionHash, sessionId);
         this.saveSessionsMap(map, now);
       }
     } else {
@@ -646,6 +745,7 @@ export class TwoFactorStore {
         existing.twoFactorPassed = true;
         existing.lastSecondFactorAt = now;
         existing.lastAccessedAt = now;
+        this.sessionTokensByHash.set(sessionHash, sessionId);
       }
     }
     return now + STEP_UP_TTL_MS;
@@ -657,6 +757,7 @@ export class TwoFactorStore {
   public removeSession(sessionId: string): void {
     const sessionHash = hashToken(sessionId);
     this.inMemorySessions.delete(sessionHash);
+    this.sessionTokensByHash.delete(sessionHash);
     this.pendingTotpSetups.delete(sessionHash);
     this.sessionChallenges.delete(sessionHash);
     if (this.cacheDir) {
@@ -669,12 +770,17 @@ export class TwoFactorStore {
   }
 
   /**
-   * Drops other sessions for `userId` that never passed 2FA (called when enrolling the first factor).
+   * Revokes all recorded sessions for `userId` except `keepSessionId` (called when enrolling the
+   * user's first factor so sessions predating enrollment cannot survive it). Returns raw tokens
+   * known in memory so callers can drop validation/note caches and end upstream sessions.
    */
-  public revokeUnverifiedSessionsForUser(userId: string, keepSessionId: string): void {
+  public revokeOtherSessionsForUser(userId: string, keepSessionId: string): string[] {
     const keepHash = hashToken(keepSessionId);
+    const revokedHashes = new Set<string>();
+
     for (const [hash, rec] of this.inMemorySessions) {
-      if (hash !== keepHash && rec.userId === userId && !rec.twoFactorPassed) {
+      if (hash !== keepHash && rec.userId === userId) {
+        revokedHashes.add(hash);
         this.inMemorySessions.delete(hash);
       }
     }
@@ -682,13 +788,26 @@ export class TwoFactorStore {
       const map = this.loadSessionsMap();
       let changed = false;
       for (const [hash, rec] of Object.entries(map)) {
-        if (hash !== keepHash && rec.userId === userId && !rec.twoFactorPassed) {
+        if (hash !== keepHash && rec && rec.userId === userId) {
+          revokedHashes.add(hash);
           delete map[hash];
           changed = true;
         }
       }
       if (changed) this.saveSessionsMap(map);
     }
+
+    const revokedTokens: string[] = [];
+    for (const hash of revokedHashes) {
+      this.pendingTotpSetups.delete(hash);
+      this.sessionChallenges.delete(hash);
+      const rawToken = this.sessionTokensByHash.get(hash);
+      this.sessionTokensByHash.delete(hash);
+      if (rawToken) {
+        revokedTokens.push(rawToken);
+      }
+    }
+    return revokedTokens;
   }
 
   // ---------------------------------------------------------------------------

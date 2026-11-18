@@ -19,7 +19,15 @@ import {
 import { joplinApi, JoplinAuthError } from '../services/joplin-api.js';
 import { noteCache } from '../services/note-cache.js';
 import { verifyTotp } from '../services/totp.js';
-import { getEnrolledMethods, hasPrimaryFactor, TwoFactorStore } from '../services/two-factor-store.js';
+import {
+  clearFailedSecondFactor,
+  getEnrolledMethods,
+  getLockoutRetryAfterSeconds,
+  hasPrimaryFactor,
+  recordFailedSecondFactor,
+  type TwoFactorMethod,
+  TwoFactorStore,
+} from '../services/two-factor-store.js';
 import { createTwoFactorRouter } from './two-factor.js';
 
 export { sessionCookie };
@@ -75,22 +83,138 @@ export function createAuthRouter(
           if (prev) await endJoplinSessionSafe(prev.joplinSessionId);
         }
 
-        const record = config.cacheDir ? activeStore.getUserRecord(session.userId) : null;
-        const userHas2fa = record ? hasPrimaryFactor(record) : false;
-        const requiresTwoFactor = userHas2fa || config.require2fa;
-        const mustEnroll = config.require2fa && !userHas2fa;
-        const methods = record ? getEnrolledMethods(record) : [];
         const isApiClient = req.headers.origin === undefined;
+        const { token: tdToken, duplicateCookies: duplicateTd } = getTrustedDeviceToken(req);
 
-        if (!requiresTwoFactor) {
-          cacheSessionValidation(session.sessionId, true, req.authState, config.authCacheTtlMs);
-          activeStore.recordSession(session.sessionId, {
+        type LoginDecision =
+          | { kind: 'full'; trustedDeviceBypass: boolean }
+          | { kind: 'api_must_enroll' }
+          | { kind: 'api_locked'; retryAfter: number }
+          | { kind: 'api_failed'; methods: TwoFactorMethod[]; invalidCode: boolean }
+          | { kind: 'api_verified' }
+          | {
+              kind: 'pending';
+              pendingToken: string;
+              evictedSessions: string[];
+              methods: TwoFactorMethod[];
+              mustEnroll: boolean;
+            };
+
+        const decideLogin = (): LoginDecision => {
+          const now = Date.now();
+          const record = config.cacheDir ? activeStore.getUserRecord(session.userId) : null;
+          const userHas2fa = record ? hasPrimaryFactor(record) : false;
+          const requiresTwoFactor = userHas2fa || config.require2fa;
+          const mustEnroll = config.require2fa && !userHas2fa;
+          const methods = record ? getEnrolledMethods(record) : [];
+
+          if (!requiresTwoFactor) {
+            cacheSessionValidation(session.sessionId, true, req.authState, config.authCacheTtlMs);
+            activeStore.recordSession(
+              session.sessionId,
+              {
+                userId: session.userId,
+                email,
+                twoFactorPassed: true,
+                lastSecondFactorAt: null,
+              },
+              now
+            );
+            return { kind: 'full', trustedDeviceBypass: false };
+          }
+
+          // API client one-call 2FA flow (no Origin header)
+          if (isApiClient) {
+            if (mustEnroll) {
+              return { kind: 'api_must_enroll' };
+            }
+
+            if (record && (hasTotpCode || hasRecoveryCode)) {
+              const lockedRetryAfter = getLockoutRetryAfterSeconds(record, now);
+              if (lockedRetryAfter !== null) {
+                return { kind: 'api_locked', retryAfter: lockedRetryAfter };
+              }
+
+              let verified = false;
+              if (hasTotpCode && record.totp) {
+                const check = verifyTotp(record.totp.secret, totpCode!, {
+                  lastUsedStep: record.totp.lastUsedStep,
+                });
+                if (check.valid && check.step !== null) {
+                  record.totp = { ...record.totp, lastUsedStep: check.step };
+                  verified = true;
+                }
+              } else if (hasRecoveryCode) {
+                const recovery = activeStore.verifyAndConsumeRecoveryCodeLocked(record, recoveryCode!, now);
+                verified = recovery.valid;
+              }
+
+              if (!verified) {
+                recordFailedSecondFactor(record, now);
+                activeStore.saveUserRecord(record, now);
+                return { kind: 'api_failed', methods, invalidCode: true };
+              }
+
+              clearFailedSecondFactor(record);
+              activeStore.saveUserRecord(record, now);
+              cacheSessionValidation(session.sessionId, true, req.authState, config.authCacheTtlMs);
+              activeStore.recordSession(
+                session.sessionId,
+                {
+                  userId: session.userId,
+                  email,
+                  twoFactorPassed: true,
+                  lastSecondFactorAt: now,
+                },
+                now
+              );
+              return { kind: 'api_verified' };
+            }
+
+            return { kind: 'api_failed', methods, invalidCode: false };
+          }
+
+          // Browser flow: check optional 30-day trusted-device cookie when 2FA is already enrolled
+          if (!mustEnroll && userHas2fa && record && tdToken && !duplicateTd) {
+            const { matchedId, dirty } = activeStore.verifyTrustedDeviceLocked(record, tdToken, now);
+            if (dirty) {
+              activeStore.saveUserRecord(record, now);
+            }
+            if (matchedId) {
+              cacheSessionValidation(session.sessionId, true, req.authState, config.authCacheTtlMs);
+              activeStore.recordSession(
+                session.sessionId,
+                {
+                  userId: session.userId,
+                  email,
+                  // Trusted device bypasses login prompt, but Settings mutations still require step-up
+                  twoFactorPassed: true,
+                  lastSecondFactorAt: null,
+                },
+                now
+              );
+              return { kind: 'full', trustedDeviceBypass: true };
+            }
+          }
+
+          // Browser 2FA step required: hold Joplin session server-side behind a pending cookie
+          const { token: pendingToken, evictedSessions } = activeStore.createPendingLogin({
+            joplinSessionId: session.sessionId,
             userId: session.userId,
             email,
-            twoFactorPassed: true,
-            lastSecondFactorAt: null,
+            now,
           });
-          console.log(`[AuthRoute] Login succeeded, session ${session.sessionId.substring(0, 8)}...`);
+          return { kind: 'pending', pendingToken, evictedSessions, methods, mustEnroll };
+        };
+
+        const decision = config.cacheDir
+          ? await activeStore.withUserLock(session.userId, decideLogin)
+          : decideLogin();
+
+        if (decision.kind === 'full') {
+          console.log(
+            `[AuthRoute] ${decision.trustedDeviceBypass ? 'Trusted-device login' : 'Login'} succeeded, session ${session.sessionId.substring(0, 8)}...`
+          );
 
           const cookie = sessionCookie(config, req);
           clearSessionCookies(res, cookie.name);
@@ -103,53 +227,37 @@ export function createAuthRouter(
           return;
         }
 
-        // API client one-call 2FA flow (no Origin header)
-        if (isApiClient) {
-          if (mustEnroll) {
-            await endJoplinSessionSafe(session.sessionId);
-            res.status(401).json({
-              error: 'Two-factor authentication enrollment is required. Sign in via the web UI first.',
-              twoFactor: { required: true, methods: [], mustEnroll: true },
-            });
-            return;
-          }
-
-          let verified = false;
-          if (hasTotpCode) {
-            verified = await activeStore.withUserLock(session.userId, () => {
-              const latest = activeStore.getUserRecord(session.userId);
-              if (!latest.totp) return false;
-              const check = verifyTotp(latest.totp.secret, totpCode!, {
-                lastUsedStep: latest.totp.lastUsedStep,
-              });
-              if (!check.valid || check.step === null) return false;
-              latest.totp = { ...latest.totp, lastUsedStep: check.step };
-              activeStore.saveUserRecord(latest);
-              return true;
-            });
-          } else if (hasRecoveryCode) {
-            const recovery = await activeStore.verifyAndConsumeRecoveryCode(session.userId, recoveryCode!);
-            verified = recovery.valid;
-          }
-
-          if (!verified) {
-            await endJoplinSessionSafe(session.sessionId);
-            res.status(401).json({
-              error: hasTotpCode || hasRecoveryCode
-                ? 'Invalid two-factor verification code'
-                : 'Two-factor authentication required',
-              twoFactor: { required: true, methods, mustEnroll: false },
-            });
-            return;
-          }
-
-          cacheSessionValidation(session.sessionId, true, req.authState, config.authCacheTtlMs);
-          activeStore.recordSession(session.sessionId, {
-            userId: session.userId,
-            email,
-            twoFactorPassed: true,
-            lastSecondFactorAt: Date.now(),
+        if (decision.kind === 'api_must_enroll') {
+          await endJoplinSessionSafe(session.sessionId);
+          res.status(401).json({
+            error: 'Two-factor authentication enrollment is required. Sign in via the web UI first.',
+            twoFactor: { required: true, methods: [], mustEnroll: true },
           });
+          return;
+        }
+
+        if (decision.kind === 'api_locked') {
+          await endJoplinSessionSafe(session.sessionId);
+          res.setHeader('Retry-After', String(decision.retryAfter));
+          res.status(429).json({
+            error: `Too many failed two-factor verification attempts. Try again in ${decision.retryAfter} seconds.`,
+            retryAfter: decision.retryAfter,
+          });
+          return;
+        }
+
+        if (decision.kind === 'api_failed') {
+          await endJoplinSessionSafe(session.sessionId);
+          res.status(401).json({
+            error: decision.invalidCode
+              ? 'Invalid two-factor verification code'
+              : 'Two-factor authentication required',
+            twoFactor: { required: true, methods: decision.methods, mustEnroll: false },
+          });
+          return;
+        }
+
+        if (decision.kind === 'api_verified') {
           console.log(`[AuthRoute] Login succeeded, session ${session.sessionId.substring(0, 8)}...`);
 
           const cookie = sessionCookie(config, req);
@@ -163,54 +271,20 @@ export function createAuthRouter(
           return;
         }
 
-        // Browser flow: check optional 30-day trusted-device cookie when 2FA is already enrolled
-        if (!mustEnroll && userHas2fa && config.cacheDir) {
-          const { token: tdToken, duplicateCookies: duplicateTd } = getTrustedDeviceToken(req);
-          if (tdToken && !duplicateTd) {
-            const matchedId = await activeStore.verifyTrustedDevice(session.userId, tdToken);
-            if (matchedId) {
-              cacheSessionValidation(session.sessionId, true, req.authState, config.authCacheTtlMs);
-              activeStore.recordSession(session.sessionId, {
-                userId: session.userId,
-                email,
-                // Trusted device bypasses login prompt, but Settings mutations still require step-up
-                twoFactorPassed: true,
-                lastSecondFactorAt: null,
-              });
-              console.log(`[AuthRoute] Trusted-device login succeeded, session ${session.sessionId.substring(0, 8)}...`);
-
-              const cookie = sessionCookie(config, req);
-              clearSessionCookies(res, cookie.name);
-              clearPendingCookies(res);
-              res.cookie(cookie.name, session.sessionId, cookie.options);
-              res.status(200).json({ userId: session.userId });
-              return;
-            }
-          }
-        }
-
-        // Browser 2FA step required: hold Joplin session server-side behind a pending cookie
         clearSessionCookies(res);
-        const { token: pendingToken, evictedSessions } = activeStore.createPendingLogin({
-          joplinSessionId: session.sessionId,
-          userId: session.userId,
-          email,
-          mustEnroll,
-          methods,
-        });
-        for (const evictedSessionId of evictedSessions) {
+        for (const evictedSessionId of decision.evictedSessions) {
           await endJoplinSessionSafe(evictedSessionId);
         }
 
         const pCookie = pendingCookie(config, req);
         clearPendingCookies(res, pCookie.name);
-        res.cookie(pCookie.name, pendingToken, pCookie.options);
+        res.cookie(pCookie.name, decision.pendingToken, pCookie.options);
 
         res.status(200).json({
           twoFactor: {
             required: true,
-            methods,
-            mustEnroll,
+            methods: decision.methods,
+            mustEnroll: decision.mustEnroll,
             passkeysAvailable: Boolean(resolveWebAuthnRp(config, req.headers.origin)),
           },
         });
