@@ -1778,7 +1778,7 @@ describe('per-user second-factor lockout and exponential backoff', () => {
         assert.equal(res.status, 401);
       }
 
-      // Pending login B from IP 2: 4th failure via invalid recovery code, 5th failure via bad passkey assertion -> 1-min lock!
+      // Pending login B from IP 2: 4th failure via invalid recovery code, a bad passkey assertion (not counted), 5th failure via another invalid recovery code -> 1-min lock!
       const jarB = new CookieJar();
       await call(ctx.baseUrl, '/api/auth/login', {
         method: 'POST',
@@ -1807,6 +1807,14 @@ describe('per-user second-factor lockout and exponential backoff', () => {
         json: { response: authn.makeAuthenticationResponse(pkOpts.data, publicUrl, { corruptSignature: true }) },
       });
       assert.equal(pkFail.status, 401);
+      // A failed passkey assertion is not a guess and doesn't count toward the lockout: the 5th failure is another wrong recovery code
+      const recFail2 = await call(ctx.baseUrl, '/api/auth/2fa/recovery/verify', {
+        method: 'POST',
+        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.3' },
+        jar: jarB,
+        json: { code: 'BBBB-BBBB-BBBB-BBBB' },
+      });
+      assert.equal(recFail2.status, 401);
 
       // Advance 10s (still within 1-min lockout)
       testMock.timers.setTime(Date.now() + 10_000);
@@ -1825,7 +1833,7 @@ describe('per-user second-factor lockout and exponential backoff', () => {
       assert.equal(pwOk.status, 200);
       assert.equal(pwOk.data.twoFactor?.required, true);
 
-      // Pending TOTP, recovery (even with valid codes!), passkey verify, and step-up ALL return 429 with retryAfter
+      // Pending TOTP, recovery (even with valid codes!) and TOTP step-up return 429 with retryAfter (passkeys stay usable: see the next test)
       const lockedTotp = await call(ctx.baseUrl, '/api/auth/2fa/totp/verify', {
         method: 'POST',
         headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.4' },
@@ -1844,21 +1852,6 @@ describe('per-user second-factor lockout and exponential backoff', () => {
       });
       assert.equal(lockedRec.status, 429);
       assert.ok(lockedRec.data.retryAfter > 0);
-
-      const lockedPkOpts = await call(ctx.baseUrl, '/api/auth/2fa/passkey/auth/options', {
-        method: 'POST',
-        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.4' },
-        jar: jarLocked,
-        json: {},
-      });
-      const lockedPk = await call(ctx.baseUrl, '/api/auth/2fa/passkey/auth/verify', {
-        method: 'POST',
-        headers: { Origin: publicUrl, 'X-Forwarded-For': '10.0.1.4' },
-        jar: jarLocked,
-        json: { response: authn.makeAuthenticationResponse(lockedPkOpts.data, publicUrl) },
-      });
-      assert.equal(lockedPk.status, 429);
-      assert.ok(lockedPk.data.retryAfter > 0);
 
       const lockedStepUp = await call(ctx.baseUrl, '/api/auth/2fa/step-up/totp', {
         method: 'POST',
@@ -1947,6 +1940,90 @@ describe('per-user second-factor lockout and exponential backoff', () => {
         json: { code: '000000' },
       });
       assert.equal(postResetFail.status, 400);
+    } finally {
+      testMock.timers.reset();
+    }
+  });
+
+  test('a passkey still signs in while the guessable factors are locked, and clears the lock', async () => {
+    const publicUrl = 'https://notes.example.com';
+    testMock.timers.enable({ apis: ['Date'], now: 1_700_300_000_000 });
+    try {
+      const ctx = await setupUserWithTotp({ require2fa: true, trustProxy: 1, publicUrl });
+      const regOpts = await call(ctx.baseUrl, '/api/auth/2fa/passkey/register/options', {
+        method: 'POST', headers: { Origin: publicUrl, 'X-Forwarded-For': '10.7.0.1' }, jar: ctx.jar, json: {},
+      });
+      const authn = new SoftwareAuthenticator();
+      const regVerify = await call(ctx.baseUrl, '/api/auth/2fa/passkey/register/verify', {
+        method: 'POST', headers: { Origin: publicUrl, 'X-Forwarded-For': '10.7.0.1' }, jar: ctx.jar,
+        json: { name: 'Owner Key', response: authn.makeRegistrationResponse(regOpts.data, publicUrl) },
+      });
+      assert.equal(regVerify.status, 200);
+
+      // Someone with the password locks the guessable factors
+      const attacker = new CookieJar();
+      await call(ctx.baseUrl, '/api/auth/login', {
+        method: 'POST', headers: { Origin: publicUrl, 'X-Forwarded-For': '10.7.0.2' }, jar: attacker,
+        json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+      });
+      for (let i = 0; i < 5; i++) {
+        await call(ctx.baseUrl, '/api/auth/2fa/totp/verify', {
+          method: 'POST', headers: { Origin: publicUrl, 'X-Forwarded-For': '10.7.0.2' }, jar: attacker, json: { code: '000000' },
+        });
+      }
+
+      // The owner: TOTP is locked, but the passkey works and clears the lock
+      const owner = new CookieJar();
+      await call(ctx.baseUrl, '/api/auth/login', {
+        method: 'POST', headers: { Origin: publicUrl, 'X-Forwarded-For': '10.7.0.3' }, jar: owner,
+        json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+      });
+      const lockedTotp = await call(ctx.baseUrl, '/api/auth/2fa/totp/verify', {
+        method: 'POST', headers: { Origin: publicUrl, 'X-Forwarded-For': '10.7.0.3' }, jar: owner,
+        json: { code: computeTotp(ctx.secret, Date.now()) },
+      });
+      assert.equal(lockedTotp.status, 429);
+      const pkOpts = await call(ctx.baseUrl, '/api/auth/2fa/passkey/auth/options', {
+        method: 'POST', headers: { Origin: publicUrl, 'X-Forwarded-For': '10.7.0.3' }, jar: owner, json: {},
+      });
+      const pkOk = await call(ctx.baseUrl, '/api/auth/2fa/passkey/auth/verify', {
+        method: 'POST', headers: { Origin: publicUrl, 'X-Forwarded-For': '10.7.0.3' }, jar: owner,
+        json: { response: authn.makeAuthenticationResponse(pkOpts.data, publicUrl) },
+      });
+      assert.equal(pkOk.status, 200);
+      assert.equal((await call(ctx.baseUrl, '/api/notes', { jar: owner })).status, 200);
+
+      // The lock is cleared: a single wrong TOTP step-up is a plain failure again, not 429
+      const afterClear = await call(ctx.baseUrl, '/api/auth/2fa/step-up/totp', {
+        method: 'POST', headers: { Origin: publicUrl, 'X-Forwarded-For': '10.7.0.3' }, jar: owner, json: { code: '000000' },
+      });
+      assert.equal(afterClear.status, 400);
+    } finally {
+      testMock.timers.reset();
+    }
+  });
+
+  test('a quiet hour after a lock expired starts a new count', async () => {
+    const publicUrl = 'https://notes.example.com';
+    testMock.timers.enable({ apis: ['Date'], now: 1_700_400_000_000 });
+    try {
+      const ctx = await setupUserWithTotp({ require2fa: true, trustProxy: 1, publicUrl });
+      const fail = async (ip: string) => {
+        const jar = new CookieJar();
+        await call(ctx.baseUrl, '/api/auth/login', {
+          method: 'POST', headers: { Origin: publicUrl, 'X-Forwarded-For': ip }, jar,
+          json: { email: DEMO_EMAIL, password: DEMO_PASSWORD },
+        });
+        return call(ctx.baseUrl, '/api/auth/2fa/totp/verify', {
+          method: 'POST', headers: { Origin: publicUrl, 'X-Forwarded-For': ip }, jar, json: { code: '000000' },
+        });
+      };
+      for (let i = 0; i < 5; i++) await fail(`10.8.0.${i + 1}`); // 5th failure: 1-min lock
+      assert.equal((await fail('10.8.1.1')).status, 429);
+      // Lock expired more than an hour ago: one stray failure is just a failure, not an instant long lock
+      testMock.timers.setTime(Date.now() + 60_000 + 60 * 60 * 1000 + 1_000);
+      assert.equal((await fail('10.8.2.1')).status, 401);
+      assert.equal((await fail('10.8.2.2')).status, 401);
     } finally {
       testMock.timers.reset();
     }

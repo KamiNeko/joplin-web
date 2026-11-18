@@ -802,10 +802,8 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
       const result = await store.withUserLock(pending.userId, async () => {
         const now = Date.now();
         const record = store.getUserRecord(pending.userId);
-        const lockedRetryAfter = getLockoutRetryAfterSeconds(record, now);
-        if (lockedRetryAfter !== null) {
-          return { status: 'locked' as const, retryAfter: lockedRetryAfter };
-        }
+        // Passkeys can't be guessed, so they are never locked out: the owner keeps a way in even
+        // while someone who knows the password keeps the guessable factors locked
 
         const challengeRecord = pending.webAuthnChallenge;
         pending.webAuthnChallenge = null;
@@ -818,8 +816,6 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
 
         const idx = record.passkeys.findIndex((pk) => pk.credentialID === authResponse.id);
         if (idx === -1) {
-          recordFailedSecondFactor(record, now);
-          store.saveUserRecord(record, now);
           return { status: 'failed' as const, reason: 'Passkey verification failed.' };
         }
         const passkey = record.passkeys[idx];
@@ -840,21 +836,15 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
             requireUserVerification: false,
           });
         } catch {
-          recordFailedSecondFactor(record, now);
-          store.saveUserRecord(record, now);
           return { status: 'failed' as const, reason: 'Passkey verification failed.' };
         }
 
         if (!verification.verified) {
-          recordFailedSecondFactor(record, now);
-          store.saveUserRecord(record, now);
           return { status: 'failed' as const, reason: 'Passkey verification failed.' };
         }
 
         const newCounter = verification.authenticationInfo.newCounter;
         if ((passkey.counter > 0 || newCounter > 0) && newCounter <= passkey.counter) {
-          recordFailedSecondFactor(record, now);
-          store.saveUserRecord(record, now);
           return { status: 'failed' as const, reason: 'Passkey verification failed.' };
         }
 
@@ -868,10 +858,6 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
         return { status: 'ok' as const };
       });
 
-      if (result.status === 'locked') {
-        sendLockoutResponse(res, result.retryAfter);
-        return;
-      }
       if (result.status === 'failed') {
         await failPendingAttempt(res, store, pending, result.reason);
         return;
@@ -1025,10 +1011,8 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
     const outcome = await store.withUserLock(userId, async () => {
       const now = Date.now();
       const record = store.getUserRecord(userId);
-      const lockedRetryAfter = getLockoutRetryAfterSeconds(record, now);
-      if (lockedRetryAfter !== null) {
-        return { status: 'locked' as const, retryAfter: lockedRetryAfter };
-      }
+      // Passkeys can't be guessed, so they are never locked out: the owner keeps a way in even
+      // while someone who knows the password keeps the guessable factors locked
 
       const challengeRecord = store.consumeSessionWebAuthnChallenge(req.sessionId!, 'step-up', now);
       if (!challengeRecord) {
@@ -1037,8 +1021,6 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
 
       const idx = record.passkeys.findIndex((pk) => pk.credentialID === authResponse.id);
       if (idx === -1) {
-        recordFailedSecondFactor(record, now);
-        store.saveUserRecord(record, now);
         return { status: 'failed' as const };
       }
       const passkey = record.passkeys[idx];
@@ -1059,21 +1041,15 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
           requireUserVerification: false,
         });
       } catch {
-        recordFailedSecondFactor(record, now);
-        store.saveUserRecord(record, now);
         return { status: 'failed' as const };
       }
 
       if (!verification.verified) {
-        recordFailedSecondFactor(record, now);
-        store.saveUserRecord(record, now);
         return { status: 'failed' as const };
       }
 
       const newCounter = verification.authenticationInfo.newCounter;
       if ((passkey.counter > 0 || newCounter > 0) && newCounter <= passkey.counter) {
-        recordFailedSecondFactor(record, now);
-        store.saveUserRecord(record, now);
         return { status: 'failed' as const };
       }
 
@@ -1083,10 +1059,6 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
       return { status: 'ok' as const };
     });
 
-    if (outcome.status === 'locked') {
-      sendLockoutResponse(res, outcome.retryAfter);
-      return;
-    }
     if (outcome.status === 'no_challenge') {
       res.status(400).json({ error: 'Passkey challenge missing or expired. Please try again.' });
       return;
