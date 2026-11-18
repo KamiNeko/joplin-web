@@ -246,6 +246,9 @@ export function getLockoutRetryAfterSeconds(record: UserTwoFactorRecord, now = D
  * consecutive failures are reached. Returns the applied lock duration in seconds, or `null`.
  */
 export function recordFailedSecondFactor(record: UserTwoFactorRecord, now = Date.now()): number | null {
+  // A quiet period after a lock expired starts a new count, so one stray failure much later doesn't
+  // jump straight back to the longest lock
+  if (record.lockedUntil !== null && now - record.lockedUntil >= LOCKOUT_MAX_MS) record.failedAttempts = 0;
   const nextAttempts = record.failedAttempts + 1;
   record.failedAttempts = nextAttempts;
   if (nextAttempts >= LOCKOUT_THRESHOLD) {
