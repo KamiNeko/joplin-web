@@ -151,19 +151,38 @@ export function isEmptySearchQuery(q: ParsedSearchQuery): boolean {
 
 /**
  * Whether a title matches a lower-cased `tag:`/`notebook:` pattern: case-insensitive and whole,
- * with `*` matching any run of characters.
+ * with `*` matching any run of characters (iterative matcher, free of regex backtracking).
  */
 export function matchesNamePattern(title: string, pattern: string): boolean {
   const lower = title.toLowerCase();
   if (!pattern.includes('*')) return lower === pattern;
-  const regex = new RegExp(
-    `^${pattern
-      .split('*')
-      .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-      .join('.*')}$`,
-    's'
-  );
-  return regex.test(lower);
+
+  let ti = 0;
+  let pi = 0;
+  let starIdx = -1;
+  let matchIdx = 0;
+
+  while (ti < lower.length) {
+    if (pi < pattern.length && pattern[pi] === lower[ti]) {
+      ti++;
+      pi++;
+    } else if (pi < pattern.length && pattern[pi] === '*') {
+      starIdx = pi;
+      matchIdx = ti;
+      pi++;
+    } else if (starIdx !== -1) {
+      pi = starIdx + 1;
+      matchIdx++;
+      ti = matchIdx;
+    } else {
+      return false;
+    }
+  }
+
+  while (pi < pattern.length && pattern[pi] === '*') {
+    pi++;
+  }
+  return pi === pattern.length;
 }
 
 const RESOURCE_LINK_RE = /(?:^|[\s("'<=]):\/([0-9a-fA-F]{32})(?![0-9a-fA-F])/g;

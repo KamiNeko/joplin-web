@@ -312,6 +312,7 @@ export class TwoFactorStore {
   private readonly userLocks = new Map<string, Promise<unknown>>();
   private readonly pendingLogins = new Map<string, PendingLogin>();
   private readonly inMemorySessions = new Map<string, SessionRecord>();
+  private sessionsLoaded = false;
   // In-memory only (never persisted to sessions.json) so active sessions can be cleaned up upstream and from caches
   private readonly sessionTokensByHash = new Map<string, string>();
   private readonly pendingTotpSetups = new Map<string, { secret: string; expiresAt: number }>();
@@ -643,27 +644,43 @@ export class TwoFactorStore {
     return this.cacheDir ? path.join(authDirPath(this.cacheDir), SESSIONS_FILE) : null;
   }
 
-  private loadSessionsMap(): Record<string, SessionRecord> {
+  /**
+   * Hydrates `inMemorySessions` from `sessions.json` once per store instance so hot-path session
+   * lookups never perform synchronous disk reads on every HTTP request.
+   */
+  private ensureSessionsLoaded(): void {
+    if (this.sessionsLoaded) return;
+    this.sessionsLoaded = true;
     const filePath = this.sessionsFilePath();
-    if (!filePath) return Object.fromEntries(this.inMemorySessions);
+    if (!filePath) return;
     try {
       const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as unknown;
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed as Record<string, SessionRecord>;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+      const obj = parsed as Record<string, unknown>;
+      for (const hash of Object.keys(obj)) {
+        const rec = obj[hash] as SessionRecord | undefined;
+        if (
+          rec &&
+          typeof rec === 'object' &&
+          typeof rec.userId === 'string' &&
+          typeof rec.twoFactorPassed === 'boolean' &&
+          typeof rec.lastAccessedAt === 'number'
+        ) {
+          this.inMemorySessions.set(hash, rec);
+        }
       }
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
         console.error('[TwoFactorStore] Failed to read sessions registry:', err);
       }
     }
-    return {};
   }
 
-  private saveSessionsMap(sessions: Record<string, SessionRecord>, now = Date.now()): void {
+  private persistSessions(now = Date.now()): void {
     const filePath = this.sessionsFilePath();
     if (!filePath) return;
-    const pruned: Record<string, SessionRecord> = {};
-    for (const [hash, rec] of Object.entries(sessions)) {
+    const pruned: Record<string, SessionRecord> = Object.create(null);
+    for (const [hash, rec] of this.inMemorySessions) {
       if (rec && typeof rec.userId === 'string' && now - rec.lastAccessedAt <= TRUSTED_DEVICE_TTL_MS) {
         pruned[hash] = rec;
       } else {
@@ -684,6 +701,7 @@ export class TwoFactorStore {
     info: { userId: string; email?: string; twoFactorPassed: boolean; lastSecondFactorAt: number | null },
     now = Date.now()
   ): void {
+    this.ensureSessionsLoaded();
     const sessionHash = hashToken(sessionId);
     const record: SessionRecord = {
       userId: info.userId,
@@ -696,30 +714,17 @@ export class TwoFactorStore {
     this.inMemorySessions.set(sessionHash, record);
     this.sessionTokensByHash.set(sessionHash, sessionId);
     if (this.cacheDir) {
-      const map = this.loadSessionsMap();
-      map[sessionHash] = record;
-      this.saveSessionsMap(map, now);
+      this.persistSessions(now);
     }
     this.onSessionRecorded?.(sessionId, info.userId);
   }
 
   /**
-   * Retrieves a recorded session by raw Joplin sessionId.
+   * Retrieves a recorded session by raw Joplin sessionId from in-memory cache.
    */
   public getSession(sessionId: string): SessionRecord | null {
+    this.ensureSessionsLoaded();
     const sessionHash = hashToken(sessionId);
-    if (this.cacheDir) {
-      const map = this.loadSessionsMap();
-      const diskRecord = map[sessionHash];
-      if (diskRecord) {
-        this.inMemorySessions.set(sessionHash, diskRecord);
-        this.sessionTokensByHash.set(sessionHash, sessionId);
-        return diskRecord;
-      }
-      this.inMemorySessions.delete(sessionHash);
-      this.sessionTokensByHash.delete(sessionHash);
-      return null;
-    }
     const mem = this.inMemorySessions.get(sessionHash) ?? null;
     if (mem) {
       this.sessionTokensByHash.set(sessionHash, sessionId);
@@ -731,24 +736,15 @@ export class TwoFactorStore {
    * Updates the lastSecondFactorAt timestamp for step-up authentication (and marks twoFactorPassed).
    */
   public touchStepUp(sessionId: string, now = Date.now()): number {
+    this.ensureSessionsLoaded();
     const sessionHash = hashToken(sessionId);
-    if (this.cacheDir) {
-      const map = this.loadSessionsMap();
-      const existing = map[sessionHash] ?? this.inMemorySessions.get(sessionHash);
-      if (existing) {
-        const updated = { ...existing, twoFactorPassed: true, lastSecondFactorAt: now, lastAccessedAt: now };
-        map[sessionHash] = updated;
-        this.inMemorySessions.set(sessionHash, updated);
-        this.sessionTokensByHash.set(sessionHash, sessionId);
-        this.saveSessionsMap(map, now);
-      }
-    } else {
-      const existing = this.inMemorySessions.get(sessionHash);
-      if (existing) {
-        existing.twoFactorPassed = true;
-        existing.lastSecondFactorAt = now;
-        existing.lastAccessedAt = now;
-        this.sessionTokensByHash.set(sessionHash, sessionId);
+    const existing = this.inMemorySessions.get(sessionHash);
+    if (existing) {
+      const updated = { ...existing, twoFactorPassed: true, lastSecondFactorAt: now, lastAccessedAt: now };
+      this.inMemorySessions.set(sessionHash, updated);
+      this.sessionTokensByHash.set(sessionHash, sessionId);
+      if (this.cacheDir) {
+        this.persistSessions(now);
       }
     }
     return now + STEP_UP_TTL_MS;
@@ -758,17 +754,14 @@ export class TwoFactorStore {
    * Drops a session from the registry and clears its ephemeral setup/challenge state.
    */
   public removeSession(sessionId: string): void {
+    this.ensureSessionsLoaded();
     const sessionHash = hashToken(sessionId);
-    this.inMemorySessions.delete(sessionHash);
+    const existed = this.inMemorySessions.delete(sessionHash);
     this.sessionTokensByHash.delete(sessionHash);
     this.pendingTotpSetups.delete(sessionHash);
     this.sessionChallenges.delete(sessionHash);
-    if (this.cacheDir) {
-      const map = this.loadSessionsMap();
-      if (sessionHash in map) {
-        delete map[sessionHash];
-        this.saveSessionsMap(map);
-      }
+    if (existed && this.cacheDir) {
+      this.persistSessions();
     }
   }
 
@@ -778,6 +771,7 @@ export class TwoFactorStore {
    * known in memory so callers can drop validation/note caches and end upstream sessions.
    */
   public revokeOtherSessionsForUser(userId: string, keepSessionId: string): string[] {
+    this.ensureSessionsLoaded();
     const keepHash = hashToken(keepSessionId);
     const revokedHashes = new Set<string>();
 
@@ -787,17 +781,8 @@ export class TwoFactorStore {
         this.inMemorySessions.delete(hash);
       }
     }
-    if (this.cacheDir) {
-      const map = this.loadSessionsMap();
-      let changed = false;
-      for (const [hash, rec] of Object.entries(map)) {
-        if (hash !== keepHash && rec && rec.userId === userId) {
-          revokedHashes.add(hash);
-          delete map[hash];
-          changed = true;
-        }
-      }
-      if (changed) this.saveSessionsMap(map);
+    if (revokedHashes.size > 0 && this.cacheDir) {
+      this.persistSessions();
     }
 
     const revokedTokens: string[] = [];

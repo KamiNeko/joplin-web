@@ -17,6 +17,8 @@ const mock = await startMockJoplinServer({ email: DEMO_EMAIL, password: DEMO_PAS
 
 // Must be set before the backend's config module is loaded
 process.env.JOPLIN_SERVER_URL = mock.url;
+// Vite's dev proxy adds X-Forwarded-Host from loopback (dev + e2e smoke tests)
+process.env.TRUST_PROXY ??= 'loopback';
 // Demo uses the deterministic fake organizer and never calls a real LLM
 process.env.AI_FAKE = '1';
 process.env.AI_BASE_URL ??= 'http://127.0.0.1:18317/v1';

@@ -81,6 +81,17 @@ describe('matchesNamePattern', () => {
     assert.equal(matchesNamePattern('a.b', 'a.b'), true);
     assert.equal(matchesNamePattern('axb', 'a.b'), false);
     assert.equal(matchesNamePattern('C++ (notes)', 'c++*'), true);
+    assert.equal(matchesNamePattern('afoobbarc', 'a***b*c'), true);
+    assert.equal(matchesNamePattern('abc', '*abc*'), true);
+    assert.equal(matchesNamePattern('ab', 'abc*'), false);
+  });
+
+  test('handles repeated wildcards on mismatched long titles without backtracking (no ReDoS)', () => {
+    const startedAt = Date.now();
+    const result = matchesNamePattern(`${'a'.repeat(500)}c`, `${'a*'.repeat(60)}b`);
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(result, false);
+    assert.ok(elapsedMs < 200, `Expected linear/polynomial wildcard match, took ${elapsedMs}ms`);
   });
 });
 

@@ -83,6 +83,8 @@ const MAX_REASON_CHARS = 240;
 const REQUEST_TIMEOUT_MS = 60_000;
 const PERSIST_DEBOUNCE_MS = 300;
 export const MAX_RETAINED_JOBS = 20;
+export const MAX_ORGANIZE_NOTES = 25_000;
+export const MAX_EXCLUDED_NOTEBOOKS = 5_000;
 const ORGANIZE_INDEX_FILE = 'index.json';
 const OWNER_KEY_RE = /^[A-Za-z0-9_-]+$/;
 const SAFE_JOB_ID_RE = /^[0-9a-f]{32}$|^[0-9a-f-]{16,64}$/i;
@@ -1802,6 +1804,9 @@ export class OrganizerService {
     if (!Array.isArray(input.noteIds) || input.noteIds.length === 0) {
       throw new OrganizeValidationError('noteIds must be a non-empty array');
     }
+    if (input.noteIds.length > MAX_ORGANIZE_NOTES) {
+      throw new OrganizeValidationError(`Cannot auto-organize more than ${MAX_ORGANIZE_NOTES} notes per job`);
+    }
     const uniqueNoteIds: string[] = [];
     const seenNoteIds = new Set<string>();
     for (const rawId of input.noteIds) {
@@ -1819,6 +1824,9 @@ export class OrganizerService {
     if (input.excludeNotebookIds !== undefined) {
       if (!Array.isArray(input.excludeNotebookIds)) {
         throw new OrganizeValidationError('excludeNotebookIds must be an array of notebook ids');
+      }
+      if (input.excludeNotebookIds.length > MAX_EXCLUDED_NOTEBOOKS) {
+        throw new OrganizeValidationError(`Cannot exclude more than ${MAX_EXCLUDED_NOTEBOOKS} notebooks`);
       }
       for (const rawNbId of input.excludeNotebookIds) {
         if (typeof rawNbId !== 'string') {

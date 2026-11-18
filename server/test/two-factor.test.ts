@@ -2123,3 +2123,50 @@ describe('per-user second-factor lockout and exponential backoff', () => {
     }
   });
 });
+
+describe('TwoFactorStore session cache', () => {
+  test('hydrates sessions.json once per instance, ignores corrupt entries, and persists mutations safely', async () => {
+    const { TwoFactorStore, hashToken } = await import('../src/services/two-factor-store.js');
+    const dir = await makeTempDir('joplin-2fa-cache-');
+
+    const now = Date.now();
+    const writer = new TwoFactorStore(dir);
+    writer.recordSession('tok-a', { userId: 'u1', email: 'a@example.com', twoFactorPassed: true, lastSecondFactorAt: now }, now);
+    writer.recordSession('tok-b', { userId: 'u1', email: 'a@example.com', twoFactorPassed: true, lastSecondFactorAt: now }, now);
+
+    // Inject malformed and prototype-pollution-named entries on disk before hydrating a new store
+    const sessionsPath = path.join(dir, 'auth', 'sessions.json');
+    const { readFile } = await import('node:fs/promises');
+    const onDisk = JSON.parse(await readFile(sessionsPath, 'utf8'));
+    Object.defineProperty(onDisk, '__proto__', {
+      value: { userId: 'attacker', twoFactorPassed: true, lastAccessedAt: now },
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+    onDisk['bad-entry'] = { userId: 123, twoFactorPassed: 'yes' };
+    await writeFile(sessionsPath, JSON.stringify(onDisk));
+
+    const reader = new TwoFactorStore(dir);
+    assert.equal(reader.getSession('tok-a')?.userId, 'u1');
+
+    // Modify disk out-of-band after hydration: cached lookups must stay in memory and not re-read disk
+    await writeFile(sessionsPath, '{}');
+    assert.equal(reader.getSession('tok-b')?.userId, 'u1');
+
+    // Mutation persists the valid cached entries back to disk safely
+    assert.deepEqual(reader.revokeOtherSessionsForUser('u1', 'tok-a').sort(), ['tok-b']);
+    const persistedAfter = JSON.parse(await readFile(sessionsPath, 'utf8'));
+    assert.ok(persistedAfter[hashToken('tok-a')]);
+    assert.equal(persistedAfter[hashToken('tok-b')], undefined);
+    assert.equal(persistedAfter['bad-entry'], undefined);
+
+    // removeSession persists removal across restarts
+    const reader2 = new TwoFactorStore(dir);
+    assert.equal(reader2.getSession('tok-a')?.userId, 'u1');
+    assert.equal(reader2.getSession('tok-b'), null);
+    reader2.removeSession('tok-a');
+    const reader3 = new TwoFactorStore(dir);
+    assert.equal(reader3.getSession('tok-a'), null);
+  });
+});

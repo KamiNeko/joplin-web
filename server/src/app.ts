@@ -39,6 +39,12 @@ export function cspDirectives(
 ): Record<string, string[] | null> {
   return {
     'img-src': ["'self'", 'data:', 'blob:', ...(config.allowRemoteImages ? ['https:'] : [])],
+    'style-src': ["'self'", "'unsafe-inline'"],
+    'font-src': ["'self'", 'data:'],
+    'object-src': ["'none'"],
+    'frame-src': ["'self'", 'blob:'],
+    'base-uri': ["'self'"],
+    'form-action': ["'self'"],
     'upgrade-insecure-requests': config.publicUrl?.startsWith('https:') ? [] : null,
   };
 }
@@ -68,7 +74,7 @@ export function createApp(config: AppConfig, deps: { organizer?: OrganizerServic
   // Security HTTP headers
   app.use(
     helmet({
-      crossOriginResourcePolicy: { policy: 'cross-origin' },
+      crossOriginResourcePolicy: { policy: config.corsOrigin ? 'cross-origin' : 'same-origin' },
       contentSecurityPolicy: { directives: cspDirectives(config) },
       // Never send page URLs to other sites (helmet's default, stated explicitly)
       referrerPolicy: { policy: 'no-referrer' },

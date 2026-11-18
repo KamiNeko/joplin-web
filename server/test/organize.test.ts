@@ -15,6 +15,8 @@ import type {
   buildOrganizeSystemPrompt as BuildOrganizeSystemPromptFn,
   buildOrganizeUserPrompt as BuildOrganizeUserPromptFn,
   isScannerStyleTitle as IsScannerStyleTitleFn,
+  MAX_EXCLUDED_NOTEBOOKS as MaxExcludedNotebooksConst,
+  MAX_ORGANIZE_NOTES as MaxOrganizeNotesConst,
   MAX_RETAINED_JOBS as MaxRetainedJobsConst,
   normalizeOrganizeTag as NormalizeOrganizeTagFn,
   ORGANIZE_DOCUMENT_TYPE_TAGS as OrganizeDocumentTypeTagsConst,
@@ -39,6 +41,8 @@ let buildNoteSimilarityIndex: typeof BuildNoteSimilarityIndexFn;
 let buildOrganizeSystemPrompt: typeof BuildOrganizeSystemPromptFn;
 let buildOrganizeUserPrompt: typeof BuildOrganizeUserPromptFn;
 let isScannerStyleTitle: typeof IsScannerStyleTitleFn;
+let MAX_EXCLUDED_NOTEBOOKS: typeof MaxExcludedNotebooksConst;
+let MAX_ORGANIZE_NOTES: typeof MaxOrganizeNotesConst;
 let MAX_RETAINED_JOBS: typeof MaxRetainedJobsConst;
 let normalizeOrganizeTag: typeof NormalizeOrganizeTagFn;
 let ORGANIZE_DOCUMENT_TYPE_TAGS: typeof OrganizeDocumentTypeTagsConst;
@@ -76,6 +80,8 @@ before(async () => {
     buildOrganizeSystemPrompt,
     buildOrganizeUserPrompt,
     isScannerStyleTitle,
+    MAX_EXCLUDED_NOTEBOOKS,
+    MAX_ORGANIZE_NOTES,
     MAX_RETAINED_JOBS,
     normalizeOrganizeTag,
     ORGANIZE_DOCUMENT_TYPE_TAGS,
@@ -1799,5 +1805,19 @@ describe('multi-job storage, v1 migration, lazy loading, 409 exclusivity, and re
       await app.api('/api/notebooks/refresh', { method: 'POST' });
       rmSync(retryDir, { recursive: true, force: true });
     }
+  });
+
+  test('rejects noteIds and excludeNotebookIds arrays exceeding server bounds', { timeout: TEST_TIMEOUT_MS }, async () => {
+    const tooManyNotes = Array.from({ length: MAX_ORGANIZE_NOTES + 1 }, () => demoId('note-ramen'));
+    await assert.rejects(
+      () => organizerService.startJob(session, { noteIds: tooManyNotes }),
+      (err: unknown) => err instanceof OrganizeValidationError && err.status === 400
+    );
+
+    const tooManyExcludes = Array.from({ length: MAX_EXCLUDED_NOTEBOOKS + 1 }, () => demoId('nb-work'));
+    await assert.rejects(
+      () => organizerService.startJob(session, { noteIds: [demoId('note-ramen')], excludeNotebookIds: tooManyExcludes }),
+      (err: unknown) => err instanceof OrganizeValidationError && err.status === 400
+    );
   });
 });
