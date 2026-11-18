@@ -206,13 +206,25 @@ export interface SessionInfo {
   userId: string;
 }
 
+import type { AppConfig } from '../config.js';
+import type { TwoFactorStore } from '../services/two-factor-store.js';
+
+export interface AppAuthState {
+  validationCache: Map<string, { isValid: boolean; validatedAt: number }>;
+}
+
 /**
- * Express Request extension to include sessionId
+ * Express Request extension to include session and 2FA context
  */
 declare global {
   namespace Express {
     interface Request {
       sessionId?: string;
+      userId?: string;
+      userEmail?: string;
+      appConfig?: AppConfig;
+      twoFactorStore?: TwoFactorStore;
+      authState?: AppAuthState;
     }
   }
 }
