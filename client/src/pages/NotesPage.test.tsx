@@ -434,6 +434,7 @@ describe("bulk selection and actions", () => {
       <>
         <Routes>
           <Route path="/notebooks/:id" element={<NotesPage />} />
+          <Route path="/notebooks/:notebookId/notes/:id" element={<NotesPage />} />
           <Route path="/organize/:jobId" element={<div>Organize View</div>} />
         </Routes>
         <LocationProbe />
