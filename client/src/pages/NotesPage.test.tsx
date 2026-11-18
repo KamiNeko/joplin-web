@@ -85,6 +85,7 @@ function renderPage(route: string) {
         <Route path="/notes" element={<NotesPage />} />
         <Route path="/notes/:id" element={<NotesPage />} />
         <Route path="/notebooks/:id" element={<NotesPage />} />
+       <Route path="/notebooks/:notebookId/notes/:id" element={<NotesPage />} />
         <Route path="/notebooks/:notebookId/notes/:id" element={<NotesPage />} />
         <Route path="/trash" element={<NotesPage />} />
         <Route path="/trash/:id" element={<NotesPage />} />
@@ -434,6 +435,7 @@ describe("bulk selection and actions", () => {
       <>
         <Routes>
           <Route path="/notebooks/:id" element={<NotesPage />} />
+         <Route path="/notebooks/:notebookId/notes/:id" element={<NotesPage />} />
           <Route path="/notebooks/:notebookId/notes/:id" element={<NotesPage />} />
           <Route path="/organize/:jobId" element={<div>Organize View</div>} />
         </Routes>
@@ -510,6 +512,7 @@ describe("bulk selection and actions", () => {
       <>
         <Routes>
           <Route path="/notebooks/:id" element={<NotesPage />} />
+          <Route path="/notebooks/:notebookId/notes/:id" element={<NotesPage />} />
           <Route path="/organize" element={<div>Organize List</div>} />
           <Route path="/organize/:jobId" element={<div>Organize View</div>} />
         </Routes>
