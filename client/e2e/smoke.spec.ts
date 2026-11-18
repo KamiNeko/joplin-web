@@ -6,6 +6,7 @@ import { demoId, signIn, uniqueWord } from "./helpers";
 async function openReadingList(page: Page) {
   await page.getByRole("complementary").first().getByRole("button", { name: /^Reading List/ }).click();
   await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-reading")}(/|$)`));
+  await expect(page.getByRole("heading", { name: "Reading List" })).toBeVisible();
   await expect(page.getByText("Book Notes: Deep Work")).toBeVisible();
 }
 
