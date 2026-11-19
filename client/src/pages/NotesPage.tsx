@@ -648,6 +648,7 @@ export function NotesPage() {
               key={listKey}
               notes={notes || []}
               notebooks={notebooks}
+              tags={tags}
               favoriteNoteIds={favoriteNoteIds}
               selection={selection}
               canSelect={!readOnly && !isTrashSelected}

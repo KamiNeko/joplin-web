@@ -82,6 +82,12 @@ test.describe("workspace features", () => {
     await page.getByRole("button", { name: "Board view" }).click();
     await expect(page.getByRole("heading", { level: 4, name: "Completed" })).toBeVisible();
 
+    // Board grouping by Tags
+    await page.getByRole("button", { name: "Tags", exact: true }).click();
+    await expect(page.getByRole("heading", { level: 4, name: "#planning" })).toBeVisible();
+    await page.getByRole("button", { name: "Status", exact: true }).click();
+    await expect(page.getByRole("heading", { level: 4, name: "Completed" })).toBeVisible();
+
     // Switch back to List view cleanly
     await page.getByRole("button", { name: "List view" }).click();
     await expect(page.getByRole("button", { name: "List view" })).toHaveAttribute("aria-pressed", "true");
@@ -200,6 +206,32 @@ test.describe("workspace features", () => {
     await expect(backlinks).toContainText(sourceTitle);
 
     // Clean up local editor mode preference
+    await page.evaluate(() => localStorage.removeItem("joplin-editor-mode"));
+  });
+
+  test("supports Click-to-Edit on prose body and Rich mode editing on HTML notes", async ({ page }) => {
+    await signIn(page);
+    await openNotebook(page, "Reading List", "nb-reading");
+
+    // 1. Click-to-Edit on a regular markdown note's prose body
+    await page.getByRole("button", { name: /^Book Notes: Deep Work/ }).click();
+    await expect(page.getByRole("heading", { level: 1, name: "Book Notes: Deep Work" })).toBeVisible();
+    await page.locator(".prose-content").getByText("Focused work is a skill that can be trained").click();
+    await expect(page.getByLabel("Note title")).toBeVisible();
+    await page.getByRole("button", { name: "Done", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Edit", exact: true })).toBeVisible();
+
+    // 2. HTML note exposes Rich mode, resolves :/resource images, and preserves markupLanguage
+    await page.getByRole("button", { name: /^Clipped: The Case for Slow Travel/ }).click();
+    await expect(page.getByText("HTML note")).toBeVisible();
+    await page.getByRole("button", { name: "Edit", exact: true }).click();
+    await page.getByRole("button", { name: "Rich", exact: true }).click();
+    const richEditor = page.getByLabel("Rich note editor");
+    await expect(richEditor).toBeVisible();
+    await expect(richEditor.locator('img[src*="/api/resources/"]')).toBeVisible();
+    await page.getByRole("button", { name: "Done", exact: true }).click();
+    await expect(page.getByText("HTML note")).toBeVisible();
+
     await page.evaluate(() => localStorage.removeItem("joplin-editor-mode"));
   });
 

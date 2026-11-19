@@ -254,6 +254,33 @@ export function NoteViewer({
   const canEdit = !isTrashed && !locked;
   // Editing would overwrite the stored draft, so the user decides about it first
   const editing = isEditing && canEdit && !restorable;
+  const canClickToEdit = canEdit && !restorable && !isEncrypted && Boolean(note.body.trim());
+
+  const handleBodyClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!canClickToEdit) return;
+    const currentTarget = e.currentTarget;
+    const target = e.target;
+    if (!(currentTarget instanceof Element) || !(target instanceof Node)) return;
+    // Ignore React portal events (e.g. lightbox Dialog clicks bubbling through the React tree)
+    if (!currentTarget.contains(target)) return;
+
+    const el = target instanceof Element ? target : target.parentElement;
+    if (!el) return;
+    if (
+      el.closest(
+        'a, button, input, textarea, select, option, label, summary, details, audio, video, iframe, img, .cursor-zoom-in, [role="button"], [role="checkbox"], [data-no-edit]'
+      )
+    ) {
+      return;
+    }
+
+    const selection = window.getSelection?.();
+    if (selection && !selection.isCollapsed && selection.toString().trim().length > 0) {
+      return;
+    }
+
+    setIsEditing(true);
+  };
   const isFavorite = Boolean(preferences?.favoriteNoteIds?.includes(note.id));
   const aiEnabled = Boolean(aiStatus?.enabled);
   const activeAssist = assistState?.noteId === note.id ? assistState : null;
@@ -989,7 +1016,11 @@ export function NoteViewer({
               )}
             </div>
 
-            <div ref={viewerContentRef} className="pt-2">
+            <div
+              ref={viewerContentRef}
+              onClick={handleBodyClick}
+              className={cn("pt-2", canClickToEdit && "cursor-text")}
+            >
               {isEncrypted ? (
                 <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-primary/10 border border-primary/25 text-foreground text-xs">
                   <Lock className="h-4 w-4 shrink-0 text-primary" />

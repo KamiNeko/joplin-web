@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { toast } from "sonner";
 import { Note } from "@/lib/types";
@@ -52,9 +52,38 @@ function makePrefs(favoriteNoteIds: string[] = []) {
   };
 }
 
+beforeAll(() => {
+  const empty = { length: 0, item: () => null, [Symbol.iterator]: [][Symbol.iterator] } as unknown as DOMRectList;
+  Range.prototype.getClientRects = () => empty;
+  Range.prototype.getBoundingClientRect = () => new DOMRect();
+  Element.prototype.scrollIntoView = vi.fn();
+  if (!("elementFromPoint" in document)) {
+    Object.defineProperty(document, "elementFromPoint", {
+      value: () => null,
+      configurable: true,
+    });
+  }
+});
+
 beforeEach(() => {
   localStorage.clear();
   setDraftOwner(draftOwner("me@example.com", "notes.example.com"));
+  if (typeof window.matchMedia !== "function") {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      writable: true,
+      value: (query: string) => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: () => undefined,
+        removeListener: () => undefined,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+        dispatchEvent: () => false,
+      }),
+    });
+  }
 });
 
 afterEach(() => {
@@ -261,5 +290,111 @@ describe("NoteViewer workspace panels & actions", () => {
     const tagCalls = calls.filter((c) => c.method === "POST" && c.path === `/api/notes/${baseNote.id}/tags`);
     expect(tagCalls).toHaveLength(1);
     expect(tagCalls[0].body).toEqual({ title: "roadmap" });
+  });
+
+  it("shows OCR pending, failed retry, and manual Run OCR actions in AttachmentsDrawer", async () => {
+    const imgPendingId = id("5");
+    const imgFailedId = id("6");
+    let retried = false;
+    const calls = mockFetch((call) => {
+      if (call.path === "/api/preferences") return jsonResponse(makePrefs());
+      if (call.path === "/api/ai/status") return jsonResponse({ enabled: false });
+      if (call.path === `/api/notes/${baseNote.id}/attachments` && call.method === "GET") {
+        return jsonResponse([
+          {
+            id: imgPendingId,
+            title: "scanning.png",
+            mime: "image/png",
+            filename: "scanning.png",
+            fileExtension: "png",
+            size: 1500,
+            updatedTime: 1000,
+            ocrText: "",
+            ocrStatus: "pending",
+            kind: "image",
+          },
+          {
+            id: imgFailedId,
+            title: "receipt.jpg",
+            mime: "image/jpeg",
+            filename: "receipt.jpg",
+            fileExtension: "jpg",
+            size: 2048,
+            updatedTime: 1000,
+            ocrText: retried ? "Total $19.95" : "",
+            ocrStatus: retried ? "done" : "failed",
+            kind: "image",
+          },
+        ]);
+      }
+      if (call.method === "POST" && call.path === `/api/resources/${imgFailedId}/ocr`) {
+        retried = true;
+        return jsonResponse({ id: imgFailedId, ocrStatus: "done", ocrText: "Total $19.95" });
+      }
+      return undefined;
+    });
+
+    renderWithProviders(<NoteViewer note={baseNote} />);
+    fireEvent.click(screen.getByRole("button", { name: "Attachments" }));
+
+    expect(await screen.findByText("OCR Pending")).toBeTruthy();
+    expect(screen.getByText("OCR Failed")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry OCR" }));
+    await waitFor(() =>
+      expect(calls.some((c) => c.method === "POST" && c.path === `/api/resources/${imgFailedId}/ocr`)).toBe(true)
+    );
+    expect(await screen.findByRole("button", { name: "Show OCR text" })).toBeTruthy();
+  });
+
+  it("opens editor on prose body click while ignoring links, details toggles, non-collapsed selections, and locked states", async () => {
+    const richBodyNote: Note = {
+      ...baseNote,
+      body: [
+        "Click this paragraph to edit.",
+        "",
+        `See [External Link](https://example.com) or [Wiki Note](:/${id("2")})`,
+        "",
+        "<details><summary>Toggle Section</summary>\n\nInside details\n\n</details>",
+      ].join("\n"),
+    };
+
+    mockFetch((call) => {
+      if (call.path === "/api/preferences") return jsonResponse(makePrefs());
+      if (call.path === "/api/ai/status") return jsonResponse({ enabled: false });
+      return undefined;
+    });
+
+    const onOpenNote = vi.fn();
+    renderWithProviders(<NoteViewer note={richBodyNote} onOpenNote={onOpenNote} />);
+
+    // 1. Clicking an external link does not enter edit mode
+    fireEvent.click(screen.getByRole("link", { name: "External Link" }));
+    expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
+
+    // 2. Clicking a summary toggle inside <details> does not enter edit mode
+    fireEvent.click(screen.getByText("Toggle Section"));
+    expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
+
+    // 3. Non-collapsed text selection suppresses click-to-edit
+    const getSelSpy = vi.spyOn(window, "getSelection").mockReturnValue({
+      isCollapsed: false,
+      toString: () => "paragraph",
+    } as unknown as Selection);
+    fireEvent.click(screen.getByText("Click this paragraph to edit."));
+    expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
+    getSelSpy.mockRestore();
+
+    // 4. Read-only note ignores click-to-edit
+    cleanup();
+    renderWithProviders(<NoteViewer note={richBodyNote} readOnly />);
+    fireEvent.click(screen.getByText("Click this paragraph to edit."));
+    expect(screen.queryByLabelText("Note title")).toBeNull();
+
+    // 5. Writable collapsed click on prose body enters edit mode
+    cleanup();
+    renderWithProviders(<NoteViewer note={richBodyNote} />);
+    fireEvent.click(screen.getByText("Click this paragraph to edit."));
+    expect(await screen.findByLabelText("Note title")).toBeTruthy();
   });
 });

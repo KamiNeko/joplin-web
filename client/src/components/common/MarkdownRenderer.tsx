@@ -591,7 +591,7 @@ export function MarkdownRenderer({ content, className, html = false, onToggleTas
           }
           if (/\.(mp3|wav|m4a|ogg|flac|aac|webm)$/i.test(label)) {
             return (
-              <span className="block my-3 rounded-xl border border-border/60 bg-muted/30 p-3 space-y-1.5">
+              <span data-no-edit="" className="block my-3 rounded-xl border border-border/60 bg-muted/30 p-3 space-y-1.5">
                 <span className="block text-xs font-medium text-foreground truncate">{label}</span>
                 <audio controls preload="metadata" src={getResourceUrl(itemId)} className="w-full" />
               </span>
@@ -599,7 +599,7 @@ export function MarkdownRenderer({ content, className, html = false, onToggleTas
           }
           if (/\.(mp4|mov|mkv|ogv)$/i.test(label)) {
             return (
-              <span className="block my-3 rounded-xl border border-border/60 bg-muted/30 p-3 space-y-1.5">
+              <span data-no-edit="" className="block my-3 rounded-xl border border-border/60 bg-muted/30 p-3 space-y-1.5">
                 <span className="block text-xs font-medium text-foreground truncate">{label}</span>
                 <video controls preload="metadata" src={getResourceUrl(itemId)} className="w-full max-h-96 rounded-lg" />
               </span>

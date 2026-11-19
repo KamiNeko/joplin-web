@@ -3,6 +3,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { joplinApi, JoplinNotFoundError } from '../services/joplin-api.js';
 import { noteCache } from '../services/note-cache.js';
 import { assertValidId, noteWriter } from '../services/note-writer.js';
+import { ocrBridgeService } from '../services/ocr-bridge.js';
 
 const router = Router();
 
@@ -77,9 +78,35 @@ router.post(
         : MIME_BY_EXTENSION[extension] || detectMimeType(data) || 'application/octet-stream';
 
     const resource = await noteWriter.createResource(req.sessionId!, { name, mime, data });
-    res.status(201).json(resource);
+    const ocrOutcome = await ocrBridgeService.uploadAndMaybeWait(req.sessionId!, resource.id, {
+      data,
+      mime,
+      name,
+    });
+    res.status(201).json({
+      ...resource,
+      ...(ocrOutcome.ocrStatus !== 'skipped' ? { ocrStatus: ocrOutcome.ocrStatus } : {}),
+      ...(ocrOutcome.ocrText ? { ocrText: ocrOutcome.ocrText } : {}),
+    });
   }
 );
+
+/**
+ * POST /api/resources/:id/ocr
+ * Triggers (or joins in-flight) OCR extraction for an existing image or PDF attachment.
+ */
+router.post('/:id/ocr', async (req, res) => {
+  try {
+    const result = await ocrBridgeService.runNow(req.sessionId!, req.params.id);
+    res.status(200).json(result);
+  } catch (error) {
+    if (error instanceof JoplinNotFoundError) {
+      res.status(404).json({ error: 'Resource not found on Joplin Server' });
+      return;
+    }
+    throw error;
+  }
+});
 
 /**
  * Detects MIME type from buffer magic numbers when Joplin Server returns octet-stream

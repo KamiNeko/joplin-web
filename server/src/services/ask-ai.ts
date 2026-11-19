@@ -21,13 +21,19 @@ export interface AskCompletionFn {
   ): Promise<{ content: string; usage?: OrganizeUsage }>;
 }
 
+export interface AudioTranscribeFn {
+  (audio: Buffer, mime: string, model: string, signal: AbortSignal): Promise<{ text: string; usage?: OrganizeUsage }>;
+}
+
 export interface AskAiDeps {
   aiBaseUrl?: string | null;
   aiApiKey?: string | null;
   aiModel?: string | null;
+  aiTranscribeModel?: string | null;
   aiFake?: boolean;
   aiFakeDelayMs?: number;
   completionFn?: AskCompletionFn;
+  transcribeFn?: AudioTranscribeFn;
 }
 
 const STOP_WORDS = new Set([
@@ -136,6 +142,103 @@ function collectSubtreeIds(entry: CacheEntry, rootNotebookId: string): Set<strin
   return result;
 }
 
+export interface AudioTranscribeResult {
+  text: string;
+  model: string;
+  usage?: OrganizeUsage;
+}
+
+function audioFormatFromMime(mime: string): string {
+  const clean = mime.split(';')[0].trim().toLowerCase();
+  if (clean === 'audio/wav' || clean === 'audio/wave' || clean === 'audio/x-wav') return 'wav';
+  if (clean === 'audio/mpeg' || clean === 'audio/mp3') return 'mp3';
+  if (clean === 'audio/mp4' || clean === 'audio/m4a' || clean === 'audio/x-m4a') return 'm4a';
+  if (clean === 'audio/ogg' || clean === 'application/ogg') return 'ogg';
+  if (clean === 'audio/flac') return 'flac';
+  if (clean === 'audio/aac') return 'aac';
+  if (clean === 'audio/webm' || clean === 'video/webm') return 'webm';
+  return 'wav';
+}
+
+function extractChoiceText(content: unknown): string | null {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    const parts = content
+      .map((part) => {
+        if (typeof part === 'string') return part;
+        if (part && typeof part === 'object' && 'text' in part && typeof (part as { text?: unknown }).text === 'string') {
+          return (part as { text: string }).text;
+        }
+        return '';
+      })
+      .filter(Boolean);
+    return parts.length > 0 ? parts.join('') : null;
+  }
+  return null;
+}
+
+function defaultTranscribeClient(opts: {
+  baseUrl: string;
+  apiKey: string | null;
+}): AudioTranscribeFn {
+  const endpoint = `${opts.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  return async (audio, mime, model, signal) => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (opts.apiKey) headers.Authorization = `Bearer ${opts.apiKey}`;
+    const timeoutSignal = AbortSignal.timeout(60_000);
+    const combinedSignal = AbortSignal.any([signal, timeoutSignal]);
+    const format = audioFormatFromMime(mime);
+
+    const body = {
+      model,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a verbatim speech-to-text transcriber. Transcribe spoken audio faithfully in its original language(s) with proper punctuation. Output only the transcript text.',
+        },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Transcribe this audio recording verbatim.' },
+            {
+              type: 'input_audio',
+              input_audio: {
+                data: audio.toString('base64'),
+                format,
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: combinedSignal,
+    });
+    if (!res.ok) {
+      throw new WriteValidationError(`AI transcription returned HTTP ${res.status}`, res.status === 429 ? 429 : 502);
+    }
+    const data = (await res.json()) as {
+      choices?: Array<{ message?: { content?: unknown } }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+    };
+    const content = extractChoiceText(data.choices?.[0]?.message?.content);
+    if (content === null) {
+      throw new WriteValidationError('AI transcription response did not include message content', 502);
+    }
+    const promptTokens = typeof data.usage?.prompt_tokens === 'number' ? data.usage.prompt_tokens : 0;
+    const completionTokens = typeof data.usage?.completion_tokens === 'number' ? data.usage.completion_tokens : 0;
+    const totalTokens =
+      typeof data.usage?.total_tokens === 'number' ? data.usage.total_tokens : promptTokens + completionTokens;
+    return { text: content.trim(), usage: { promptTokens, completionTokens, totalTokens } };
+  };
+}
+
 export class AskAiService {
   private readonly deps: AskAiDeps;
 
@@ -144,20 +247,104 @@ export class AskAiService {
   }
 
   private resolvedConfig() {
+    const aiBaseUrl = this.deps.aiBaseUrl !== undefined ? this.deps.aiBaseUrl : config.aiBaseUrl;
+    const aiApiKey = this.deps.aiApiKey !== undefined ? this.deps.aiApiKey : config.aiApiKey;
+    const aiModel = this.deps.aiModel !== undefined ? this.deps.aiModel : config.aiModel;
+    const aiFake = this.deps.aiFake !== undefined ? this.deps.aiFake : config.aiFake;
+    const aiFakeDelayMs =
+      this.deps.aiFakeDelayMs !== undefined ? this.deps.aiFakeDelayMs : config.aiFakeDelayMs;
+    const hasProviderOverride =
+      this.deps.aiBaseUrl !== undefined || this.deps.aiModel !== undefined;
+    const aiTranscribeModel =
+      this.deps.aiTranscribeModel !== undefined
+        ? this.deps.aiTranscribeModel
+        : hasProviderOverride
+          ? aiBaseUrl && aiModel
+            ? (config.aiTranscribeModel ?? 'gemini-3.8-flash')
+            : null
+          : config.aiTranscribeModel;
+
     return {
-      aiBaseUrl: this.deps.aiBaseUrl !== undefined ? this.deps.aiBaseUrl : config.aiBaseUrl,
-      aiApiKey: this.deps.aiApiKey !== undefined ? this.deps.aiApiKey : config.aiApiKey,
-      aiModel: this.deps.aiModel !== undefined ? this.deps.aiModel : config.aiModel,
-      aiFake: this.deps.aiFake !== undefined ? this.deps.aiFake : config.aiFake,
-      aiFakeDelayMs: this.deps.aiFakeDelayMs !== undefined ? this.deps.aiFakeDelayMs : config.aiFakeDelayMs,
+      aiBaseUrl,
+      aiApiKey,
+      aiModel,
+      aiTranscribeModel,
+      aiFake,
+      aiFakeDelayMs,
     };
   }
 
   public getStatus(): AiFeatureStatus {
     const cfg = this.resolvedConfig();
-    if (cfg.aiFake) return { enabled: true, model: 'fake-assistant' };
-    if (cfg.aiBaseUrl && cfg.aiModel) return { enabled: true, model: cfg.aiModel };
-    return { enabled: false };
+    if (cfg.aiFake) {
+      return {
+        enabled: true,
+        model: 'fake-assistant',
+        transcribeEnabled: true,
+        transcribeModel: cfg.aiTranscribeModel || 'fake-whisper',
+      };
+    }
+    if (cfg.aiBaseUrl && cfg.aiModel) {
+      const transcribeEnabled = Boolean(this.deps.transcribeFn || cfg.aiTranscribeModel);
+      return {
+        enabled: true,
+        model: cfg.aiModel,
+        transcribeEnabled,
+        ...(transcribeEnabled && cfg.aiTranscribeModel ? { transcribeModel: cfg.aiTranscribeModel } : {}),
+      };
+    }
+    if (this.deps.transcribeFn) {
+      return {
+        enabled: false,
+        transcribeEnabled: true,
+        transcribeModel: cfg.aiTranscribeModel || 'custom-transcribe',
+      };
+    }
+    return { enabled: false, transcribeEnabled: false };
+  }
+
+  public async transcribeAudio(
+    audio: Buffer,
+    mime: string,
+    signal: AbortSignal
+  ): Promise<AudioTranscribeResult> {
+    if (!Buffer.isBuffer(audio) || audio.length === 0) {
+      throw new WriteValidationError('Audio data is required', 400);
+    }
+    if (audio.length > 25 * 1024 * 1024) {
+      throw new WriteValidationError('Audio recording exceeds 25 MB limit', 413);
+    }
+    const status = this.getStatus();
+    if (!status.transcribeEnabled) {
+      throw new WriteValidationError(
+        'Voice transcription requires AI_BASE_URL, AI_MODEL and AI_TRANSCRIBE_MODEL (or AI_FAKE=true)',
+        503
+      );
+    }
+
+    const cfg = this.resolvedConfig();
+    const model = status.transcribeModel || 'gemini-3.8-flash';
+    if (this.deps.transcribeFn) {
+      const out = await this.deps.transcribeFn(audio, mime, model, signal);
+      return { text: out.text.trim(), model, ...(out.usage ? { usage: out.usage } : {}) };
+    }
+    if (cfg.aiFake) {
+      if (cfg.aiFakeDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, cfg.aiFakeDelayMs));
+      }
+      return {
+        text: 'Voice memo transcript (fake): discussed action items and follow-up tasks.',
+        model,
+        usage: { promptTokens: 25, completionTokens: 15, totalTokens: 40 },
+      };
+    }
+
+    const client = defaultTranscribeClient({
+      baseUrl: cfg.aiBaseUrl!,
+      apiKey: cfg.aiApiKey,
+    });
+    const out = await client(audio, mime, model, signal);
+    return { text: out.text.trim(), model, ...(out.usage ? { usage: out.usage } : {}) };
   }
 
   private assertEnabled(): void {

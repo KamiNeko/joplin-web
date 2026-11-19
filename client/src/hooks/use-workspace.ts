@@ -11,6 +11,7 @@ import {
   ingestEmail,
   noteAssist,
   restoreNoteRevision,
+  runResourceOcr,
   toggleInlineTask,
 } from "@/lib/api";
 import {
@@ -83,6 +84,26 @@ export function useNoteAttachments(noteId?: string | null, enabled = false) {
     queryFn: () => getNoteAttachments(noteId!),
     enabled: Boolean(noteId && enabled),
     staleTime: 15 * 1000,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      return Array.isArray(data) && data.some((att) => att.ocrStatus === "pending") ? 3000 : false;
+    },
+  });
+}
+
+export function useRunResourceOcr(noteId?: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (resourceId: string) => runResourceOcr(resourceId),
+    onSuccess: () => {
+      if (noteId) {
+        queryClient.invalidateQueries({ queryKey: ["note-attachments", noteId] });
+        queryClient.invalidateQueries({ queryKey: ["note", noteId] });
+      } else {
+        queryClient.invalidateQueries({ queryKey: ["note-attachments"] });
+      }
+      queryClient.invalidateQueries({ queryKey: ["search"] });
+    },
   });
 }
 

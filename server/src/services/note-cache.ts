@@ -167,6 +167,8 @@ function ocrTextOf(item: RawJoplinItem): string {
 
 /** Builds a detached `ResourceMetadata` record from a deserialized resource item */
 function resourceMetadataOf(item: RawJoplinItem): ResourceMetadata {
+  const rawOcrStatus = Number(item.properties.ocr_status || 0);
+  const ocrStatus = !isEncrypted(item) && Number.isFinite(rawOcrStatus) && rawOcrStatus > 0 ? rawOcrStatus : undefined;
   return {
     id: detachString(item.id),
     title: detachString(item.title),
@@ -176,6 +178,7 @@ function resourceMetadataOf(item: RawJoplinItem): ResourceMetadata {
     size: Number(item.properties.size || 0),
     updatedTime: item.updatedTime,
     ocrText: ocrTextOf(item),
+    ...(ocrStatus !== undefined ? { ocrStatus } : {}),
   };
 }
 
@@ -1037,22 +1040,28 @@ export class NoteCacheService {
     // Sort by updatedTime descending
     matchingNotes.sort((a, b) => b.updatedTime - a.updatedTime);
 
+    const tagIdsByNote = this.tagIdsByNoteOf(entry);
+
     // Map to NoteListItem
-    return matchingNotes.map((n) => ({
-      id: n.id,
-      title: n.title,
-      parentId: n.parentId || '',
-      createdTime: n.createdTime,
-      updatedTime: n.updatedTime,
-      deletedTime: n.deletedTime || 0,
-      preview: notePreview(n.body, markupLanguageOf(n.properties), 150),
-      isTodo: n.isTodo,
-      todoCompleted: Boolean(n.todoCompleted),
-      todoDue: n.todoDue,
-      isConflict: isConflictNote(n),
-      encrypted: isEncrypted(n),
-      thumbnail: noteThumbnail(n, entry.resources),
-    }));
+    return matchingNotes.map((n) => {
+      const tagIds = tagIdsByNote.get(n.id);
+      return {
+        id: n.id,
+        title: n.title,
+        parentId: n.parentId || '',
+        createdTime: n.createdTime,
+        updatedTime: n.updatedTime,
+        deletedTime: n.deletedTime || 0,
+        preview: notePreview(n.body, markupLanguageOf(n.properties), 150),
+        isTodo: n.isTodo,
+        todoCompleted: Boolean(n.todoCompleted),
+        todoDue: n.todoDue,
+        isConflict: isConflictNote(n),
+        encrypted: isEncrypted(n),
+        thumbnail: noteThumbnail(n, entry.resources),
+        ...(tagIds && tagIds.length > 0 ? { tagIds } : {}),
+      };
+    });
   }
 
   /**
@@ -1210,6 +1219,8 @@ export class NoteCacheService {
       }
     }
 
+    const tagIdsByNote = this.tagIdsByNoteOf(entry);
+
     const results: Array<SearchResult & { relevanceScore: number }> = [];
 
     for (const note of entry.notes.values()) {
@@ -1364,6 +1375,7 @@ export class NoteCacheService {
         terms: parsed.terms,
       };
 
+      const tagIds = tagIdsByNote.get(note.id);
       results.push({
         id: note.id,
         title,
@@ -1377,6 +1389,7 @@ export class NoteCacheService {
         todoDue: note.todoDue,
         isConflict: false,
         encrypted,
+        ...(tagIds && tagIds.length > 0 ? { tagIds } : {}),
         matches,
         relevanceScore,
       });
@@ -1501,7 +1514,25 @@ export class NoteCacheService {
     );
   }
 
-  private toNoteListItem(entry: CacheEntry, n: RawJoplinItem): NoteListItem {
+  private tagIdsByNoteOf(entry: CacheEntry): Map<string, string[]> {
+    const map = new Map<string, string[]>();
+    for (const link of entry.noteTags) {
+      const existing = map.get(link.noteId);
+      if (existing) {
+        if (!existing.includes(link.tagId)) existing.push(link.tagId);
+      } else {
+        map.set(link.noteId, [link.tagId]);
+      }
+    }
+    return map;
+  }
+
+  private toNoteListItem(
+    entry: CacheEntry,
+    n: RawJoplinItem,
+    tagIdsByNote?: Map<string, string[]>
+  ): NoteListItem {
+    const tagIds = tagIdsByNote?.get(n.id);
     return {
       id: n.id,
       title: n.title,
@@ -1516,6 +1547,7 @@ export class NoteCacheService {
       isConflict: isConflictNote(n),
       encrypted: isEncrypted(n),
       thumbnail: noteThumbnail(n, entry.resources),
+      ...(tagIds && tagIds.length > 0 ? { tagIds } : {}),
     };
   }
 
@@ -1571,12 +1603,13 @@ export class NoteCacheService {
   public async hydratePreferences(sessionId: string, prefs: UserPreferences): Promise<HydratedPreferences> {
     const entry = await this.ensureFresh(sessionId);
     const deletedNotebookIds = this.deletedNotebookIdsOf(entry);
+    const tagIdsByNote = this.tagIdsByNoteOf(entry);
 
     const favoriteNotes: NoteListItem[] = [];
     for (const noteId of prefs.favoriteNoteIds) {
       const note = entry.notes.get(noteId);
       if (note && this.isNoteActive(note, deletedNotebookIds)) {
-        favoriteNotes.push(this.toNoteListItem(entry, note));
+        favoriteNotes.push(this.toNoteListItem(entry, note, tagIdsByNote));
       }
     }
 
@@ -1621,6 +1654,7 @@ export class NoteCacheService {
   ): Promise<RecentNotesResponse> {
     const entry = await this.ensureFresh(sessionId);
     const deletedNotebookIds = this.deletedNotebookIdsOf(entry);
+    const tagIdsByNote = this.tagIdsByNoteOf(entry);
     const capped = Math.min(Math.max(1, limit), 100);
 
     const recentRead: RecentReadNote[] = [];
@@ -1629,7 +1663,7 @@ export class NoteCacheService {
       const note = entry.notes.get(r.noteId);
       if (note && this.isNoteActive(note, deletedNotebookIds)) {
         recentRead.push({
-          ...this.toNoteListItem(entry, note),
+          ...this.toNoteListItem(entry, note, tagIdsByNote),
           readAt: r.readAt,
         });
       }
@@ -1641,7 +1675,9 @@ export class NoteCacheService {
     }
     activeNotes.sort((a, b) => b.createdTime - a.createdTime || b.updatedTime - a.updatedTime);
 
-    const recentCreated = activeNotes.slice(0, capped).map((n) => this.toNoteListItem(entry, n));
+    const recentCreated = activeNotes
+      .slice(0, capped)
+      .map((n) => this.toNoteListItem(entry, n, tagIdsByNote));
     return { recentRead, recentCreated };
   }
 
@@ -1655,6 +1691,12 @@ export class NoteCacheService {
     for (const resId of extractLinkedResourceIds(note.body)) {
       const res = entry.resources.get(resId);
       if (!res) continue;
+      const ocrStatus =
+        res.ocrText || res.ocrStatus === 2
+          ? ('done' as const)
+          : res.ocrStatus === 3
+            ? ('failed' as const)
+            : undefined;
       attachments.push({
         id: res.id,
         title: res.title,
@@ -1664,6 +1706,7 @@ export class NoteCacheService {
         size: res.size,
         updatedTime: res.updatedTime,
         ocrText: res.ocrText,
+        ...(ocrStatus ? { ocrStatus } : {}),
         kind: attachmentKindOf(res.mime, res.filename || res.title),
       });
     }
@@ -1801,6 +1844,7 @@ export class NoteCacheService {
   public async getAllTasks(sessionId: string): Promise<TasksResponse> {
     const entry = await this.ensureFresh(sessionId);
     const deletedNotebookIds = this.deletedNotebookIdsOf(entry);
+    const tagIdsByNote = this.tagIdsByNoteOf(entry);
 
     const todoNotes: TodoTaskItem[] = [];
     const inlineTasks: InlineTaskItem[] = [];
@@ -1812,7 +1856,7 @@ export class NoteCacheService {
 
       if (note.isTodo) {
         todoNotes.push({
-          ...this.toNoteListItem(entry, note),
+          ...this.toNoteListItem(entry, note, tagIdsByNote),
           notebookTitle: nbTitle,
         });
       }
@@ -1851,6 +1895,7 @@ export class NoteCacheService {
   public async getHygieneReport(sessionId: string): Promise<HygieneReport> {
     const entry = await this.ensureFresh(sessionId);
     const deletedNotebookIds = this.deletedNotebookIdsOf(entry);
+    const tagIdsByNote = this.tagIdsByNoteOf(entry);
 
     const taggedNoteIds = new Set<string>();
     for (const link of entry.noteTags) taggedNoteIds.add(link.noteId);
@@ -1864,7 +1909,7 @@ export class NoteCacheService {
       const nb = n.parentId ? entry.notebooks.get(n.parentId) : null;
       const preview = notePreview(n.body, markupLanguageOf(n.properties), 150);
       return {
-        ...this.toNoteListItem(entry, n),
+        ...this.toNoteListItem(entry, n, tagIdsByNote),
         notebookTitle: nb ? notebookTitle(nb) : '',
         previewLength: n.body.trim().length || preview.length,
       };

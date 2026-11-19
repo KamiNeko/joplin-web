@@ -767,6 +767,34 @@ export class NoteWriterService {
     return { id, title, mime: file.mime, size: file.data.length };
   }
 
+  /**
+   * Updates Joplin-compatible OCR fields on an existing resource item (type 4).
+   */
+  public async updateResourceOcr(
+    sessionId: string,
+    resourceId: string,
+    input: { ocrText: string; status: 2 | 3; error?: string }
+  ): Promise<void> {
+    assertValidId(resourceId, 'resource id');
+    await this.assertWritable(sessionId);
+    const current = await this.fetchFreshOfType(sessionId, resourceId, JoplinItemType.Resource);
+    const props: Record<string, string> = {
+      ...current.properties,
+      ocr_status: String(input.status),
+      ocr_driver_id: current.properties.ocr_driver_id || '1',
+      ocr_details: '',
+      ocr_error: input.status === 3 ? (input.error || 'OCR failed').slice(0, 500) : '',
+      ocr_text: input.status === 2 ? input.ocrText : current.properties.ocr_text || '',
+    };
+    touch(props);
+    await this.write(sessionId, {
+      type_: JoplinItemType.Resource,
+      title: current.title,
+      body: current.body,
+      properties: props,
+    });
+  }
+
   /** Permanently deletes an attachment: its metadata item first, then the file */
   public async deleteResource(sessionId: string, resourceId: string): Promise<void> {
     assertValidId(resourceId, 'resource id');

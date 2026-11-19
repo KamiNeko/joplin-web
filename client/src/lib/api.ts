@@ -1,6 +1,7 @@
 import {
   AiFeatureStatus,
   AskNotesResponse,
+  AudioTranscribeResponse,
   BatchNoteRequest,
   BatchNoteResult,
   ClipResponse,
@@ -813,6 +814,20 @@ export interface UploadedResource {
   title: string;
   mime: string;
   size: number;
+  ocrStatus?: "pending" | "done" | "failed" | "skipped";
+  ocrText?: string;
+}
+
+/**
+ * Triggers or waits for OCR extraction on an existing image/PDF attachment.
+ */
+export async function runResourceOcr(
+  resourceId: string
+): Promise<{ id: string; ocrStatus: "done" | "failed"; ocrText: string }> {
+  return request<{ id: string; ocrStatus: "done" | "failed"; ocrText: string }>(
+    `/api/resources/${encodeURIComponent(resourceId)}/ocr`,
+    { method: "POST" }
+  );
 }
 
 /**
@@ -1130,12 +1145,29 @@ export async function getHygieneReport(): Promise<HygieneReport> {
 
 export async function getAiStatus(): Promise<AiFeatureStatus> {
   const data = await request<Partial<AiFeatureStatus> | unknown[] | null>("/api/ai/status");
-  if (!data || Array.isArray(data)) return { enabled: false };
+  if (!data || Array.isArray(data)) return { enabled: false, transcribeEnabled: false };
   const enabled = data.enabled === true;
+  const transcribeEnabled = data.transcribeEnabled === true;
   return {
     enabled,
     ...(enabled && typeof data.model === "string" ? { model: data.model } : {}),
+    transcribeEnabled,
+    ...(transcribeEnabled && typeof data.transcribeModel === "string"
+      ? { transcribeModel: data.transcribeModel }
+      : {}),
   };
+}
+
+export async function transcribeAudio(blob: Blob, mime?: string): Promise<AudioTranscribeResponse> {
+  const resolvedMime = (mime || blob.type || "audio/wav").split(";")[0].trim() || "audio/wav";
+  return request<AudioTranscribeResponse>("/api/ai/transcribe", {
+    method: "POST",
+    body: blob,
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "X-File-Type": resolvedMime,
+    },
+  });
 }
 
 export async function askNotes(payload: {

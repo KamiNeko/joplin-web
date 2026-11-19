@@ -87,7 +87,10 @@ export function ClipPage() {
   );
 
   const defaultNotebookId = useMemo(() => {
-    const inbox = writableNotebooks.find((nb) => nb.title.trim().toLowerCase() === "inbox");
+    const lower = (s: string) => s.trim().toLowerCase();
+    const inbox =
+      writableNotebooks.find((nb) => lower(nb.title) === "inbox") ??
+      writableNotebooks.find((nb) => lower(nb.title) === "pending to sort");
     return inbox?.id ?? writableNotebooks[0]?.id ?? "";
   }, [writableNotebooks]);
 
@@ -529,10 +532,10 @@ export function ClipPage() {
                   Incoming Email Webhook
                 </h2>
                 <p className="text-xs text-muted-foreground">
-                  Configure <code className="font-mono">EMAIL_INGEST_WEBHOOK_SECRET</code> along with service credentials on the server to forward mail directly to <code className="font-mono">POST /api/webhooks/email</code>:
+                  Configure <code className="font-mono">EMAIL_INGEST_WEBHOOK_SECRET</code> on the server to forward raw RFC-822 messages (<code className="font-mono">Content-Type: message/rfc822</code>) or JSON payloads directly to <code className="font-mono">POST /api/webhooks/email</code>:
                 </p>
                 <pre className="rounded-lg border border-border bg-muted/50 p-2.5 text-[11px] font-mono overflow-x-auto text-foreground">
-                  {`curl -X POST ${origin}/api/webhooks/email \\\n  -H "X-Webhook-Secret: $EMAIL_INGEST_WEBHOOK_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"subject":"Invoice","from":"billing@example.com","text":"Paid"}'`}
+                  {`# Raw RFC-822 (.eml) upload (e.g. Cloudflare Email Worker)\ncurl -X POST ${origin}/api/webhooks/email \\\n  -H "X-Webhook-Secret: $EMAIL_INGEST_WEBHOOK_SECRET" \\\n  -H "Content-Type: message/rfc822" \\\n  --data-binary @message.eml\n\n# JSON payload\ncurl -X POST ${origin}/api/webhooks/email \\\n  -H "X-Webhook-Secret: $EMAIL_INGEST_WEBHOOK_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"subject":"Invoice","from":"billing@example.com","text":"Paid"}'`}
                 </pre>
               </div>
             </div>

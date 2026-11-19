@@ -20,7 +20,7 @@ import {
 import { toast } from "sonner";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { Sidebar } from "@/components/layout/Sidebar";
-import { VoiceNoteModal } from "@/components/notes/VoiceNoteModal";
+import { VoiceNoteModal, type VoiceUploadResult } from "@/components/notes/VoiceNoteModal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -64,7 +64,10 @@ export function HomePage() {
   );
 
   const defaultNotebookId = useMemo(() => {
-    const inbox = writableNotebooks.find((nb) => nb.title.trim().toLowerCase() === "inbox");
+    const lower = (s: string) => s.trim().toLowerCase();
+    const inbox =
+      writableNotebooks.find((nb) => lower(nb.title) === "inbox") ??
+      writableNotebooks.find((nb) => lower(nb.title) === "pending to sort");
     return inbox?.id ?? writableNotebooks[0]?.id ?? "";
   }, [writableNotebooks]);
 
@@ -152,14 +155,21 @@ export function HomePage() {
     }
   };
 
-  const handleVoiceUploaded = async (resource: { id: string; title: string }) => {
+  const handleVoiceUploaded = async (resource: VoiceUploadResult) => {
     if (!targetNotebookId) return;
     const safeTitle = resource.title.replace(/[[\]]/g, (c) => (c === "[" ? "(" : ")"));
+    const transcript = resource.transcript?.trim();
+    const body = transcript
+      ? `[${safeTitle}](:/${resource.id})\n\n${transcript
+          .split(/\r?\n/)
+          .map((line) => `> ${line}`)
+          .join("\n")}\n`
+      : `[${safeTitle}](:/${resource.id})\n`;
     try {
       const created = await createNote.mutateAsync({
         parentId: targetNotebookId,
         title: resource.title || "Voice note",
-        body: `[${safeTitle}](:/${resource.id})\n`,
+        body,
       });
       navigate(`/notes/${created.id}`);
     } catch (err) {

@@ -8,6 +8,9 @@ export const SEARCH_SYNTAX_HINT =
 /** localStorage key holding the NoteList view layout ("list" | "gallery" | "table" | "board") */
 export const NOTE_LIST_VIEW_STORAGE_KEY = "joplin-note-list-view";
 
+/** localStorage key holding the NoteList board grouping ("status" | "tags") */
+export const NOTE_LIST_BOARD_GROUP_STORAGE_KEY = "joplin-note-list-board-group";
+
 /**
  * Classes for sidebar row action buttons: shown on hover/focus on wide screens with a mouse,
  * always visible on small or touch screens, which have no hover.

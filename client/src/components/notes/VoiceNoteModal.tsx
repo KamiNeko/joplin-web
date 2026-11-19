@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2, Mic, RotateCcw, Square, Upload } from "lucide-react";
+import { Loader2, Mic, RotateCcw, Sparkles, Square, Upload } from "lucide-react";
 import { toast } from "sonner";
-import { uploadResource, type UploadedResource } from "@/lib/api";
+import { transcribeAudio, uploadResource, type UploadedResource } from "@/lib/api";
+import { convertAudioBlobToWav } from "@/lib/audio-wav";
 import { announceWrite } from "@/lib/cross-tab";
+import { useAiStatus } from "@/hooks/use-workspace";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -14,10 +16,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
+export interface VoiceUploadResult extends UploadedResource {
+  transcript?: string;
+}
+
 interface VoiceNoteModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onUploaded: (resource: UploadedResource) => void;
+  onUploaded: (resource: VoiceUploadResult) => void;
 }
 
 function defaultVoiceTitle(): string {
@@ -77,12 +83,15 @@ function VoiceNoteRecorder({
   onUploaded,
 }: {
   onClose: () => void;
-  onUploaded: (resource: UploadedResource) => void;
+  onUploaded: (resource: VoiceUploadResult) => void;
 }) {
   const supported =
     typeof navigator !== "undefined" &&
     Boolean(navigator.mediaDevices?.getUserMedia) &&
     typeof MediaRecorder !== "undefined";
+
+  const { data: aiStatus } = useAiStatus();
+  const canTranscribe = Boolean(aiStatus?.transcribeEnabled);
 
   const [recording, setRecording] = useState(false);
   const [elapsedSec, setElapsedSec] = useState(0);
@@ -91,6 +100,8 @@ function VoiceNoteRecorder({
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadPhase, setUploadPhase] = useState<string | null>(null);
+  const [transcribe, setTranscribe] = useState(true);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -205,6 +216,7 @@ function VoiceNoteRecorder({
   const handleUpload = async () => {
     if (!recordedBlob || recordedBlob.size === 0) return;
     setUploading(true);
+    setUploadPhase("Uploading audio…");
     setError(null);
     try {
       const cleanTitle = (title.trim() || defaultVoiceTitle()).replace(/[\\/:*?"<>|]/g, "-");
@@ -214,13 +226,31 @@ function VoiceNoteRecorder({
       const file = new File([recordedBlob], fileName, { type: mime });
       const resource = await uploadResource(file);
       announceWrite();
-      onUploaded(resource);
-      toast.success("Voice note uploaded");
+
+      let transcript: string | undefined;
+      if (canTranscribe && transcribe) {
+        setUploadPhase("Transcribing speech…");
+        try {
+          const converted = await convertAudioBlobToWav(recordedBlob);
+          const transcribed = await transcribeAudio(converted.blob, converted.mime);
+          if (transcribed.text.trim()) {
+            transcript = transcribed.text.trim();
+          }
+        } catch (err) {
+          toast.warning("Voice uploaded, transcription skipped", {
+            description: err instanceof Error ? err.message : undefined,
+          });
+        }
+      }
+
+      onUploaded(transcript ? { ...resource, transcript } : resource);
+      toast.success(transcript ? "Voice note uploaded & transcribed" : "Voice note uploaded");
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not upload voice recording.");
     } finally {
       setUploading(false);
+      setUploadPhase(null);
     }
   };
 
@@ -276,6 +306,19 @@ function VoiceNoteRecorder({
               disabled={uploading}
             />
           </label>
+          {canTranscribe && (
+            <label className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-xs text-foreground cursor-pointer">
+              <input
+                type="checkbox"
+                checked={transcribe}
+                onChange={(e) => setTranscribe(e.target.checked)}
+                disabled={uploading}
+                className="h-4 w-4 rounded border-border accent-primary"
+              />
+              <Sparkles className="h-3.5 w-3.5 text-primary shrink-0" aria-hidden="true" />
+              <span className="flex-1">Transcribe speech with AI</span>
+            </label>
+          )}
         </div>
       )}
 
@@ -290,7 +333,7 @@ function VoiceNoteRecorder({
           className="gap-1.5"
         >
           {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-          Upload & insert
+          {uploadPhase || "Upload & insert"}
         </Button>
       </DialogFooter>
     </div>

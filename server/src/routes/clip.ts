@@ -33,10 +33,12 @@ function flattenNotebooks(notebooks: Notebook[]): Notebook[] {
   return out;
 }
 
-function findInboxOrDefaultNotebookId(notebooks: Notebook[], configuredId: string | null): string | null {
+export function findInboxOrDefaultNotebookId(notebooks: Notebook[], configuredId: string | null): string | null {
   const flat = flattenNotebooks(notebooks).filter((n) => !n.encrypted);
   if (configuredId && flat.some((n) => n.id === configuredId)) return configuredId;
-  const inbox = flat.find((n) => n.title.trim().toLowerCase() === 'inbox');
+  const inbox =
+    flat.find((n) => n.title.trim().toLowerCase() === 'inbox') ??
+    flat.find((n) => n.title.trim().toLowerCase() === 'pending to sort');
   return inbox?.id ?? flat[0]?.id ?? null;
 }
 
@@ -116,26 +118,51 @@ export function createClipRouter(deps: { fetchClip?: typeof fetchAndClipUrl } = 
    * Authenticated email import from raw .eml content or structured fields.
    */
   router.post('/integrations/email', requireAuth, async (req, res) => {
-    const note = await createEmailNote(req.sessionId!, req.body);
+    const note = await createEmailNote(req.sessionId!, req.body, null, {
+      parentIdHeader: headerString(req.headers['x-joplin-notebook-id']),
+      tagsHeader: headerString(req.headers['x-joplin-tags']),
+    });
     res.status(201).json({ note });
   });
 
   return router;
 }
 
-async function createEmailNote(sessionId: string, payload: unknown, defaultNotebookId: string | null = null) {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw new WriteValidationError('Request body must be a JSON object', 400);
+function headerString(val: string | string[] | undefined): string | undefined {
+  if (typeof val === 'string') return val.trim() || undefined;
+  if (Array.isArray(val) && typeof val[0] === 'string') return val[0].trim() || undefined;
+  return undefined;
+}
+
+async function createEmailNote(
+  sessionId: string,
+  payload: unknown,
+  defaultNotebookId: string | null = null,
+  headers: { parentIdHeader?: string; tagsHeader?: string } = {}
+) {
+  let subject: unknown;
+  let from: unknown;
+  let text: unknown;
+  let html: unknown;
+  let parentId: unknown;
+  let tags: unknown;
+  let raw: string | Buffer | undefined;
+
+  if (Buffer.isBuffer(payload) || typeof payload === 'string') {
+    raw = payload;
+  } else if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    ({ raw, subject, from, text, html, parentId, tags } = payload as {
+      raw?: string | Buffer;
+      subject?: unknown;
+      from?: unknown;
+      text?: unknown;
+      html?: unknown;
+      parentId?: unknown;
+      tags?: unknown;
+    });
+  } else {
+    throw new WriteValidationError('Request body must be a JSON object or raw RFC-822 email message', 400);
   }
-  const { raw, subject, from, text, html, parentId, tags } = payload as {
-    raw?: unknown;
-    subject?: unknown;
-    from?: unknown;
-    text?: unknown;
-    html?: unknown;
-    parentId?: unknown;
-    tags?: unknown;
-  };
 
   let parsed = {
     subject: typeof subject === 'string' && subject.trim() ? subject.trim() : 'Email Note',
@@ -144,7 +171,12 @@ async function createEmailNote(sessionId: string, payload: unknown, defaultNoteb
     markdownBody: '',
   };
 
-  if (typeof raw === 'string' && raw.trim()) {
+  if (Buffer.isBuffer(raw)) {
+    if (raw.toString('utf8').trim().length === 0) {
+      throw new WriteValidationError('Email body must not be empty', 400);
+    }
+    parsed = parseEmlMessage(raw);
+  } else if (typeof raw === 'string' && raw.trim()) {
     parsed = parseEmlMessage(raw);
   } else {
     const plain = typeof text === 'string' ? text.trim() : '';
@@ -156,8 +188,8 @@ async function createEmailNote(sessionId: string, payload: unknown, defaultNoteb
     throw new WriteValidationError('Email must include raw .eml or subject/text/html content', 400);
   }
 
-  let targetNotebookId =
-    typeof parentId === 'string' && parentId.trim() ? assertValidId(parentId.trim(), 'notebook id') : '';
+  const rawParentId = typeof parentId === 'string' && parentId.trim() ? parentId.trim() : headers.parentIdHeader;
+  let targetNotebookId = rawParentId ? assertValidId(rawParentId, 'notebook id') : '';
   if (!targetNotebookId) {
     const notebooks = await noteCache.getNotebooks(sessionId);
     const fallback = findInboxOrDefaultNotebookId(notebooks, defaultNotebookId);
@@ -183,7 +215,13 @@ async function createEmailNote(sessionId: string, payload: unknown, defaultNoteb
 
   const tagList = Array.isArray(tags)
     ? tags.filter((t): t is string => typeof t === 'string' && Boolean(t.trim())).slice(0, 10)
-    : ['email'];
+    : headers.tagsHeader
+      ? headers.tagsHeader
+          .split(',')
+          .map((t) => t.trim())
+          .filter(Boolean)
+          .slice(0, 10)
+      : ['email'];
   for (const t of tagList) {
     note = await noteWriter.addTagToNote(sessionId, note.id, t);
   }
@@ -228,13 +266,18 @@ export function createEmailWebhookRouter(config: AppConfig): Router {
         ? serviceSession.sessionId
         : await authenticate();
 
+    const headerOpts = {
+      parentIdHeader: headerString(req.headers['x-joplin-notebook-id']),
+      tagsHeader: headerString(req.headers['x-joplin-tags']),
+    };
+
     try {
-      const note = await createEmailNote(sessionId, req.body, config.emailIngestNotebookId);
+      const note = await createEmailNote(sessionId, req.body, config.emailIngestNotebookId, headerOpts);
       res.status(201).json({ note });
     } catch (err) {
       if ((err as { status?: number })?.status === 401) {
         sessionId = await authenticate();
-        const note = await createEmailNote(sessionId, req.body, config.emailIngestNotebookId);
+        const note = await createEmailNote(sessionId, req.body, config.emailIngestNotebookId, headerOpts);
         res.status(201).json({ note });
         return;
       }

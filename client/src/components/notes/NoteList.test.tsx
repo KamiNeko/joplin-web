@@ -4,7 +4,7 @@ import { Notebook, NoteListItem as NoteListItemType, Tag } from "@/lib/types";
 import { jsonResponse, mockFetch } from "@/test/fetch-mock";
 import { renderWithProviders } from "@/test/render";
 import { NOTE_LIST_PAGE_SIZE, NoteList } from "./NoteList";
-import { NOTE_LIST_VIEW_STORAGE_KEY } from "@/lib/ui-constants";
+import { NOTE_LIST_BOARD_GROUP_STORAGE_KEY, NOTE_LIST_VIEW_STORAGE_KEY } from "@/lib/ui-constants";
 
 const nbId = (c: string) => c.repeat(32);
 const noteId = (n: number) => n.toString(16).padStart(32, "0");
@@ -261,5 +261,60 @@ describe("NoteList collection views & favorites", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "List view" }));
     expect(localStorage.getItem(NOTE_LIST_VIEW_STORAGE_KEY)).toBe("list");
+  });
+
+  it("groups Board view by Tags cleanly and persists grouping mode", () => {
+    localStorage.clear();
+    mockFetch((c) => (c.path === "/api/tags" ? jsonResponse(tags) : undefined));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const taggedNotes: NoteListItemType[] = [
+      {
+        ...makeNotes(1)[0],
+        id: noteId(10),
+        title: "Roadmap Draft",
+        tagIds: [nbId("a"), nbId("b")],
+      },
+      {
+        ...makeNotes(1)[0],
+        id: noteId(11),
+        title: "Deep Work Notes",
+        tagIds: [nbId("b")],
+      },
+      {
+        ...makeNotes(1)[0],
+        id: noteId(12),
+        title: "Inbox Scratch",
+        tagIds: [],
+      },
+    ];
+
+    renderWithProviders(
+      <NoteList
+        notes={taggedNotes}
+        notebooks={notebooks}
+        tags={tags}
+        onSelectNote={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Board view" }));
+    expect(screen.getByRole("button", { name: "Status" }).getAttribute("aria-pressed")).toBe("true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Tags" }));
+    expect(localStorage.getItem(NOTE_LIST_BOARD_GROUP_STORAGE_KEY)).toBe("tags");
+    expect(screen.getByRole("button", { name: "Tags" }).getAttribute("aria-pressed")).toBe("true");
+
+    const planningHeading = screen.getByRole("heading", { level: 4, name: "#planning" });
+    const readingHeading = screen.getByRole("heading", { level: 4, name: "#reading" });
+    const untaggedHeading = screen.getByRole("heading", { level: 4, name: "Untagged" });
+
+    expect(within(planningHeading.closest("section")!).getByText("Roadmap Draft")).toBeTruthy();
+    expect(within(readingHeading.closest("section")!).getByText("Roadmap Draft")).toBeTruthy();
+    expect(within(readingHeading.closest("section")!).getByText("Deep Work Notes")).toBeTruthy();
+    expect(within(untaggedHeading.closest("section")!).getByText("Inbox Scratch")).toBeTruthy();
+
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });

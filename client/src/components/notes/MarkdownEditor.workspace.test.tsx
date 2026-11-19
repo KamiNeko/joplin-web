@@ -189,10 +189,19 @@ describe("NoteEditor Rich WYSIWYG mode", () => {
     markupLanguage: 1,
   };
 
-  it("offers Rich mode for Markdown notes, hides it for HTML notes, persists preference, and saves Joplin links", async () => {
+  it("offers Rich mode for Markdown and HTML notes, persists preference, and round-trips Joplin links", async () => {
+    const htmlNote: Note = {
+      ...mdNote,
+      id: targetId,
+      markupLanguage: 2,
+      body: `<p>Intro HTML</p><p><img src=":/${resourceId}" alt="diagram"></p>`,
+    };
     const calls = mockFetch((call: FetchCall) => {
       if (call.method === "PUT" && call.path === `/api/notes/${selfId}`) {
         return jsonResponse({ ...mdNote, ...(call.body as object), updatedTime: 2000 });
+      }
+      if (call.method === "PUT" && call.path === `/api/notes/${targetId}`) {
+        return jsonResponse({ ...htmlNote, ...(call.body as object), updatedTime: 3000 });
       }
       return undefined;
     });
@@ -219,7 +228,7 @@ describe("NoteEditor Rich WYSIWYG mode", () => {
     });
     expect(richBox.textContent).toContain("Hello world");
 
-    // Trigger formatting via rich toolbar and append text via bold toolbar + Done
+    // Trigger formatting via rich toolbar and Done
     fireEvent.click(screen.getByRole("button", { name: "Heading 2" }));
     fireEvent.click(screen.getByRole("button", { name: "Done" }));
 
@@ -227,14 +236,30 @@ describe("NoteEditor Rich WYSIWYG mode", () => {
     const saved = calls.find((c) => c.method === "PUT" && c.path === `/api/notes/${selfId}`)!.body as { body: string };
     expect(saved.body).toContain(`![diagram](:/${resourceId})`);
 
-    // HTML note hides the Rich mode button
+    // HTML note also exposes Rich mode, renders /api/resources/:id, edits via TipTap, and converts back to :/id
     rerender(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
         <MemoryRouter>
-          <NoteEditor note={{ ...mdNote, id: targetId, markupLanguage: 2 }} onDone={onDone} />
+          <NoteEditor key={targetId} note={htmlNote} onDone={onDone} />
         </MemoryRouter>
       </QueryClientProvider>
     );
-    expect(screen.queryByRole("button", { name: "Rich" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Rich" })).toBeTruthy();
+    const htmlRichBox = await waitFor(() => {
+      const el = document.querySelector(".rich-editor-content");
+      expect(el?.textContent).toContain("Intro HTML");
+      return el as HTMLElement;
+    });
+    const renderedImg = htmlRichBox.querySelector("img");
+    expect(renderedImg?.getAttribute("src")).toBe(`/api/resources/${resourceId}`);
+
+    fireEvent.click(screen.getByRole("button", { name: "Heading 2" }));
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+
+    await waitFor(() => expect(calls.some((c) => c.method === "PUT" && c.path === `/api/notes/${targetId}`)).toBe(true));
+    const savedHtml = calls.find((c) => c.method === "PUT" && c.path === `/api/notes/${targetId}`)!.body as Record<string, unknown>;
+    expect(savedHtml.body).toContain(`:/${resourceId}`);
+    expect(savedHtml.body).not.toContain(`/api/resources/${resourceId}`);
+    expect(savedHtml).not.toHaveProperty("markupLanguage");
   });
 });

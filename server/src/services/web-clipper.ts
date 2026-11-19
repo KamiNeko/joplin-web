@@ -282,31 +282,59 @@ export interface ParsedEmail {
   markdownBody: string;
 }
 
+function decodeBytesWithCharset(bytes: Buffer | Uint8Array, charset?: string): string {
+  const normalized = (charset || 'utf-8').trim().replace(/^["']|["']$/g, '').toLowerCase();
+  const mapped =
+    normalized === 'utf8'
+      ? 'utf-8'
+      : normalized === 'latin1' || normalized === 'iso-8859-1' || normalized === 'us-ascii' || normalized === 'ascii'
+      ? 'windows-1252'
+      : normalized;
+  try {
+    return new TextDecoder(mapped).decode(bytes);
+  } catch {
+    return Buffer.from(bytes).toString('utf8');
+  }
+}
+
 function decodeRfc2047(value: string): string {
-  return value.replace(/=\?([^?]+)\?([BQ])\?([^?]*)\?=/gi, (_match, charset, enc, data) => {
+  // RFC 2047 §6.2: linear whitespace separating adjacent encoded-words is ignored
+  const collapsed = value.replace(/(\?=)\s+(=\?)/g, '$1$2');
+  return collapsed.replace(/=\?([^?]+)\?([BQ])\?([^?]*)\?=/gi, (_match, charset, enc, data) => {
     try {
       const upper = String(enc).toUpperCase();
       let buf: Buffer;
       if (upper === 'B') {
         buf = Buffer.from(data, 'base64');
       } else {
-        const qp = String(data)
-          .replace(/_/g, ' ')
-          .replace(/=([0-9a-fA-F]{2})/g, (_m, hex) => String.fromCharCode(parseInt(hex, 16)));
-        buf = Buffer.from(qp, 'latin1');
+        const qp = String(data).replace(/_/g, ' ');
+        const bytes: number[] = [];
+        for (let i = 0; i < qp.length; i++) {
+          if (qp[i] === '=' && /^[0-9a-fA-F]{2}$/.test(qp.slice(i + 1, i + 3))) {
+            bytes.push(parseInt(qp.slice(i + 1, i + 3), 16));
+            i += 2;
+          } else {
+            for (const b of Buffer.from(qp[i], 'utf8')) bytes.push(b);
+          }
+        }
+        buf = Buffer.from(bytes);
       }
-      void charset;
-      return buf.toString('utf8');
+      return decodeBytesWithCharset(buf, String(charset));
     } catch {
       return _match;
     }
   });
 }
 
-function decodeTransferBody(raw: string, encoding: string): string {
+function decodeTransferBody(
+  raw: string,
+  encoding: string,
+  charset?: string,
+  fromRawBytes = false
+): string {
   const enc = encoding.trim().toLowerCase();
   if (enc === 'base64') {
-    return Buffer.from(raw.replace(/\s+/g, ''), 'base64').toString('utf8');
+    return decodeBytesWithCharset(Buffer.from(raw.replace(/\s+/g, ''), 'base64'), charset);
   }
   if (enc === 'quoted-printable') {
     const unfolded = raw.replace(/=\r?\n/g, '');
@@ -315,12 +343,17 @@ function decodeTransferBody(raw: string, encoding: string): string {
       if (unfolded[i] === '=' && /^[0-9a-fA-F]{2}$/.test(unfolded.slice(i + 1, i + 3))) {
         bytes.push(parseInt(unfolded.slice(i + 1, i + 3), 16));
         i += 2;
+      } else if (fromRawBytes) {
+        bytes.push(unfolded.charCodeAt(i) & 0xff);
       } else {
         const chunk = Buffer.from(unfolded[i], 'utf8');
         for (const b of chunk) bytes.push(b);
       }
     }
-    return Buffer.from(bytes).toString('utf8');
+    return decodeBytesWithCharset(Buffer.from(bytes), charset);
+  }
+  if (fromRawBytes) {
+    return decodeBytesWithCharset(Buffer.from(raw, 'latin1'), charset);
   }
   return raw;
 }
@@ -343,41 +376,66 @@ function splitHeadersBody(raw: string): { headers: Record<string, string>; body:
 
 function extractTextParts(
   rawPart: string,
-  depth = 0
+  depth = 0,
+  fromRawBytes = false
 ): { plain: string; html: string } {
-  if (depth > 4) return { plain: '', html: '' };
+  if (depth > 6) return { plain: '', html: '' };
   const { headers, body } = splitHeadersBody(rawPart);
-  const ct = (headers['content-type'] || 'text/plain').toLowerCase();
+  // Keep original case so case-sensitive MIME multipart boundaries remain intact
+  const ctRaw = headers['content-type'] || 'text/plain';
+  const ctLower = ctRaw.toLowerCase();
   const cte = headers['content-transfer-encoding'] || '';
 
-  const boundaryMatch = /boundary=["']?([^"';\s]+)["']?/i.exec(ct);
-  if (ct.startsWith('multipart/') && boundaryMatch) {
-    const boundary = `--${boundaryMatch[1]}`;
+  const boundaryMatch = /boundary=(?:"([^"]+)"|'([^']+)'|([^;\s]+))/i.exec(ctRaw);
+  const boundaryToken = boundaryMatch ? (boundaryMatch[1] ?? boundaryMatch[2] ?? boundaryMatch[3]) : '';
+  if (ctLower.startsWith('multipart/') && boundaryToken) {
+    const boundary = `--${boundaryToken}`;
     const chunks = body.split(boundary).slice(1);
-    let plain = '';
-    let html = '';
+    const isAlternative = ctLower.startsWith('multipart/alternative');
+    const plainParts: string[] = [];
+    const htmlParts: string[] = [];
     for (const chunk of chunks) {
       if (chunk.startsWith('--')) break;
       const trimmed = chunk.replace(/^\r?\n/, '').replace(/\r?\n$/, '');
-      const sub = extractTextParts(trimmed, depth + 1);
-      if (!plain && sub.plain) plain = sub.plain;
-      if (!html && sub.html) html = sub.html;
+      const sub = extractTextParts(trimmed, depth + 1, fromRawBytes);
+      if (isAlternative) {
+        if (plainParts.length === 0 && sub.plain) plainParts.push(sub.plain);
+        if (htmlParts.length === 0 && sub.html) htmlParts.push(sub.html);
+      } else {
+        if (sub.plain.trim()) plainParts.push(sub.plain.trim());
+        if (sub.html.trim()) htmlParts.push(sub.html.trim());
+      }
     }
-    return { plain, html };
+    return {
+      plain: plainParts.join('\n\n'),
+      html: htmlParts.join('\n\n'),
+    };
   }
 
-  const decoded = decodeTransferBody(body, cte);
-  if (ct.includes('text/html')) return { plain: '', html: decoded };
-  if (ct.includes('text/plain') || !ct.includes('/')) return { plain: decoded, html: '' };
+  if (ctLower.startsWith('message/rfc822')) {
+    return extractTextParts(body, depth + 1, fromRawBytes);
+  }
+
+  const charsetMatch = /charset=(?:"([^"]+)"|'([^']+)'|([^;\s]+))/i.exec(ctRaw);
+  const charset = charsetMatch ? (charsetMatch[1] ?? charsetMatch[2] ?? charsetMatch[3]) : undefined;
+  const decoded = decodeTransferBody(body, cte, charset, fromRawBytes);
+  if (ctLower.includes('text/html')) return { plain: '', html: decoded };
+  if (ctLower.includes('text/plain') || !ctLower.includes('/')) return { plain: decoded, html: '' };
   return { plain: '', html: '' };
 }
 
-export function parseEmlMessage(rawEml: string): ParsedEmail {
-  const { headers } = splitHeadersBody(rawEml);
-  const subject = decodeRfc2047(headers.subject || 'Forwarded Email').replace(/\s+/g, ' ').trim();
-  const from = decodeRfc2047(headers.from || '').trim();
+export function parseEmlMessage(rawEml: string | Buffer): ParsedEmail {
+  const fromRawBytes = Buffer.isBuffer(rawEml);
+  const source = fromRawBytes ? rawEml.toString('latin1') : rawEml;
+  const { headers } = splitHeadersBody(source);
+  const headerToText = (raw: string) =>
+    fromRawBytes ? decodeBytesWithCharset(Buffer.from(raw, 'latin1'), 'utf-8') : raw;
+  const subject = decodeRfc2047(headerToText(headers.subject || 'Forwarded Email'))
+    .replace(/\s+/g, ' ')
+    .trim();
+  const from = decodeRfc2047(headerToText(headers.from || '')).trim();
   const date = (headers.date || '').trim();
-  const { plain, html } = extractTextParts(rawEml);
+  const { plain, html } = extractTextParts(source, 0, fromRawBytes);
 
   let markdownBody = plain.trim();
   if (!markdownBody && html.trim()) {

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import { noteCache } from '../services/note-cache.js';
 import { noteWriter } from '../services/note-writer.js';
+import { ocrBridgeService } from '../services/ocr-bridge.js';
 import { isTrueFlag } from './query.js';
 
 const router = Router();
@@ -202,7 +203,15 @@ router.get('/:id/attachments', async (req, res) => {
     res.status(404).json({ error: `Note not found with id: ${req.params.id}` });
     return;
   }
-  res.status(200).json(attachments);
+  const hydrated = attachments.map((att) => {
+    const live = ocrBridgeService.getStatus(att.id);
+    if (live === 'pending') {
+      return { ...att, ocrStatus: 'pending' as const };
+    }
+    const status = att.ocrStatus ?? live;
+    return status ? { ...att, ocrStatus: status } : att;
+  });
+  res.status(200).json(hydrated);
 });
 
 /**

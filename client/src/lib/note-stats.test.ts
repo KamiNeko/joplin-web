@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   computeNoteStats,
   extractHeadings,
+  joplinToRichHtml,
   joplinToRichMarkdown,
+  richHtmlToJoplin,
   richMarkdownToJoplin,
 } from "./note-stats";
 
@@ -73,6 +75,27 @@ describe("joplinToRichMarkdown and richMarkdownToJoplin", () => {
     const serialized = `![pic](http://localhost:5173/api/resources/${imgId}) and [Note](https://notes.example.com/joplin-item/${noteId})`;
     expect(richMarkdownToJoplin(serialized)).toBe(
       `![pic](:/${imgId}) and [Note](:/${noteId})`
+    );
+  });
+});
+
+describe("joplinToRichHtml and richHtmlToJoplin", () => {
+  const imgId = "0123456789abcdef0123456789abcdef";
+  const noteId = "fedcba9876543210fedcba9876543210";
+
+  it("round-trips Joplin :/id img and link tags in HTML notes", () => {
+    const html = `<p>Photo: <img class="hero" src=":/${imgId}" alt="Tram"></p><p><a href=":/${noteId}#days">Trip</a></p>`;
+    const rich = joplinToRichHtml(html);
+    expect(rich).toBe(
+      `<p>Photo: <img class="hero" src="/api/resources/${imgId}" alt="Tram"></p><p><a href="/joplin-item/${noteId}#days">Trip</a></p>`
+    );
+    expect(richHtmlToJoplin(rich)).toBe(html);
+  });
+
+  it("normalizes absolute URLs back to :/id in serialized TipTap HTML", () => {
+    const serialized = `<p><img src="https://notes.example.com/api/resources/${imgId.toUpperCase()}" alt="X"><a href="http://localhost:5173/joplin-item/${noteId}">Link</a></p>`;
+    expect(richHtmlToJoplin(serialized)).toBe(
+      `<p><img src=":/${imgId}" alt="X"><a href=":/${noteId}">Link</a></p>`
     );
   });
 });

@@ -168,7 +168,14 @@ export function createApp(config: AppConfig, deps: { organizer?: OrganizerServic
   app.use('/api/preferences', createPreferencesRouter(preferencesStore));
   app.use('/api/tasks', tasksRouter);
   app.use('/api/ai', askRouter);
-  app.use('/api/webhooks', createEmailWebhookRouter(config));
+  app.use(
+    '/api/webhooks',
+    express.raw({
+      type: ['message/rfc822', 'text/plain', 'application/octet-stream'],
+      limit: '25mb',
+    }),
+    createEmailWebhookRouter(config)
+  );
   app.use('/api/tags', tagsRouter);
   app.use('/api/search', searchRouter);
   app.use('/api/resources', resourcesRouter);

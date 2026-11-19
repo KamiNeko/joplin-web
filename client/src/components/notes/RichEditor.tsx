@@ -35,7 +35,7 @@ import {
 import { toast } from "sonner";
 import { uploadResource } from "@/lib/api";
 import { announceWrite } from "@/lib/cross-tab";
-import { joplinToRichMarkdown, richMarkdownToJoplin } from "@/lib/note-stats";
+import { joplinToRichHtml, joplinToRichMarkdown, richHtmlToJoplin, richMarkdownToJoplin } from "@/lib/note-stats";
 import { cn } from "@/lib/utils";
 import { PromptDialog } from "@/components/common/Dialogs";
 import { NoteLinkPicker } from "./NoteLinkPicker";
@@ -44,6 +44,7 @@ interface RichEditorProps {
   value: string;
   onChange: (value: string) => void;
   autoFocus?: boolean;
+  html?: boolean;
   className?: string;
   onUploadsChange?: (pending: number) => void;
   noteId?: string;
@@ -61,7 +62,7 @@ const toolButtonClass = (active = false) =>
   );
 
 export const RichEditor = forwardRef<RichEditorHandle, RichEditorProps>(function RichEditor(
-  { value, onChange, autoFocus = false, className, onUploadsChange, noteId },
+  { value, onChange, autoFocus = false, html = false, className, onUploadsChange, noteId },
   ref
 ) {
   const [notePickerOpen, setNotePickerOpen] = useState(false);
@@ -141,17 +142,17 @@ export const RichEditor = forwardRef<RichEditorHandle, RichEditorProps>(function
         HTMLAttributes: { class: "rounded-lg max-h-[32rem] my-3 border border-border/50" },
       }),
       Placeholder.configure({
-        placeholder: "Start writing in rich mode...",
+        placeholder: html ? "Edit HTML content in rich mode..." : "Start writing in rich mode...",
       }),
-      Markdown,
+      ...(html ? [] : [Markdown]),
     ],
-    content: joplinToRichMarkdown(value),
-    contentType: "markdown",
+    content: html ? joplinToRichHtml(value) : joplinToRichMarkdown(value),
+    contentType: html ? "html" : "markdown",
     autofocus: autoFocus,
     onUpdate: ({ editor: ed }) => {
-      const md = richMarkdownToJoplin(ed.getMarkdown());
-      lastEmittedRef.current = md;
-      onChangeRef.current(md);
+      const next = html ? richHtmlToJoplin(ed.getHTML()) : richMarkdownToJoplin(ed.getMarkdown());
+      lastEmittedRef.current = next;
+      onChangeRef.current(next);
     },
     onSelectionUpdate: () => {
       setSelectionTick((t) => t + 1);
@@ -186,8 +187,11 @@ export const RichEditor = forwardRef<RichEditorHandle, RichEditorProps>(function
     if (!editor || editor.isDestroyed) return;
     if (value === lastEmittedRef.current) return;
     lastEmittedRef.current = value;
-    editor.commands.setContent(joplinToRichMarkdown(value), { emitUpdate: false, contentType: "markdown" });
-  }, [editor, value]);
+    editor.commands.setContent(html ? joplinToRichHtml(value) : joplinToRichMarkdown(value), {
+      emitUpdate: false,
+      contentType: html ? "html" : "markdown",
+    });
+  }, [editor, html, value]);
 
   useImperativeHandle(
     ref,
@@ -197,10 +201,16 @@ export const RichEditor = forwardRef<RichEditorHandle, RichEditorProps>(function
       },
       insertText: (text) => {
         if (!editor || editor.isDestroyed) return;
-        editor.chain().focus().insertContent(joplinToRichMarkdown(text), { contentType: "markdown" }).run();
+        editor
+          .chain()
+          .focus()
+          .insertContent(html ? joplinToRichHtml(text) : joplinToRichMarkdown(text), {
+            contentType: html ? "html" : "markdown",
+          })
+          .run();
       },
     }),
-    [editor, uploadAndInsertFiles]
+    [editor, html, uploadAndInsertFiles]
   );
 
   const inTable = editor?.isActive("table") ?? false;

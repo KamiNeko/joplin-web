@@ -52,6 +52,14 @@ export interface AppConfig {
   emailIngestJoplinEmail: string | null;
   emailIngestJoplinPassword: string | null;
   emailIngestNotebookId: string | null;
+  /** Optional local OCR bridge service URL (OCR_SERVICE_URL), null when unset */
+  ocrServiceUrl: string | null;
+  /** Shared secret header X-Ocr-Secret sent to OCR_SERVICE_URL (OCR_SERVICE_SECRET) */
+  ocrServiceSecret: string | null;
+  /** How long POST /api/resources waits for inline OCR before returning pending (OCR_INLINE_WAIT_MS) */
+  ocrInlineWaitMs: number;
+  /** Transcription model name used via AI_BASE_URL (AI_TRANSCRIBE_MODEL; 'off'/'none'/'false' disables) */
+  aiTranscribeModel: string | null;
 }
 
 /**
@@ -193,24 +201,48 @@ function parseNonNegativeInt(name: string, raw: string | undefined, fallback: nu
 }
 
 /**
- * Validates AI_BASE_URL (when set) as http/https without embedded credentials.
+ * Validates an optional HTTP/HTTPS service URL without embedded credentials.
  */
-function parseAiBaseUrl(raw: string | undefined): string | null {
+function parseOptionalHttpUrl(name: string, raw: string | undefined): string | null {
   const value = raw?.trim();
   if (!value) return null;
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    throw new ConfigError(`AI_BASE_URL is not a valid URL: ${value}`);
+    throw new ConfigError(`${name} is not a valid URL: ${value}`);
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new ConfigError(`AI_BASE_URL must start with http:// or https://, got: ${value}`);
+    throw new ConfigError(`${name} must start with http:// or https://, got: ${value}`);
   }
   if (url.username || url.password) {
-    throw new ConfigError('AI_BASE_URL must not contain credentials');
+    throw new ConfigError(`${name} must not contain credentials`);
   }
   return value.replace(/\/+$/, '');
+}
+
+/**
+ * Validates AI_BASE_URL (when set) as http/https without embedded credentials.
+ */
+function parseAiBaseUrl(raw: string | undefined): string | null {
+  return parseOptionalHttpUrl('AI_BASE_URL', raw);
+}
+
+/**
+ * Resolves AI_TRANSCRIBE_MODEL: defaults to 'gemini-3.8-flash' whenever AI_BASE_URL & AI_MODEL
+ * are set; setting 'off'/'none'/'false'/'0' disables audio transcription.
+ */
+function parseAiTranscribeModel(
+  raw: string | undefined,
+  aiBaseUrl: string | null,
+  aiModel: string | null
+): string | null {
+  const trimmed = raw?.trim();
+  if (trimmed) {
+    if (['off', 'none', 'false', '0'].includes(trimmed.toLowerCase())) return null;
+    return trimmed;
+  }
+  return aiBaseUrl && aiModel ? 'gemini-3.8-flash' : null;
 }
 
 /**
@@ -278,6 +310,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       'REQUIRE_2FA is true, which requires CACHE_DIR to be set so two-factor authentication state persists across restarts.'
     );
   }
+  const aiBaseUrl = parseAiBaseUrl(env.AI_BASE_URL);
+  const aiApiKey = env.AI_API_KEY?.trim() || null;
+  const aiModel = env.AI_MODEL?.trim() || null;
   return {
     host: env.HOST?.trim() || undefined,
     port: parseInt(env.PORT || '3001', 10),
@@ -295,9 +330,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     appVersion: parseAppVersion(env.APP_VERSION),
     gitSha: parseGitSha(env.GIT_SHA),
     rateLimitMax: parseRateLimitMax(env.RATE_LIMIT_MAX),
-    aiBaseUrl: parseAiBaseUrl(env.AI_BASE_URL),
-    aiApiKey: env.AI_API_KEY?.trim() || null,
-    aiModel: env.AI_MODEL?.trim() || null,
+    aiBaseUrl,
+    aiApiKey,
+    aiModel,
     aiConcurrency: parsePositiveInt('AI_CONCURRENCY', env.AI_CONCURRENCY, 4),
     aiFake: parseBoolean('AI_FAKE', env.AI_FAKE, false),
     aiFakeDelayMs: parseNonNegativeInt('AI_FAKE_DELAY_MS', env.AI_FAKE_DELAY_MS, 0),
@@ -306,6 +341,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     emailIngestJoplinEmail: env.EMAIL_INGEST_JOPLIN_EMAIL?.trim() || null,
     emailIngestJoplinPassword: env.EMAIL_INGEST_JOPLIN_PASSWORD || null,
     emailIngestNotebookId: env.EMAIL_INGEST_NOTEBOOK_ID?.trim() || null,
+    ocrServiceUrl: parseOptionalHttpUrl('OCR_SERVICE_URL', env.OCR_SERVICE_URL),
+    ocrServiceSecret: env.OCR_SERVICE_SECRET?.trim() || null,
+    ocrInlineWaitMs: parseNonNegativeInt('OCR_INLINE_WAIT_MS', env.OCR_INLINE_WAIT_MS, 4000),
+    aiTranscribeModel: parseAiTranscribeModel(env.AI_TRANSCRIBE_MODEL, aiBaseUrl, aiModel),
   };
 }
 

@@ -79,6 +79,9 @@ interface NoteEditorProps {
 
 const isSessionExpired = (err: unknown) => err instanceof ApiError && err.status === 401;
 
+const escapeVoiceHtml = (text: string) =>
+  text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
 /**
  * Markdown note editor with debounced autosave, Ctrl+S, and conflict detection.
  * Initialised once from `note`; later updates to the prop are ignored so typing is never reset.
@@ -444,23 +447,34 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
   };
 
   // Narrow screens have no room for split view (its tab is hidden there), so it behaves like Edit
-  const baseMode: EditorMode = isHtml && mode === "rich" ? "split" : mode;
-  const effectiveMode: EditorMode = noRoomForSplit && baseMode === "split" ? "edit" : baseMode;
+  const effectiveMode: EditorMode = noRoomForSplit && mode === "split" ? "edit" : mode;
   const isRichMode = effectiveMode === "rich";
   const showEditor = effectiveMode === "edit" || effectiveMode === "split";
   const showPreview = effectiveMode === "preview" || effectiveMode === "split";
   const showUploadTools = showEditor || isRichMode;
 
   const modeOptions = [
-    ...(!isHtml ? [{ id: "rich" as const, label: "Rich", icon: Type }] : []),
+    { id: "rich" as const, label: "Rich", icon: Type },
     { id: "edit" as const, label: "Edit", icon: PencilLine },
     { id: "split" as const, label: "Split", icon: Columns2 },
     { id: "preview" as const, label: "Preview", icon: Eye },
   ];
 
-  const handleVoiceUploaded = (resource: { id: string; title: string }) => {
+  const handleVoiceUploaded = (resource: { id: string; title: string; transcript?: string }) => {
     const safeTitle = resource.title.replace(/[[\]]/g, (c) => (c === "[" ? "(" : ")"));
-    const snippet = isHtml ? `<a href=":/${resource.id}">${safeTitle}</a>` : `[${safeTitle}](:/${resource.id})`;
+    const transcript = resource.transcript?.trim();
+    const snippet = isHtml
+      ? `<a href=":/${resource.id}">${escapeVoiceHtml(resource.title)}</a>${
+          transcript ? `<blockquote><p>${escapeVoiceHtml(transcript).replace(/\r?\n/g, "<br>")}</p></blockquote>` : ""
+        }`
+      : `[${safeTitle}](:/${resource.id})${
+          transcript
+            ? `\n\n${transcript
+                .split(/\r?\n/)
+                .map((line) => `> ${line}`)
+                .join("\n")}\n`
+            : ""
+        }`;
     if (isRichMode && richEditorRef.current?.insertText) {
       richEditorRef.current.insertText(snippet);
       return;
@@ -606,8 +620,9 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
         >
           <FileCode className="h-3.5 w-3.5 mt-px shrink-0" aria-hidden="true" />
           <span>
-            This is an HTML note (for example a page saved with the Joplin Web Clipper). You are editing its raw
-            HTML; Markdown formatting does not apply here.
+            {isRichMode
+              ? "This is an HTML note (for example a page saved with the Joplin Web Clipper). Editing visually in Rich mode; complex custom layout or CSS may be simplified by TipTap."
+              : "This is an HTML note (for example a page saved with the Joplin Web Clipper). You are editing its raw HTML; Markdown formatting does not apply here."}
           </span>
         </div>
       )}
@@ -661,7 +676,8 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
               >
                 <RichEditor
                   ref={richEditorRef}
-                  key={`rich-${editorKey}`}
+                  key={`rich-${isHtml ? "html" : "md"}-${editorKey}`}
+                  html={isHtml}
                   onUploadsChange={handleUploadsChange}
                   noteId={note.id}
                   value={draft.body}

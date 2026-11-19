@@ -100,3 +100,33 @@ export function richMarkdownToJoplin(markdown: string): string {
   );
   return out;
 }
+
+/** Converts Joplin :/id img & link tags in HTML notes to web URLs before TipTap WYSIWYG editing. */
+export function joplinToRichHtml(html: string): string {
+  if (!html) return "";
+  let out = html.replace(
+    /<img([^>]*?)\ssrc=(["']):\/?([0-9a-fA-F]{32})\2([^>]*)>/gi,
+    (_, before, _quote, id, after) => `<img${before} src="/api/resources/${id.toLowerCase()}"${after}>`
+  );
+  out = out.replace(
+    /<a([^>]*?)\shref=(["']):\/?([0-9a-fA-F]{32})(#[^"'<>\s]*)?\2([^>]*)>/gi,
+    (_, before, _quote, id, fragment = "", after) =>
+      `<a${before} href="/joplin-item/${id.toLowerCase()}${fragment}"${after}>`
+  );
+  return out;
+}
+
+/** Converts /api/resources/<id> and /joplin-item/<id> HTML attributes back to Joplin :/id after TipTap editing. */
+export function richHtmlToJoplin(html: string): string {
+  if (!html) return "";
+  let out = html.replace(
+    /<img([^>]*?)\ssrc=(["'])(?:https?:\/\/[^/"']+)?\/api\/resources\/([0-9a-fA-F]{32})\2([^>]*)>/gi,
+    (_, before, quote, id, after) => `<img${before} src=${quote}:/${id.toLowerCase()}${quote}${after}>`
+  );
+  out = out.replace(
+    /<a([^>]*?)\shref=(["'])(?:https?:\/\/[^/"']+)?\/joplin-item\/([0-9a-fA-F]{32})(#[^"'<>\s]*)?\2([^>]*)>/gi,
+    (_, before, quote, id, fragment = "", after) =>
+      `<a${before} href=${quote}:/${id.toLowerCase()}${fragment}${quote}${after}>`
+  );
+  return out;
+}

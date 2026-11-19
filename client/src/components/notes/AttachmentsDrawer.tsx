@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { Download, FileAudio, FileText, FileVideo, Image as ImageIcon, Loader2, Paperclip, ScanText } from "lucide-react";
+import { Download, FileAudio, FileText, FileVideo, Image as ImageIcon, Loader2, Paperclip, RotateCw, ScanText } from "lucide-react";
 import { toast } from "sonner";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { QueryError } from "@/components/common/QueryError";
 import { ResourceImage } from "@/components/common/ResourceImage";
-import { useNoteAttachments } from "@/hooks/use-workspace";
+import { useNoteAttachments, useRunResourceOcr } from "@/hooks/use-workspace";
 import { downloadResource, getResourceUrl } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import type { NoteAttachment } from "@/lib/types";
@@ -46,14 +46,31 @@ function KindIcon({ kind }: { kind: NoteAttachment["kind"] }) {
 
 export function AttachmentsDrawer({ noteId, open, onOpenChange }: AttachmentsDrawerProps) {
   const query = useNoteAttachments(noteId, open);
+  const runOcr = useRunResourceOcr(noteId);
   const [expandedOcrId, setExpandedOcrId] = useState<string | null>(null);
   const attachments = query.data ?? [];
+  const runningId = runOcr.isPending ? runOcr.variables : null;
 
   const handleDownload = async (att: NoteAttachment) => {
     try {
       await downloadResource(att.id, att.filename || att.title || "attachment");
     } catch {
       toast.error("Could not download attachment");
+    }
+  };
+
+  const handleRunOcr = async (att: NoteAttachment) => {
+    try {
+      const res = await runOcr.mutateAsync(att.id);
+      if (res.ocrStatus === "done") {
+        toast.success(res.ocrText ? "OCR text extracted" : "OCR completed (no text found)");
+      } else {
+        toast.error("OCR extraction failed");
+      }
+    } catch (err) {
+      toast.error("OCR extraction failed", {
+        description: err instanceof Error ? err.message : undefined,
+      });
     }
   };
 
@@ -115,17 +132,43 @@ export function AttachmentsDrawer({ noteId, open, onOpenChange }: AttachmentsDra
                               {formatSize(att.size)}
                             </span>
                           )}
-                          {att.ocrText && (
+                          {att.ocrText ? (
                             <Badge variant="secondary" className="text-[10px] gap-1 px-1.5 py-0">
                               <ScanText className="h-2.5 w-2.5" />
                               OCR
                             </Badge>
-                          )}
+                          ) : att.ocrStatus === "pending" ? (
+                            <Badge variant="outline" className="text-[10px] gap-1 px-1.5 py-0 text-primary border-primary/40">
+                              <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                              OCR Pending
+                            </Badge>
+                          ) : att.ocrStatus === "failed" ? (
+                            <Badge variant="destructive" className="text-[10px] gap-1 px-1.5 py-0">
+                              OCR Failed
+                            </Badge>
+                          ) : null}
                         </div>
                       </div>
                     </div>
 
                     <div className="flex items-center gap-1 shrink-0">
+                      {(att.kind === "image" || att.kind === "pdf") && !att.ocrText && att.ocrStatus !== "pending" && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 gap-1 px-2 text-xs"
+                          disabled={runningId === att.id}
+                          onClick={() => void handleRunOcr(att)}
+                        >
+                          {runningId === att.id ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <RotateCw className="h-3 w-3" />
+                          )}
+                          {att.ocrStatus === "failed" ? "Retry OCR" : "Run OCR"}
+                        </Button>
+                      )}
                       {att.kind === "pdf" && (
                         <Button asChild size="sm" variant="ghost" className="h-7 px-2 text-xs">
                           <a href={`${getResourceUrl(att.id)}?view=pdf`} target="_blank" rel="noopener noreferrer">

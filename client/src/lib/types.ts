@@ -51,6 +51,8 @@ export interface NoteListItem {
   todoDue?: number;
   /** First image or PDF attachment the body links to, shown as the card's thumbnail */
   thumbnail?: { resourceId: string; kind: "image" | "pdf" };
+  /** Linked tag ids (omitted when the note has no tags) */
+  tagIds?: string[];
 }
 
 export interface NotebookBreadcrumb {
@@ -394,6 +396,7 @@ export interface RecentNotesResponse {
 }
 
 export type NoteAttachmentKind = "image" | "pdf" | "audio" | "video" | "file";
+export type AttachmentOcrStatus = "pending" | "done" | "failed" | "skipped";
 
 export interface NoteAttachment {
   id: string;
@@ -404,6 +407,7 @@ export interface NoteAttachment {
   size: number;
   updatedTime: number;
   ocrText: string;
+  ocrStatus?: AttachmentOcrStatus;
   kind: NoteAttachmentKind;
 }
 
@@ -466,6 +470,14 @@ export interface HygieneReport {
 export interface AiFeatureStatus {
   enabled: boolean;
   model?: string;
+  transcribeEnabled?: boolean;
+  transcribeModel?: string;
+}
+
+export interface AudioTranscribeResponse {
+  text: string;
+  model: string;
+  usage?: OrganizeUsage;
 }
 
 export interface AskNotesCitation {

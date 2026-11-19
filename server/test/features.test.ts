@@ -224,11 +224,23 @@ describe('extended workspace API integration', () => {
     assert.ok(Array.isArray(recent.data.recentCreated) && recent.data.recentCreated.length > 0);
   });
 
-  test('note detail includes ancestor notebookPath & backlinks', async () => {
+  test('note detail includes ancestor notebookPath & backlinks, and notes list exposes tagIds', async () => {
     const res = await app.api(`/api/notes/${revTargetNoteId}`);
     assert.equal(res.status, 200);
     assert.ok(Array.isArray(res.data.notebookPath) && res.data.notebookPath.length >= 1);
     assert.ok(res.data.backlinks.some((b: any) => b.id === untaggedInlineTaskNoteId));
+
+    const listRes = await app.api('/api/notes');
+    assert.equal(listRes.status, 200);
+    const roadmap = listRes.data.find((n: any) => n.id === demoId('note-roadmap'));
+    assert.ok(roadmap);
+    assert.deepEqual(
+      [...(roadmap.tagIds ?? [])].sort(),
+      [demoId('tag-planning'), demoId('tag-important')].sort()
+    );
+    const untagged = listRes.data.find((n: any) => n.id === untaggedInlineTaskNoteId);
+    assert.ok(untagged);
+    assert.deepEqual(untagged.tagIds ?? [], []);
   });
 
   test('rich search filters work end-to-end (tag:none, has:attachment, sourceurl:)', async () => {
@@ -322,10 +334,12 @@ describe('extended workspace API integration', () => {
     assert.ok(res.data.untaggedNotes.some((n: any) => n.id === untaggedInlineTaskNoteId));
   });
 
-  test('AI Ask Notes and Note Assist work in AI_FAKE mode', async () => {
+  test('AI Ask Notes, Note Assist, and voice transcription work in AI_FAKE mode', async () => {
     const status = await app.api('/api/ai/status');
     assert.equal(status.status, 200);
     assert.equal(status.data.enabled, true);
+    assert.equal(status.data.transcribeEnabled, true);
+    assert.ok(typeof status.data.transcribeModel === 'string' && status.data.transcribeModel.length > 0);
 
     const ask = await app.api('/api/ai/ask', {
       method: 'POST',
@@ -341,6 +355,35 @@ describe('extended workspace API integration', () => {
     });
     assert.equal(assist.status, 200);
     assert.ok(Array.isArray(assist.data.tags) && assist.data.tags.length > 0);
+
+    const unauthTranscribe = await app.api(
+      '/api/ai/transcribe',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'audio/wav' },
+        body: Buffer.from('RIFFtest'),
+      },
+      false
+    );
+    assert.equal(unauthTranscribe.status, 401);
+
+    const rawTranscribe = await app.api('/api/ai/transcribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'audio/wav', 'X-File-Type': 'audio/wav' },
+      body: Buffer.from('RIFFfakewavbytes'),
+    });
+    assert.equal(rawTranscribe.status, 200);
+    assert.ok(typeof rawTranscribe.data.text === 'string' && rawTranscribe.data.text.length > 0);
+
+    const jsonTranscribe = await app.api('/api/ai/transcribe', {
+      method: 'POST',
+      body: JSON.stringify({
+        audioBase64: Buffer.from('RIFFfakewavbytes').toString('base64'),
+        mime: 'audio/wav',
+      }),
+    });
+    assert.equal(jsonTranscribe.status, 200);
+    assert.ok(typeof jsonTranscribe.data.text === 'string' && jsonTranscribe.data.text.length > 0);
   });
 
   test('clip route enforces SSRF, email import creates note, and webhook checks secret', async () => {
@@ -388,6 +431,47 @@ describe('extended workspace API integration', () => {
     assert.equal(okHook.status, 201);
     assert.equal(okHook.data.note.title, 'Webhook Ticket');
     assert.ok(mockItem(app.mock, okHook.data.note.id));
+
+    const pendingNb = await app.api('/api/notebooks', {
+      method: 'POST',
+      body: JSON.stringify({ title: 'Pending to sort', parentId: '' }),
+    });
+    assert.equal(pendingNb.status, 201);
+
+    const rawEmlBytes = Buffer.from(
+      [
+        'From: =?UTF-8?B?Q2Fmw6k=?= <billing@example.com>',
+        'Subject: =?UTF-8?B?UmVjZWlwdA==?= =?UTF-8?Q?_#99?=',
+        'MIME-Version: 1.0',
+        'Content-Type: multipart/alternative; Boundary="MixedCase_B42"',
+        '',
+        '--MixedCase_B42',
+        'Content-Type: text/plain; charset="iso-8859-1"',
+        '',
+        'Payment received at Caf\xe9 Nord.',
+        '--MixedCase_B42--',
+        '',
+      ].join('\r\n'),
+      'latin1'
+    );
+    const rawHook = await app.api(
+      '/api/webhooks/email',
+      {
+        method: 'POST',
+        headers: {
+          'X-Webhook-Secret': 'test-webhook-secret',
+          'Content-Type': 'message/rfc822',
+          'X-Joplin-Tags': 'email, receipt',
+        },
+        body: rawEmlBytes,
+      },
+      false
+    );
+    assert.equal(rawHook.status, 201);
+    assert.equal(rawHook.data.note.title, 'Receipt #99');
+    assert.ok(rawHook.data.note.body.includes('Café Nord'));
+    assert.equal(rawHook.data.note.parentId, pendingNb.data.id);
+    assert.ok(rawHook.data.note.tags.some((t: any) => t.title === 'receipt'));
   });
 });
 
@@ -512,7 +596,7 @@ describe('pure feature services', () => {
     assert.ok(!clipped.markdown.includes('alert(1)'));
   });
 
-  test('parseEmlMessage extracts headers and decodes body', async () => {
+  test('parseEmlMessage extracts headers, case-sensitive boundary, charsets, nested rfc822 & decodes body', async () => {
     const { parseEmlMessage } = await import('../src/services/web-clipper.js');
     const eml = [
       'From: Alice <alice@example.com>',
@@ -526,6 +610,48 @@ describe('pure feature services', () => {
     assert.equal(parsed.subject, 'Quarterly Receipt');
     assert.equal(parsed.from, 'Alice <alice@example.com>');
     assert.ok(parsed.markdownBody.includes('$42.50'));
+
+    const rawBuf = Buffer.from(
+      [
+        'From: =?UTF-8?Q?Ren=C3=A9?= <rene@example.com>',
+        'Subject: =?UTF-8?B?SGVsbG8=?= =?UTF-8?B?IFdvcmxk?=',
+        'MIME-Version: 1.0',
+        'Content-Type: multipart/mixed; Boundary="Outer_Case9"',
+        '',
+        '--Outer_Case9',
+        'Content-Type: text/plain; charset=iso-8859-1',
+        '',
+        'H\xe4llo from Munich.',
+        '--Outer_Case9',
+        'Content-Type: message/rfc822',
+        '',
+        'Subject: Inner Message',
+        'From: inner@example.com',
+        '',
+        'Forwarded payload line',
+        '--Outer_Case9--',
+        '',
+      ].join('\r\n'),
+      'latin1'
+    );
+    const complex = parseEmlMessage(rawBuf);
+    assert.equal(complex.subject, 'Hello World');
+    assert.equal(complex.from, 'René <rene@example.com>');
+    assert.ok(complex.markdownBody.includes('Hällo from Munich.'));
+    assert.ok(complex.markdownBody.includes('Forwarded payload line'));
+  });
+
+  test('findInboxOrDefaultNotebookId prefers Inbox, then Pending to sort, then first writable', async () => {
+    const { findInboxOrDefaultNotebookId } = await import('../src/routes/clip.js');
+    const nbs = [
+      { id: '1'.repeat(32), title: 'Archive', parentId: '', children: [], noteCount: 0, encrypted: false },
+      { id: '2'.repeat(32), title: 'Pending to sort', parentId: '', children: [], noteCount: 0, encrypted: false },
+      { id: '3'.repeat(32), title: 'Inbox', parentId: '', children: [], noteCount: 0, encrypted: false },
+    ];
+    assert.equal(findInboxOrDefaultNotebookId(nbs, null), '3'.repeat(32));
+    assert.equal(findInboxOrDefaultNotebookId(nbs.slice(0, 2), null), '2'.repeat(32));
+    assert.equal(findInboxOrDefaultNotebookId(nbs.slice(0, 1), null), '1'.repeat(32));
+    assert.equal(findInboxOrDefaultNotebookId(nbs, '1'.repeat(32)), '1'.repeat(32));
   });
 
   test('PreferencesStore persists per-owner shortcuts, recent reads & scratchpad atomically', async () => {

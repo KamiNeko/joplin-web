@@ -94,6 +94,8 @@ export interface NoteListItem {
   encrypted: boolean;
   /** First image or PDF attachment the body links to, shown as the note's thumbnail in lists */
   thumbnail?: { resourceId: string; kind: 'image' | 'pdf' };
+  /** Linked tag ids (omitted when the note has no tags) */
+  tagIds?: string[];
 }
 
 export interface NotebookBreadcrumb {
@@ -186,6 +188,8 @@ export interface ResourceMetadata {
   updatedTime: number;
   /** Extracted OCR text (`ocr_text`), kept only when `ocr_status` is 2 (done) */
   ocrText: string;
+  /** Joplin `ocr_status` numeric code (1 = processing, 2 = done, 3 = error; omitted when 0/unset) */
+  ocrStatus?: number;
 }
 
 /**
@@ -450,6 +454,8 @@ export interface RecentNotesResponse {
 
 export type NoteAttachmentKind = 'image' | 'pdf' | 'audio' | 'video' | 'file';
 
+export type AttachmentOcrStatus = 'pending' | 'done' | 'failed' | 'skipped';
+
 export interface NoteAttachment {
   id: string;
   title: string;
@@ -459,6 +465,7 @@ export interface NoteAttachment {
   size: number;
   updatedTime: number;
   ocrText: string;
+  ocrStatus?: AttachmentOcrStatus;
   kind: NoteAttachmentKind;
 }
 
@@ -521,6 +528,8 @@ export interface HygieneReport {
 export interface AiFeatureStatus {
   enabled: boolean;
   model?: string;
+  transcribeEnabled?: boolean;
+  transcribeModel?: string;
 }
 
 export interface AskNotesCitation {
