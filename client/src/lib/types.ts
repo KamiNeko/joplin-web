@@ -112,6 +112,8 @@ export interface SearchResult extends NoteListItem {
   matches?: {
     inTitle: boolean;
     inBody: boolean;
+    /** Set to "attachment" when the terms matched only in linked attachments' OCR text */
+    matchedIn?: "attachment";
     snippet?: string;
     /** Lower-cased words and phrases the note matched (empty for filter-only queries) */
     terms?: string[];
@@ -119,8 +121,174 @@ export interface SearchResult extends NoteListItem {
 }
 
 /**
+ * Item payload inside POST /api/notes/batch.
+ */
+export interface BatchNoteItem {
+  id: string;
+  baseUpdatedTime?: number;
+  parentId?: string;
+  title?: string;
+  addTags?: string[];
+  removeTags?: string[];
+}
+
+/**
+ * Request body for POST /api/notes/batch.
+ */
+export interface BatchNoteRequest {
+  items: BatchNoteItem[];
+  parentId?: string;
+  addTags?: string[];
+  removeTags?: string[];
+  trash?: boolean;
+  restore?: boolean;
+}
+
+/**
+ * Per-note result returned by POST /api/notes/batch.
+ */
+export interface BatchNoteResult {
+  id: string;
+  status: "ok" | "conflict" | "error";
+  updatedTime?: number;
+  error?: string;
+  addedTags?: string[];
+}
+
+/**
  * Login response payload from API. The session itself is set as an httpOnly cookie.
  */
 export interface LoginResponse {
   userId: string;
+}
+
+export interface OrganizeStatus {
+  enabled: boolean;
+  model?: string;
+}
+
+export type OrganizeJobStatus = "running" | "done" | "cancelled" | "failed";
+export type OrganizeItemStatus = "pending" | "running" | "done" | "failed";
+
+export interface OrganizeSuggestion {
+  title: string;
+  notebookId: string;
+  tags: string[];
+  confidence: number;
+  documentDate: string | null;
+  reason: string;
+}
+
+export interface OrganizeJobItem {
+  noteId: string;
+  currentTitle: string;
+  currentNotebookId: string;
+  currentNotebookPath: string;
+  updatedTime: number;
+  status: OrganizeItemStatus;
+  error?: string;
+  skipped?: boolean;
+  suggestion?: OrganizeSuggestion;
+  applied?: boolean;
+  applyStatus?: "ok" | "conflict" | "error";
+  applyError?: string;
+}
+
+export interface OrganizeUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+export interface OrganizeJobProgress {
+  total: number;
+  done: number;
+  failed: number;
+}
+
+export interface OrganizeJobSummary {
+  id: string;
+  status: OrganizeJobStatus;
+  error?: string;
+  progress: OrganizeJobProgress;
+  appliedCount: number;
+  usage: OrganizeUsage;
+  canUndo: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type OrganizeFilter = "all" | "very-high" | "high" | "moves";
+
+export type OrganizeSelectionMode = "very-high" | "high";
+
+export interface OrganizeFilterCounts {
+  all: number;
+  veryHigh: number;
+  veryHighUnapplied: number;
+  high: number;
+  highUnapplied: number;
+  moves: number;
+  movesUnapplied: number;
+}
+
+export interface OrganizeTargetsResponse {
+  noteIds: string[];
+}
+
+export interface OrganizeJobResponse {
+  id: string;
+  status: OrganizeJobStatus;
+  error?: string;
+  excludeNotebookIds: string[];
+  progress: OrganizeJobProgress;
+  appliedCount?: number;
+  retryableFailedCount?: number;
+  filter?: OrganizeFilter;
+  filterCounts?: OrganizeFilterCounts;
+  usage: OrganizeUsage;
+  offset: number;
+  limit: number;
+  totalItems: number;
+  canUndo: boolean;
+  createdAt: number;
+  updatedAt: number;
+  items: OrganizeJobItem[];
+}
+
+export interface OrganizeRetryResponse {
+  id: string;
+  status: OrganizeJobStatus;
+  requeuedCount: number;
+}
+
+export interface OrganizeDeleteResponse {
+  id: string;
+  deleted: boolean;
+}
+
+export interface OrganizeApplyItemInput {
+  noteId: string;
+  title?: string;
+  notebookId?: string;
+  addTags?: string[];
+  baseUpdatedTime?: number;
+  useSuggestion?: boolean;
+}
+
+export interface OrganizeApplyResponse {
+  results: BatchNoteResult[];
+  appliedCount: number;
+  conflictCount: number;
+  errorCount: number;
+  canUndo: boolean;
+}
+
+export interface OrganizeUndoResponse {
+  results: BatchNoteResult[];
+  revertedCount: number;
+  conflictCount: number;
+  errorCount: number;
+  canUndo: boolean;
+  remainingCount?: number;
 }

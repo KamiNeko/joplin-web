@@ -1,9 +1,11 @@
+import { memo } from "react";
 import { NoteListItem as NoteListItemType, Tag } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { formatRelativeTime, noteDisplayTitle } from "@/lib/format";
 import { dueTime, formatDueDate, isOverdue } from "@/lib/due";
-import { AlarmClock, CheckSquare, Square, FileText, Lock } from "lucide-react";
+import type { SelectionModifiers } from "@/hooks/use-note-selection";
+import { AlarmClock, Check, CheckSquare, Square, FileText, Lock } from "lucide-react";
 
 interface NoteListItemProps {
   note: NoteListItemType & {
@@ -13,50 +15,115 @@ interface NoteListItemProps {
     todoDue?: number;
   };
   isActive?: boolean;
+  selectionMode?: boolean;
+  isSelected?: boolean;
   onClick?: () => void;
+  /** Modifier-aware click handler used by NoteList (kept stable for memoization) */
+  onActivate?: (id: string, modifiers: SelectionModifiers) => void;
   /** Toggles a to-do's completion; the checkbox is read-only when omitted */
   onToggleTodo?: () => void;
+  /** Stable to-do toggle callback used by NoteList for memoization */
+  onToggleTodoById?: (id: string, completed: boolean) => void;
 }
 
-export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteListItemProps) {
+export const NoteListItem = memo(function NoteListItem({
+  note,
+  isActive,
+  selectionMode = false,
+  isSelected = false,
+  onClick,
+  onActivate,
+  onToggleTodo,
+  onToggleTodoById,
+}: NoteListItemProps) {
   const relativeTime = formatRelativeTime(note.updatedTime || note.createdTime);
   const title = noteDisplayTitle(note);
   const NoteIcon = note.encrypted ? Lock : FileText;
   const due = dueTime(note);
   const overdue = isOverdue(note);
 
+  const handleActivate = (modifiers: SelectionModifiers) => {
+    if (onActivate) {
+      onActivate(note.id, modifiers);
+    } else {
+      onClick?.();
+    }
+  };
+
+  const canToggleTodo = Boolean(onToggleTodo || onToggleTodoById);
+  const triggerTodoToggle = () => {
+    if (onToggleTodoById) {
+      onToggleTodoById(note.id, !note.todoCompleted);
+    } else {
+      onToggleTodo?.();
+    }
+  };
+
   return (
     <div
-      onClick={onClick}
+      onClick={(e) => {
+        if (e.ctrlKey || e.metaKey || (selectionMode && e.shiftKey)) {
+          e.preventDefault();
+        }
+        handleActivate({ shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey });
+      }}
       role="button"
       tabIndex={0}
       aria-current={isActive ? "true" : undefined}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          onClick?.();
+          handleActivate({ shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey });
         }
       }}
       className={cn(
-        "group relative flex flex-col gap-1.5 p-3.5 rounded-xl border border-l-2 text-left transition-all duration-150 cursor-pointer outline-hidden focus-visible:ring-2 focus-visible:ring-primary",
-        isActive
-          ? "bg-card border-border border-l-primary"
-          : "bg-transparent border-transparent hover:bg-muted/60"
+        "group relative flex min-w-0 flex-col gap-1.5 p-3.5 rounded-xl border border-l-2 text-left transition-all duration-150 cursor-pointer outline-hidden focus-visible:ring-2 focus-visible:ring-primary",
+        selectionMode && "select-none",
+        selectionMode && isSelected
+          ? "bg-primary/10 border-primary/40 border-l-primary"
+          : isActive
+            ? "bg-card border-border border-l-primary"
+            : "bg-transparent border-transparent hover:bg-muted/60"
       )}
     >
 
       {/* Header: Title and Time */}
-      <div className="flex items-start justify-between gap-2">
+      <div className="flex min-w-0 items-start justify-between gap-2">
         <div className="flex items-center gap-1.5 min-w-0">
+          {selectionMode && (
+            <button
+              type="button"
+              role="checkbox"
+              aria-checked={Boolean(isSelected)}
+              aria-label={`Select ${title}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleActivate({ shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey });
+              }}
+              onKeyDown={(e) => {
+                if (e.key !== "Escape") e.stopPropagation();
+              }}
+              className={cn(
+                "shrink-0 mt-0.5 flex h-4 w-4 items-center justify-center rounded-sm border transition-colors outline-hidden focus-visible:ring-2 focus-visible:ring-primary",
+                isSelected
+                  ? "bg-primary border-primary text-primary-foreground"
+                  : "border-muted-foreground/50 bg-background hover:border-primary"
+              )}
+            >
+              {isSelected && <Check className="h-3 w-3 stroke-[3]" aria-hidden="true" />}
+            </button>
+          )}
           {note.isTodo ? (
             <button
               type="button"
-              disabled={!onToggleTodo}
+              disabled={!canToggleTodo}
               onClick={(e) => {
                 e.stopPropagation();
-                onToggleTodo?.();
+                triggerTodoToggle();
               }}
-              onKeyDown={(e) => e.stopPropagation()}
+              onKeyDown={(e) => {
+                if (e.key !== "Escape") e.stopPropagation();
+              }}
               role="checkbox"
               aria-checked={Boolean(note.todoCompleted)}
               aria-label={`Done: ${title}`}
@@ -99,7 +166,7 @@ export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteList
       {note.encrypted ? (
         <p className="text-xs text-muted-foreground italic">End-to-end encrypted, can't be shown here</p>
       ) : note.preview ? (
-        <p className="text-xs text-muted-foreground line-clamp-2 leading-relaxed">
+        <p className="text-xs text-muted-foreground line-clamp-2 leading-relaxed wrap-break-word">
           {note.preview}
         </p>
       ) : (
@@ -141,4 +208,4 @@ export function NoteListItem({ note, isActive, onClick, onToggleTodo }: NoteList
       )}
     </div>
   );
-}
+});

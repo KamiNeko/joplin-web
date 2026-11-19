@@ -57,3 +57,20 @@ export function findNotebookById(notebooks: Notebook[] | undefined, id: string |
   }
   return null;
 }
+
+/**
+ * Maps every notebook id in `notebooks` to its full hierarchy path ("Parent / Child").
+ */
+export function buildNotebookPathMap(notebooks: Notebook[] | undefined): Map<string, string> {
+  const paths = new Map<string, string>();
+  const walk = (nodes: Notebook[] | undefined, prefix: string[]) => {
+    if (!nodes) return;
+    for (const nb of nodes) {
+      const next = [...prefix, nb.title || "Untitled Folder"];
+      paths.set(nb.id, next.join(" / "));
+      walk(nb.children, next);
+    }
+  };
+  walk(notebooks, []);
+  return paths;
+}

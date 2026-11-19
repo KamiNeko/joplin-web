@@ -165,6 +165,8 @@ export interface ResourceMetadata {
   fileExtension: string;
   size: number;
   updatedTime: number;
+  /** Extracted OCR text (`ocr_text`), kept only when `ocr_status` is 2 (done) */
+  ocrText: string;
 }
 
 /**
@@ -173,6 +175,14 @@ export interface ResourceMetadata {
 export interface JoplinChildItem {
   id: string;
   name: string;
+  updated_time: number;
+}
+
+/** One entry of Joplin Server's delta feed (GET /api/items/root/delta) */
+export interface JoplinDeltaChange {
+  item_name: string;
+  /** 1 created, 2 updated, 3 deleted */
+  type: number;
   updated_time: number;
 }
 
@@ -192,10 +202,53 @@ export interface SearchResult extends NoteListItem {
   matches: {
     inTitle: boolean;
     inBody: boolean;
+    /** Set to `'attachment'` when terms matched only inside linked attachments' OCR text */
+    matchedIn?: 'attachment';
     snippet?: string;
     /** Lower-cased words and phrases the note matched, for highlighting (empty for filter-only queries) */
     terms: string[];
   };
+}
+
+/**
+ * Item payload inside POST /api/notes/batch
+ */
+export interface BatchNoteItem {
+  id: string;
+  /** updatedTime the client based its change on; mismatched timestamps report status "conflict" */
+  baseUpdatedTime?: number;
+  /** Optional per-item destination notebook id (overrides top-level parentId; used by undo & auto-organize) */
+  parentId?: string;
+  /** Optional per-item title update (used by undo & auto-organize) */
+  title?: string;
+  /** Optional per-item tag titles to add (combined with top-level addTags; used by auto-organize) */
+  addTags?: string[];
+  /** Optional per-item tag titles to remove (combined with top-level removeTags; used by undo) */
+  removeTags?: string[];
+}
+
+/**
+ * Request body for POST /api/notes/batch
+ */
+export interface BatchNoteRequest {
+  items: BatchNoteItem[];
+  parentId?: string;
+  addTags?: string[];
+  removeTags?: string[];
+  trash?: boolean;
+  restore?: boolean;
+}
+
+/**
+ * Per-note outcome returned by POST /api/notes/batch
+ */
+export interface BatchNoteResult {
+  id: string;
+  status: 'ok' | 'conflict' | 'error';
+  updatedTime?: number;
+  error?: string;
+  /** Tag titles newly linked to this note during addTags (omits tags the note already had) */
+  addedTags?: string[];
 }
 
 /**
@@ -204,6 +257,150 @@ export interface SearchResult extends NoteListItem {
 export interface SessionInfo {
   sessionId: string;
   userId: string;
+}
+
+export interface OrganizeStatus {
+  enabled: boolean;
+  model?: string;
+}
+
+export type OrganizeJobStatus = 'running' | 'done' | 'cancelled' | 'failed';
+export type OrganizeItemStatus = 'pending' | 'running' | 'done' | 'failed';
+
+export interface OrganizeSuggestion {
+  title: string;
+  notebookId: string;
+  tags: string[];
+  confidence: number;
+  documentDate: string | null;
+  reason: string;
+}
+
+export interface OrganizeJobItem {
+  noteId: string;
+  currentTitle: string;
+  currentNotebookId: string;
+  currentNotebookPath: string;
+  updatedTime: number;
+  status: OrganizeItemStatus;
+  error?: string;
+  skipped?: boolean;
+  suggestion?: OrganizeSuggestion;
+  applied?: boolean;
+  applyStatus?: 'ok' | 'conflict' | 'error';
+  applyError?: string;
+}
+
+export interface OrganizeUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+export interface OrganizeJobProgress {
+  total: number;
+  done: number;
+  failed: number;
+}
+
+export interface OrganizeJobSummary {
+  id: string;
+  status: OrganizeJobStatus;
+  error?: string;
+  progress: OrganizeJobProgress;
+  appliedCount: number;
+  usage: OrganizeUsage;
+  canUndo: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface OrganizeUndoItem {
+  noteId: string;
+  baseUpdatedTime: number;
+  previousTitle: string;
+  previousNotebookId: string;
+  addedTags: string[];
+}
+
+export interface OrganizeUndoRecord {
+  appliedAt: number;
+  items: OrganizeUndoItem[];
+}
+
+export type OrganizeFilter = 'all' | 'very-high' | 'high' | 'moves';
+
+export type OrganizeSelectionMode = 'very-high' | 'high';
+
+export interface OrganizeFilterCounts {
+  all: number;
+  veryHigh: number;
+  veryHighUnapplied: number;
+  high: number;
+  highUnapplied: number;
+  moves: number;
+  movesUnapplied: number;
+}
+
+export interface OrganizeTargetsResponse {
+  noteIds: string[];
+}
+
+export interface OrganizeJobResponse {
+  id: string;
+  status: OrganizeJobStatus;
+  error?: string;
+  excludeNotebookIds: string[];
+  progress: OrganizeJobProgress;
+  appliedCount: number;
+  retryableFailedCount: number;
+  filter: OrganizeFilter;
+  filterCounts: OrganizeFilterCounts;
+  usage: OrganizeUsage;
+  offset: number;
+  limit: number;
+  totalItems: number;
+  canUndo: boolean;
+  createdAt: number;
+  updatedAt: number;
+  items: OrganizeJobItem[];
+}
+
+export interface OrganizeRetryResponse {
+  id: string;
+  status: OrganizeJobStatus;
+  requeuedCount: number;
+}
+
+export interface OrganizeDeleteResponse {
+  id: string;
+  deleted: boolean;
+}
+
+export interface OrganizeApplyItemInput {
+  noteId: string;
+  title?: string;
+  notebookId?: string;
+  addTags?: string[];
+  baseUpdatedTime?: number;
+  useSuggestion?: boolean;
+}
+
+export interface OrganizeApplyResponse {
+  results: BatchNoteResult[];
+  appliedCount: number;
+  conflictCount: number;
+  errorCount: number;
+  canUndo: boolean;
+}
+
+export interface OrganizeUndoResponse {
+  results: BatchNoteResult[];
+  revertedCount: number;
+  conflictCount: number;
+  errorCount: number;
+  canUndo: boolean;
+  remainingCount?: number;
 }
 
 /**

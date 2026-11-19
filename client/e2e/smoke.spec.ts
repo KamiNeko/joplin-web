@@ -6,6 +6,7 @@ import { demoId, signIn, uniqueWord } from "./helpers";
 async function openReadingList(page: Page) {
   await page.getByRole("complementary").first().getByRole("button", { name: /^Reading List/ }).click();
   await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-reading")}(/|$)`));
+  await expect(page.getByRole("heading", { level: 2, name: "Reading List" })).toBeVisible();
   await expect(page.getByText("Book Notes: Deep Work")).toBeVisible();
 }
 
@@ -80,7 +81,7 @@ test("creates, edits, tags, finds, trashes and restores a note", async ({ page }
   await page.getByLabel("Note title").fill(title);
   await page.locator(".cm-content").click();
   await page.keyboard.type(`Written by the smoke test: ${word}`);
-  await page.getByRole("button", { name: "Done" }).click();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
   await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
   await expect(page.locator(".prose-content").getByText(`Written by the smoke test: ${word}`)).toBeVisible();
 
@@ -122,6 +123,94 @@ test("creates, edits, tags, finds, trashes and restores a note", async ({ page }
   await expect(page.getByText(title).first()).toBeVisible();
 });
 
+test("selects multiple notes, moves them in bulk and undoes the move", async ({ page }) => {
+  await signIn(page);
+  const sidebar = page.getByRole("complementary").first();
+
+  await sidebar.getByRole("button", { name: /^Recipes/ }).click();
+  await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-recipes")}(/|$)`));
+  await expect(page.getByRole("heading", { level: 2, name: "Recipes" })).toBeVisible();
+  await expect(page.getByText("Weeknight Miso Ramen")).toBeVisible();
+
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await page.getByRole("checkbox", { name: "Select Weeknight Miso Ramen" }).click();
+  await page.getByRole("checkbox", { name: "Select Sourdough Starter Schedule" }).click();
+  await expect(page.getByText("2 selected")).toBeVisible();
+
+  await page.getByRole("button", { name: "Move to…" }).click();
+  await page.getByRole("list", { name: "Destination" }).getByRole("button", { name: "Projects" }).click();
+
+  await expect(page.getByText("Moved 2 notes")).toBeVisible();
+  await expect(page.getByText("This notebook is empty")).toBeVisible();
+
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(page.getByText("Moved back 2 notes")).toBeVisible();
+  await expect(page.getByText("Weeknight Miso Ramen")).toBeVisible();
+  await expect(page.getByText("Sourdough Starter Schedule")).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: /^Recipes\s*, 2 notes$/ })).toBeVisible();
+});
+
+test("selects multiple notes, runs Auto-organize, applies and undoes", async ({ page }) => {
+  await signIn(page);
+  const sidebar = page.getByRole("complementary").first();
+
+  await sidebar.getByRole("button", { name: /^Work\s*, 2 notes$/ }).click();
+  await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-work")}(/|$)`));
+  await expect(page.getByRole("heading", { level: 2, name: "Work" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await page.getByRole("checkbox", { name: "Select 2024_03_11.pdf" }).click();
+  await page.getByRole("checkbox", { name: "Select Markdown Extras: Math, Diagrams & More" }).click();
+  await expect(page.getByText("2 selected")).toBeVisible();
+
+  await page.getByRole("region", { name: "Bulk actions" }).getByRole("button", { name: "Auto-organize" }).click();
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("Auto-organize 2 notes")).toBeVisible();
+  await expect(dialog.getByRole("checkbox", { name: /Work/ })).toBeChecked();
+  await expect(dialog.getByRole("note")).toContainText("OCR text");
+  await dialog.getByRole("button", { name: "Start organizing (2)" }).click();
+
+  await expect(page).toHaveURL(/\/organize\/[0-9a-f]+$/);
+  await expect(page.getByText("Analysed 2 / 2")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Very high (>= 0.85) (1)" })).toBeVisible();
+
+  // High-confidence OCR invoice starts ticked; low-confidence reference note starts unticked
+  await expect(page.getByRole("checkbox", { name: "Select 2024_03_11.pdf" })).toBeChecked();
+  await expect(page.getByLabel("Suggested title for 2024_03_11.pdf")).toHaveValue(
+    "2024-03-11 Acme Cloud Services – Dedicated Backup Storage Invoice"
+  );
+  await expect(page.getByRole("checkbox", { name: "Select Markdown Extras: Math, Diagrams & More" })).not.toBeChecked();
+
+  await page.getByRole("button", { name: "Apply selected (1)" }).click();
+  await expect(page.getByText("Applied changes to 1 note")).toBeVisible();
+  await expect(page.getByText("Applied", { exact: true })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: /^Work\s*, 1 note$/ })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: /^Projects\s*, 3 notes$/ })).toBeVisible();
+
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(page.getByText("Reverted 1 note")).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: /^Work\s*, 2 notes$/ })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: /^Projects\s*, 2 notes$/ })).toBeVisible();
+
+  await page.getByRole("link", { name: "All jobs" }).click();
+  await expect(page).toHaveURL(/\/organize$/);
+  await expect(page.getByRole("heading", { name: "Auto-organize jobs" })).toBeVisible();
+
+  await sidebar.getByRole("button", { name: /^Work\s*, 2 notes$/ }).click();
+  await expect(page.getByText("2024_03_11.pdf").first()).toBeVisible();
+});
+
+test("finds a note via its attachment OCR text", async ({ page }) => {
+  await signIn(page);
+  await page.getByRole("searchbox", { name: "Search notes" }).fill("Backup Storage");
+  await expect(page.getByText("1 found")).toBeVisible();
+  await expect(page.getByText("Found in attachment:")).toBeVisible();
+  await page.getByRole("button", { name: /2024_03_11\.pdf/ }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "2024_03_11.pdf" })).toBeVisible();
+  await page.getByRole("button", { name: "Clear search" }).first().click();
+});
+
 test("attaches a file to a note", async ({ page }) => {
   const word = uniqueWord("attach");
   await signIn(page);
@@ -136,7 +225,7 @@ test("attaches a file to a note", async ({ page }) => {
   });
   // The placeholder becomes a link to the new resource
   await expect(page.locator(".cm-content")).toContainText(new RegExp(`\\[${word}\\.txt\\]\\(:/[0-9a-f]{32}\\)`));
-  await page.getByRole("button", { name: "Done" }).click();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
 
   // The rendered note links the attachment; clicking it downloads the uploaded file
   const download = page.waitForEvent("download");

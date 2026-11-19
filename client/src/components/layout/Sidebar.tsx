@@ -24,6 +24,7 @@ import {
   GitCompareArrows,
   Hash,
   Search,
+  Sparkles,
   Trash2,
   X,
   FolderTree,
@@ -42,11 +43,15 @@ interface SidebarProps {
   isAllNotesSelected?: boolean;
   isTrashSelected?: boolean;
   isConflictsSelected?: boolean;
+  isOrganizeSelected?: boolean;
   /** Conflict copies Joplin kept after sync conflicts; the Conflicts entry shows only when there are any */
   conflictCount?: number;
+  organizeJobCount?: number;
+  runningOrganizeJob?: boolean;
   onSelectAllNotes: () => void;
   onSelectTrash: () => void;
   onSelectConflicts?: () => void;
+  onSelectOrganize?: () => void;
   onSelectNotebook: (id: string) => void;
   onSelectTag: (id: string) => void;
   searchQuery: string;
@@ -63,10 +68,14 @@ export function Sidebar({
   isAllNotesSelected,
   isTrashSelected,
   isConflictsSelected,
+  isOrganizeSelected,
   conflictCount = 0,
+  organizeJobCount = 0,
+  runningOrganizeJob = false,
   onSelectAllNotes,
   onSelectTrash,
   onSelectConflicts,
+  onSelectOrganize,
   onSelectNotebook,
   onSelectTag,
   searchQuery,
@@ -330,6 +339,36 @@ export function Sidebar({
                 <span>Trash</span>
               </div>
             </button>
+
+            {onSelectOrganize && (organizeJobCount > 0 || isOrganizeSelected) && (
+              <button
+                type="button"
+                onClick={onSelectOrganize}
+                aria-current={isOrganizeSelected ? "page" : undefined}
+                className={cn(
+                  "w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm transition-all duration-150 font-medium",
+                  isOrganizeSelected
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
+                )}
+              >
+                <div className="flex items-center gap-2">
+                  <Sparkles className={cn("h-4 w-4 text-primary", runningOrganizeJob && "animate-pulse")} />
+                  <span>Auto-organize</span>
+                </div>
+                {organizeJobCount > 0 && (
+                  <span
+                    className={cn(
+                      "text-[10px] font-mono",
+                      runningOrganizeJob ? "text-primary font-semibold" : "text-muted-foreground"
+                    )}
+                    aria-label={`${organizeJobCount} organize ${organizeJobCount === 1 ? "job" : "jobs"}`}
+                  >
+                    {organizeJobCount}
+                  </span>
+                )}
+              </button>
+            )}
           </div>
 
           {/* Notebooks Section */}
