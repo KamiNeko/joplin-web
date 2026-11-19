@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   AlertTriangle,
@@ -35,7 +35,11 @@ import { useNotebooks } from "@/hooks/use-notebooks";
 import { useTags } from "@/hooks/use-tags";
 import { useWriteState } from "@/hooks/use-write-state";
 import {
+  ORGANIZE_APPLY_CHUNK_SIZE,
   ORGANIZE_PAGE_SIZE,
+  OrganizeBatchProgress,
+  OrganizePartialApplyError,
+  OrganizePartialUndoError,
   useApplyOrganizeJob,
   useCancelOrganizeJob,
   useDeleteOrganizeJob,
@@ -44,12 +48,26 @@ import {
   useRetryOrganizeJob,
   useUndoOrganizeJob,
 } from "@/hooks/use-organize";
+import { getOrganizeTargets } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/format";
 import { buildNotebookPathMap } from "@/lib/notebooks";
-import { OrganizeApplyItemInput, OrganizeJobItem, OrganizeJobSummary } from "@/lib/types";
+import {
+  OrganizeApplyItemInput,
+  OrganizeApplyResponse,
+  OrganizeFilter,
+  OrganizeJobItem,
+  OrganizeJobSummary,
+  OrganizeUndoResponse,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type OrganizeFilter = "all" | "very-high" | "high" | "moves";
+type ActiveSelectionMode = "high" | "very-high" | "none";
+
+interface SelectionOverride {
+  checked: boolean;
+  baseVeryHigh: boolean;
+  baseHigh: boolean;
+}
 
 const VERY_HIGH_CONFIDENCE_THRESHOLD = 0.85;
 const HIGH_CONFIDENCE_THRESHOLD = 0.7;
@@ -98,11 +116,17 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
   const [filter, setFilter] = useState<OrganizeFilter>("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [edits, setEdits] = useState<Record<string, RowEdit>>({});
-  const [selectionOverrides, setSelectionOverrides] = useState<Record<string, boolean>>({});
+  const [selectionMode, setSelectionMode] = useState<ActiveSelectionMode>("high");
+  const [selectionOverrides, setSelectionOverrides] = useState<Record<string, SelectionOverride>>({});
+  const [isPreparingApply, setIsPreparingApply] = useState(false);
+  const [applyProgress, setApplyProgress] = useState<OrganizeBatchProgress | null>(null);
+  const [undoProgress, setUndoProgress] = useState<OrganizeBatchProgress | null>(null);
   const [openNotebookRow, setOpenNotebookRow] = useState<string | null>(null);
   const [openTagRow, setOpenTagRow] = useState<string | null>(null);
   const [tagDraft, setTagDraft] = useState("");
   const [jobToDelete, setJobToDelete] = useState<OrganizeJobSummary | null>(null);
+  const seenItemsRef = useRef<Map<string, OrganizeJobItem>>(new Map());
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   const { readOnly, reason: readOnlyReason } = useWriteState();
   const { data: notebooks } = useNotebooks();
@@ -113,7 +137,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
   const organizeJobs = jobsQuery.data?.jobs ?? [];
   const hasRunningJob = organizeJobs.some((j) => j.status === "running");
 
-  const jobQuery = useOrganizeJob(jobId, { offset, limit: ORGANIZE_PAGE_SIZE });
+  const jobQuery = useOrganizeJob(jobId, { offset, limit: ORGANIZE_PAGE_SIZE, filter });
   const { data: job, isLoading, error } = jobQuery;
 
   const cancelMutation = useCancelOrganizeJob(jobId);
@@ -121,6 +145,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
   const retryMutation = useRetryOrganizeJob(jobId);
   const applyMutation = useApplyOrganizeJob(jobId);
   const undoMutation = useUndoOrganizeJob(jobId);
+  const isMutating = isPreparingApply || applyMutation.isPending || undoMutation.isPending;
 
   const notebookPathById = useMemo(() => buildNotebookPathMap(notebooks), [notebooks]);
   const excludedNotebookSet = useMemo(
@@ -136,6 +161,23 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
     return map;
   }, [allTags]);
 
+  const items = useMemo(() => job?.items ?? [], [job?.items]);
+
+  useEffect(() => {
+    if (!job?.items) return;
+    for (const item of job.items) {
+      seenItemsRef.current.set(item.noteId, item);
+    }
+  }, [job?.items]);
+
+  const itemsById = useMemo(() => {
+    const map = new Map<string, OrganizeJobItem>();
+    for (const item of items) {
+      map.set(item.noteId, item);
+    }
+    return map;
+  }, [items]);
+
   const effectiveRow = (item: OrganizeJobItem) => {
     const edit = edits[item.noteId];
     return {
@@ -145,33 +187,116 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
     };
   };
 
+  const computeBaseSelected = useCallback((item: OrganizeJobItem, mode: ActiveSelectionMode): boolean => {
+    if (item.status !== "done" || !item.suggestion || item.applied) return false;
+    if (mode === "very-high") return item.suggestion.confidence >= VERY_HIGH_CONFIDENCE_THRESHOLD;
+    if (mode === "high") return item.suggestion.confidence >= HIGH_CONFIDENCE_THRESHOLD;
+    return false;
+  }, []);
+
   const isRowChecked = useCallback(
     (item: OrganizeJobItem): boolean => {
       if (item.status !== "done" || !item.suggestion) return false;
-      if (Object.prototype.hasOwnProperty.call(selectionOverrides, item.noteId)) {
-        return Boolean(selectionOverrides[item.noteId]);
-      }
-      if (item.applied) return false;
-      return item.suggestion.confidence >= HIGH_CONFIDENCE_THRESHOLD;
+      const ov = selectionOverrides[item.noteId];
+      if (ov !== undefined) return ov.checked;
+      return computeBaseSelected(item, selectionMode);
     },
-    [selectionOverrides]
+    [selectionOverrides, selectionMode, computeBaseSelected]
   );
 
-  const items = useMemo(() => job?.items ?? [], [job?.items]);
-
   const counts = useMemo(() => {
+    if (job?.filterCounts) {
+      let movesDelta = 0;
+      let movesUnappliedDelta = 0;
+      for (const [noteId, edit] of Object.entries(edits)) {
+        if (edit.notebookId === undefined) continue;
+        const item = itemsById.get(noteId) ?? seenItemsRef.current.get(noteId);
+        if (!item || item.status !== "done" || !item.suggestion) continue;
+        const serverMove = Boolean(item.suggestion.notebookId && item.suggestion.notebookId !== item.currentNotebookId);
+        const localMove = Boolean(edit.notebookId && edit.notebookId !== item.currentNotebookId);
+        if (localMove !== serverMove) {
+          const sign = localMove ? 1 : -1;
+          movesDelta += sign;
+          if (!item.applied) movesUnappliedDelta += sign;
+        }
+      }
+      return {
+        all: job.filterCounts.all,
+        veryHigh: job.filterCounts.veryHigh,
+        veryHighUnapplied: job.filterCounts.veryHighUnapplied,
+        high: job.filterCounts.high,
+        highUnapplied: job.filterCounts.highUnapplied,
+        moves: Math.max(0, job.filterCounts.moves + movesDelta),
+        movesUnapplied: Math.max(0, job.filterCounts.movesUnapplied + movesUnappliedDelta),
+      };
+    }
+
     let veryHigh = 0;
+    let veryHighUnapplied = 0;
     let high = 0;
+    let highUnapplied = 0;
     let moves = 0;
+    let movesUnapplied = 0;
     for (const item of items) {
       if (item.status !== "done" || !item.suggestion) continue;
-      if (item.suggestion.confidence >= VERY_HIGH_CONFIDENCE_THRESHOLD) veryHigh++;
-      if (item.suggestion.confidence >= HIGH_CONFIDENCE_THRESHOLD) high++;
+      const isVeryHigh = item.suggestion.confidence >= VERY_HIGH_CONFIDENCE_THRESHOLD;
+      const isHigh = item.suggestion.confidence >= HIGH_CONFIDENCE_THRESHOLD;
       const targetNb = edits[item.noteId]?.notebookId ?? item.suggestion.notebookId;
-      if (targetNb && targetNb !== item.currentNotebookId) moves++;
+      const isMove = Boolean(targetNb && targetNb !== item.currentNotebookId);
+      if (isVeryHigh) {
+        veryHigh++;
+        if (!item.applied) veryHighUnapplied++;
+      }
+      if (isHigh) {
+        high++;
+        if (!item.applied) highUnapplied++;
+      }
+      if (isMove) {
+        moves++;
+        if (!item.applied) movesUnapplied++;
+      }
     }
-    return { all: items.length, veryHigh, high, moves };
-  }, [items, edits]);
+    return {
+      all: items.length,
+      veryHigh,
+      veryHighUnapplied,
+      high,
+      highUnapplied,
+      moves,
+      movesUnapplied,
+    };
+  }, [job?.filterCounts, items, itemsById, edits]);
+
+  const selectedCount = useMemo(() => {
+    const baseCount =
+      selectionMode === "very-high"
+        ? counts.veryHighUnapplied
+        : selectionMode === "high"
+        ? counts.highUnapplied
+        : 0;
+
+    let delta = 0;
+    for (const [noteId, ov] of Object.entries(selectionOverrides)) {
+      const liveItem = itemsById.get(noteId);
+      const baseSelected = liveItem
+        ? computeBaseSelected(liveItem, selectionMode)
+        : selectionMode === "very-high"
+        ? ov.baseVeryHigh
+        : selectionMode === "high"
+        ? ov.baseHigh
+        : false;
+      if (ov.checked && !baseSelected) delta += 1;
+      else if (!ov.checked && baseSelected) delta -= 1;
+    }
+    return Math.max(0, baseCount + delta);
+  }, [
+    selectionMode,
+    counts.veryHighUnapplied,
+    counts.highUnapplied,
+    selectionOverrides,
+    itemsById,
+    computeBaseSelected,
+  ]);
 
   const retryableFailedCount =
     typeof job?.retryableFailedCount === "number"
@@ -197,52 +322,58 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
     });
   }, [items, filter, edits]);
 
-  const selectedItems = useMemo(
-    () => items.filter((item) => isRowChecked(item)),
-    [items, isRowChecked]
-  );
+  const scrollListToTop = () => {
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTop = 0;
+    }
+  };
 
-  const toggleRow = (noteId: string, nextValue: boolean) => {
-    setSelectionOverrides((prev) => ({ ...prev, [noteId]: nextValue }));
+  const handleFilterChange = (nextFilter: OrganizeFilter) => {
+    setFilter(nextFilter);
+    setOffset(0);
+    scrollListToTop();
+  };
+
+  const toggleRow = (item: OrganizeJobItem, nextValue: boolean) => {
+    const baseVeryHigh = computeBaseSelected(item, "very-high");
+    const baseHigh = computeBaseSelected(item, "high");
+    const currentBase = computeBaseSelected(item, selectionMode);
+    setSelectionOverrides((prev) => {
+      const next = { ...prev };
+      if (nextValue === currentBase) {
+        delete next[item.noteId];
+      } else {
+        next[item.noteId] = { checked: nextValue, baseVeryHigh, baseHigh };
+      }
+      return next;
+    });
   };
 
   const selectAllVeryHigh = () => {
-    setSelectionOverrides((prev) => {
-      const next = { ...prev };
-      for (const item of items) {
-        if (item.status !== "done" || item.applied) continue;
-        next[item.noteId] = (item.suggestion?.confidence ?? 0) >= VERY_HIGH_CONFIDENCE_THRESHOLD;
-      }
-      return next;
-    });
+    setSelectionMode("very-high");
+    setSelectionOverrides({});
+    const visibleMatches = items.filter((item) => computeBaseSelected(item, "very-high")).length;
+    if (counts.veryHighUnapplied > 0 && visibleMatches === 0) {
+      toast.info(
+        `Selected ${counts.veryHighUnapplied.toLocaleString()} very-high suggestions across all pages (none unapplied on this page)`
+      );
+    }
   };
 
   const selectAllHighConfidence = () => {
-    setSelectionOverrides((prev) => {
-      const next = { ...prev };
-      for (const item of items) {
-        if (
-          item.status === "done" &&
-          !item.applied &&
-          (item.suggestion?.confidence ?? 0) >= HIGH_CONFIDENCE_THRESHOLD
-        ) {
-          next[item.noteId] = true;
-        }
-      }
-      return next;
-    });
+    setSelectionMode("high");
+    setSelectionOverrides({});
+    const visibleMatches = items.filter((item) => computeBaseSelected(item, "high")).length;
+    if (counts.highUnapplied > 0 && visibleMatches === 0) {
+      toast.info(
+        `Selected ${counts.highUnapplied.toLocaleString()} high-confidence suggestions across all pages (none unapplied on this page)`
+      );
+    }
   };
 
   const clearAllSelections = () => {
-    setSelectionOverrides((prev) => {
-      const next = { ...prev };
-      for (const item of items) {
-        if (item.status === "done") {
-          next[item.noteId] = false;
-        }
-      }
-      return next;
-    });
+    setSelectionMode("none");
+    setSelectionOverrides({});
   };
 
   const updateRowEdit = (noteId: string, patch: Partial<RowEdit>) => {
@@ -276,17 +407,45 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
     setTagDraft("");
   };
 
-  const handleUndo = async () => {
-    try {
-      const res = await undoMutation.mutateAsync();
-      const revertedIds = new Set(res.results.filter((r) => r.status === "ok").map((r) => r.id));
-      if (revertedIds.size > 0) {
-        setSelectionOverrides((prev) => {
-          const next = { ...prev };
-          for (const id of revertedIds) delete next[id];
-          return next;
-        });
+  const markRevertedOk = (results: OrganizeUndoResponse["results"]) => {
+    const revertedIds = new Set(results.filter((r) => r.status === "ok").map((r) => r.id));
+    if (revertedIds.size === 0) return;
+    setSelectionOverrides((prev) => {
+      const next = { ...prev };
+      for (const id of revertedIds) delete next[id];
+      return next;
+    });
+    for (const id of revertedIds) {
+      const existing = seenItemsRef.current.get(id);
+      if (existing) {
+        seenItemsRef.current.set(id, { ...existing, applied: false, applyStatus: undefined, applyError: undefined });
       }
+    }
+  };
+
+  const markAppliedOk = (results: OrganizeApplyResponse["results"]) => {
+    const okIds = new Set(results.filter((r) => r.status === "ok").map((r) => r.id));
+    if (okIds.size === 0) return;
+    setSelectionOverrides((prev) => {
+      const next = { ...prev };
+      for (const id of okIds) delete next[id];
+      return next;
+    });
+    for (const id of okIds) {
+      const existing = seenItemsRef.current.get(id);
+      if (existing) {
+        seenItemsRef.current.set(id, { ...existing, applied: true, applyStatus: "ok", applyError: undefined });
+      }
+    }
+  };
+
+  const handleUndo = async (totalHint?: number) => {
+    try {
+      const res = await undoMutation.mutateAsync({
+        totalHint,
+        onProgress: setUndoProgress,
+      });
+      markRevertedOk(res.results);
       const parts: string[] = [];
       if (res.conflictCount > 0) parts.push(`${res.conflictCount} skipped: changed elsewhere`);
       if (res.errorCount > 0) parts.push(`${res.errorCount} failed`);
@@ -301,13 +460,23 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
         toast.error(`Could not undo changes${suffix}`);
       }
     } catch (err) {
+      if (err instanceof OrganizePartialUndoError) {
+        markRevertedOk(err.partial.results);
+        toast.warning(
+          `Reverted ${err.partial.revertedCount} notes before an error occurred. Click Undo last apply to revert the rest.`,
+          { description: err.message }
+        );
+        return;
+      }
       toast.error("Could not undo changes", { description: err instanceof Error ? err.message : undefined });
+    } finally {
+      setUndoProgress(null);
     }
   };
 
-  const handleApplySelected = async () => {
-    if (selectedItems.length === 0) return;
-    const payload: OrganizeApplyItemInput[] = selectedItems.map((item) => {
+  const buildApplyPayload = async (): Promise<OrganizeApplyItemInput[]> => {
+    if (!job) return [];
+    const toExplicitInput = (item: OrganizeJobItem): OrganizeApplyItemInput => {
       const { title, notebookId, tags } = effectiveRow(item);
       return {
         noteId: item.noteId,
@@ -316,18 +485,90 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
         addTags: tags,
         baseUpdatedTime: item.updatedTime,
       };
-    });
+    };
 
-    try {
-      const res = await applyMutation.mutateAsync(payload);
-      const okIds = new Set(res.results.filter((r) => r.status === "ok").map((r) => r.id));
-      if (okIds.size > 0) {
-        setSelectionOverrides((prev) => {
-          const next = { ...prev };
-          for (const id of okIds) next[id] = false;
-          return next;
+    if (selectionMode === "none") {
+      const inputs: OrganizeApplyItemInput[] = [];
+      for (const [noteId, ov] of Object.entries(selectionOverrides)) {
+        if (!ov.checked) continue;
+        const seenItem = itemsById.get(noteId) ?? seenItemsRef.current.get(noteId);
+        if (seenItem) {
+          inputs.push(toExplicitInput(seenItem));
+        } else {
+          const edit = edits[noteId];
+          inputs.push({
+            noteId,
+            ...(edit?.title !== undefined ? { title: edit.title } : {}),
+            ...(edit?.notebookId !== undefined ? { notebookId: edit.notebookId } : {}),
+            ...(edit?.tags !== undefined ? { addTags: edit.tags } : {}),
+            useSuggestion: true,
+          });
+        }
+      }
+      return inputs;
+    }
+
+    const hasAllJobItems =
+      filter === "all" &&
+      job.offset === 0 &&
+      items.length >= job.totalItems &&
+      (!job.filterCounts || items.length >= job.filterCounts.all);
+
+    if (hasAllJobItems) {
+      return items.filter((item) => isRowChecked(item)).map(toExplicitInput);
+    }
+
+    const { noteIds: modeTargets } = await getOrganizeTargets(job.id, selectionMode);
+    const targetSet = new Set<string>();
+    for (const noteId of modeTargets) {
+      if (selectionOverrides[noteId]?.checked === false) continue;
+      targetSet.add(noteId);
+    }
+    for (const [noteId, ov] of Object.entries(selectionOverrides)) {
+      if (ov.checked) {
+        targetSet.add(noteId);
+      }
+    }
+
+    const inputs: OrganizeApplyItemInput[] = [];
+    for (const noteId of targetSet) {
+      const seenItem = itemsById.get(noteId) ?? seenItemsRef.current.get(noteId);
+      const edit = edits[noteId];
+      if (seenItem && seenItem.status === "done" && seenItem.suggestion && (itemsById.has(noteId) || edit)) {
+        inputs.push(toExplicitInput(seenItem));
+      } else {
+        inputs.push({
+          noteId,
+          ...(edit?.title !== undefined ? { title: edit.title } : {}),
+          ...(edit?.notebookId !== undefined ? { notebookId: edit.notebookId } : {}),
+          ...(edit?.tags !== undefined ? { addTags: edit.tags } : {}),
+          useSuggestion: true,
         });
       }
+    }
+    return inputs;
+  };
+
+  const handleApplySelected = async () => {
+    if (selectedCount === 0 || !job) return;
+    let payload: OrganizeApplyItemInput[];
+    setIsPreparingApply(true);
+    try {
+      payload = await buildApplyPayload();
+    } catch (err) {
+      toast.error("Could not load selected notes", { description: err instanceof Error ? err.message : undefined });
+      return;
+    } finally {
+      setIsPreparingApply(false);
+    }
+    if (payload.length === 0) return;
+
+    try {
+      const res = await applyMutation.mutateAsync({
+        items: payload,
+        onProgress: setApplyProgress,
+      });
+      markAppliedOk(res.results);
 
       const skips: string[] = [];
       if (res.conflictCount > 0) skips.push(`${res.conflictCount} conflict`);
@@ -341,7 +582,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
           action: res.canUndo
             ? {
                 label: "Undo",
-                onClick: () => void handleUndo(),
+                onClick: () => void handleUndo(res.appliedCount),
               }
             : undefined,
         });
@@ -351,7 +592,23 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
         toast.error(`Could not apply selected changes${skipSuffix}`);
       }
     } catch (err) {
+      if (err instanceof OrganizePartialApplyError) {
+        markAppliedOk(err.partial.results);
+        const noun = err.partial.appliedCount === 1 ? "note" : "notes";
+        toast.warning(`Applied changes to ${err.partial.appliedCount} ${noun} before an error stopped the batch`, {
+          description: err.message,
+          action: err.partial.canUndo
+            ? {
+                label: "Undo",
+                onClick: () => void handleUndo(err.partial.appliedCount),
+              }
+            : undefined,
+        });
+        return;
+      }
       toast.error("Could not apply suggestions", { description: err instanceof Error ? err.message : undefined });
+    } finally {
+      setApplyProgress(null);
     }
   };
 
@@ -489,7 +746,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
             type="button"
             variant="outline"
             size="sm"
-            disabled={item.status !== "done" || applyMutation.isPending}
+            disabled={item.status !== "done" || isMutating}
             aria-label={`Target notebook for ${item.currentTitle || item.noteId}`}
             className="h-8 w-full justify-start gap-1.5 text-left text-xs font-normal min-w-0"
           >
@@ -934,7 +1191,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                   size="sm"
                   variant={filter === "all" ? "secondary" : "ghost"}
                   aria-pressed={filter === "all"}
-                  onClick={() => setFilter("all")}
+                  onClick={() => handleFilterChange("all")}
                   className="h-7 px-2.5 text-xs"
                 >
                   All ({counts.all})
@@ -944,7 +1201,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                   size="sm"
                   variant={filter === "very-high" ? "secondary" : "ghost"}
                   aria-pressed={filter === "very-high"}
-                  onClick={() => setFilter("very-high")}
+                  onClick={() => handleFilterChange("very-high")}
                   className="h-7 px-2.5 text-xs"
                 >
                   Very high (&gt;= 0.85) ({counts.veryHigh})
@@ -954,7 +1211,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                   size="sm"
                   variant={filter === "high" ? "secondary" : "ghost"}
                   aria-pressed={filter === "high"}
-                  onClick={() => setFilter("high")}
+                  onClick={() => handleFilterChange("high")}
                   className="h-7 px-2.5 text-xs"
                 >
                   High confidence ({counts.high})
@@ -964,7 +1221,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                   size="sm"
                   variant={filter === "moves" ? "secondary" : "ghost"}
                   aria-pressed={filter === "moves"}
-                  onClick={() => setFilter("moves")}
+                  onClick={() => handleFilterChange("moves")}
                   className="h-7 px-2.5 text-xs"
                 >
                   Changes notebook ({counts.moves})
@@ -976,7 +1233,12 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                   type="button"
                   variant="outline"
                   size="sm"
-                  disabled={counts.veryHigh === 0 || applyMutation.isPending}
+                  disabled={counts.veryHighUnapplied === 0 || isMutating}
+                  title={
+                    counts.veryHigh > 0 && counts.veryHighUnapplied === 0
+                      ? "All very-high suggestions are already applied"
+                      : undefined
+                  }
                   onClick={selectAllVeryHigh}
                   className="h-8 px-2.5 text-xs"
                 >
@@ -986,18 +1248,23 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                   type="button"
                   variant="outline"
                   size="sm"
-                  disabled={counts.high === 0 || applyMutation.isPending}
+                  disabled={counts.highUnapplied === 0 || isMutating}
+                  title={
+                    counts.high > 0 && counts.highUnapplied === 0
+                      ? "All high-confidence suggestions are already applied"
+                      : undefined
+                  }
                   onClick={selectAllHighConfidence}
                   className="h-8 px-2.5 text-xs"
                 >
                   Select all high-confidence
                 </Button>
-                {selectedItems.length > 0 && (
+                {selectedCount > 0 && (
                   <Button
                     type="button"
                     variant="ghost"
                     size="sm"
-                    disabled={applyMutation.isPending}
+                    disabled={isMutating}
                     onClick={clearAllSelections}
                     className="h-8 px-2 text-xs text-muted-foreground"
                   >
@@ -1009,7 +1276,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                     type="button"
                     variant="outline"
                     size="sm"
-                    disabled={undoMutation.isPending || readOnly}
+                    disabled={isMutating || readOnly}
                     onClick={() => void handleUndo()}
                     className="h-8 px-2.5 text-xs gap-1.5"
                   >
@@ -1018,22 +1285,26 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                     ) : (
                       <Undo2 className="h-3.5 w-3.5" />
                     )}
-                    Undo last apply
+                    {undoMutation.isPending && undoProgress && undoProgress.total > 0
+                      ? `Undoing ${undoProgress.completed} / ${undoProgress.total}…`
+                      : "Undo last apply"}
                   </Button>
                 )}
                 <Button
                   type="button"
                   size="sm"
-                  disabled={selectedItems.length === 0 || applyMutation.isPending || readOnly}
+                  disabled={selectedCount === 0 || isMutating || readOnly}
                   onClick={() => void handleApplySelected()}
                   className="h-8 px-3 text-xs gap-1.5"
                 >
-                  {applyMutation.isPending ? (
+                  {isPreparingApply || applyMutation.isPending ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   ) : (
                     <Check className="h-3.5 w-3.5" />
                   )}
-                  Apply selected ({selectedItems.length})
+                  {applyMutation.isPending && applyProgress && applyProgress.total > ORGANIZE_APPLY_CHUNK_SIZE
+                    ? `Applying ${applyProgress.completed} / ${applyProgress.total}…`
+                    : `Apply selected (${selectedCount})`}
                 </Button>
               </div>
             </div>
@@ -1041,7 +1312,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
         </div>
 
         {/* Scrollable Content */}
-        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 sm:px-6">
+        <div ref={scrollContainerRef} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 sm:px-6">
           {isLoading ? (
             <div className="space-y-3">
               {Array.from({ length: 4 }).map((_, i) => (
@@ -1064,7 +1335,13 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                 {items.length === 0 ? "No notes in this job" : "No suggestions match this filter"}
               </p>
               {filter !== "all" && (
-                <Button type="button" variant="outline" size="sm" className="mt-3" onClick={() => setFilter("all")}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-3"
+                  onClick={() => handleFilterChange("all")}
+                >
                   Show all ({counts.all})
                 </Button>
               )}
@@ -1105,9 +1382,9 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                             <input
                               type="checkbox"
                               checked={checked}
-                              disabled={item.status !== "done" || applyMutation.isPending}
+                              disabled={item.status !== "done" || isMutating}
                               aria-label={`Select ${item.currentTitle || item.noteId}`}
-                              onChange={(e) => toggleRow(item.noteId, e.target.checked)}
+                              onChange={(e) => toggleRow(item, e.target.checked)}
                               className="mt-1 h-4 w-4 rounded border-input accent-primary cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
                             />
                           </td>
@@ -1129,7 +1406,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                             {item.status === "done" ? (
                               <Input
                                 value={suggestedTitle}
-                                disabled={applyMutation.isPending}
+                                disabled={isMutating}
                                 aria-label={`Suggested title for ${item.currentTitle || item.noteId}`}
                                 onChange={(e) => updateRowEdit(item.noteId, { title: e.target.value })}
                                 className="h-8 text-xs font-medium"
@@ -1212,9 +1489,9 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                           <input
                             type="checkbox"
                             checked={checked}
-                            disabled={item.status !== "done" || applyMutation.isPending}
+                            disabled={item.status !== "done" || isMutating}
                             aria-label={`Select ${item.currentTitle || item.noteId}`}
-                            onChange={(e) => toggleRow(item.noteId, e.target.checked)}
+                            onChange={(e) => toggleRow(item, e.target.checked)}
                             className="mt-0.5 h-4 w-4 rounded border-input accent-primary shrink-0"
                           />
                           <div className="min-w-0">
@@ -1253,7 +1530,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                             <span className="text-[11px] text-muted-foreground">Suggested title</span>
                             <Input
                               value={suggestedTitle}
-                              disabled={applyMutation.isPending}
+                              disabled={isMutating}
                               aria-label={`Suggested title for ${item.currentTitle || item.noteId}`}
                               onChange={(e) => updateRowEdit(item.noteId, { title: e.target.value })}
                               className="h-8 text-xs font-medium"
@@ -1303,7 +1580,10 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                       variant="outline"
                       size="sm"
                       disabled={offset === 0}
-                      onClick={() => setOffset((prev) => Math.max(0, prev - ORGANIZE_PAGE_SIZE))}
+                      onClick={() => {
+                        setOffset((prev) => Math.max(0, prev - ORGANIZE_PAGE_SIZE));
+                        scrollListToTop();
+                      }}
                       className="h-7 px-2.5 text-xs"
                     >
                       Previous
@@ -1313,7 +1593,10 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                       variant="outline"
                       size="sm"
                       disabled={offset + ORGANIZE_PAGE_SIZE >= job.totalItems}
-                      onClick={() => setOffset((prev) => prev + ORGANIZE_PAGE_SIZE)}
+                      onClick={() => {
+                        setOffset((prev) => prev + ORGANIZE_PAGE_SIZE);
+                        scrollListToTop();
+                      }}
                       className="h-7 px-2.5 text-xs"
                     >
                       Next

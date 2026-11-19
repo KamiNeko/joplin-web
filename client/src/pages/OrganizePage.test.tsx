@@ -548,4 +548,266 @@ describe("OrganizePage", () => {
       )
     ).toBe(true);
   });
+
+  it("supports job-wide Select all very-high when page 1 has only applied very-high items, cross-page edits, server filters, chunked apply and chunked undo", async () => {
+    const successSpy = vi.spyOn(toast, "success").mockReturnValue("t-ok");
+    const infoSpy = vi.spyOn(toast, "info").mockReturnValue("t-info");
+
+    const hexId = (prefix: string, n: number) => `${prefix}${n.toString(16).padStart(32 - prefix.length, "0")}`;
+    const jobId = "36600ecfac374bbf927c6d484a43cc70";
+
+    // Build 365 items:
+    // - 0..41 (42 items on page 1): very-high (0.92), already applied
+    // - 42..45 (4 items on page 1): moderate high (0.78), unapplied
+    // - 46..199 (154 items on page 1): low (0.50), unapplied
+    // - 200..364 (165 items on page 2): very-high (0.92), unapplied
+    const allItems = Array.from({ length: 365 }, (_, i) => {
+      const isPage1AppliedVh = i < 42;
+      const isPage1High = i >= 42 && i < 46;
+      const isPage2Vh = i >= 200;
+      const confidence = isPage1AppliedVh || isPage2Vh ? 0.92 : isPage1High ? 0.78 : 0.5;
+      return {
+        noteId: hexId("aa", i + 1),
+        currentTitle: `Scan_${i + 1}.pdf`,
+        currentNotebookId: id("1"),
+        currentNotebookPath: "Pending to sort",
+        updatedTime: 1000 + i,
+        status: "done" as const,
+        ...(isPage1AppliedVh ? { applied: true, applyStatus: "ok" as const } : {}),
+        suggestion: {
+          title: `2025-01-01 Doc ${i + 1}`,
+          notebookId: id("3"),
+          tags: ["statement"],
+          confidence,
+          documentDate: "2025-01-01",
+          reason: `Reason ${i + 1}`,
+        },
+      };
+    });
+
+    let canUndo = false;
+    let remainingUndoIds: string[] = [];
+
+    const computeFilterCounts = () => {
+      let veryHigh = 0;
+      let veryHighUnapplied = 0;
+      let high = 0;
+      let highUnapplied = 0;
+      let moves = 0;
+      let movesUnapplied = 0;
+      for (const item of allItems) {
+        const conf = item.suggestion.confidence;
+        if (conf >= 0.85) {
+          veryHigh++;
+          if (!item.applied) veryHighUnapplied++;
+        }
+        if (conf >= 0.7) {
+          high++;
+          if (!item.applied) highUnapplied++;
+        }
+        moves++;
+        if (!item.applied) movesUnapplied++;
+      }
+      return {
+        all: allItems.length,
+        veryHigh,
+        veryHighUnapplied,
+        high,
+        highUnapplied,
+        moves,
+        movesUnapplied,
+      };
+    };
+
+    const calls = mockFetch((call) => {
+      const url = new URL(call.path, "http://localhost");
+      if (url.pathname === "/api/notebooks") return jsonResponse(notebooks);
+      if (url.pathname === "/api/tags") return jsonResponse(tags);
+      if (url.pathname === `/api/organize/jobs/${jobId}` && call.method === "GET") {
+        const filterParam = (url.searchParams.get("filter") ?? "all") as "all" | "very-high" | "high" | "moves";
+        const offsetParam = Number(url.searchParams.get("offset") ?? "0");
+        const limitParam = Number(url.searchParams.get("limit") ?? "200");
+        const matching = allItems.filter((item) => {
+          if (filterParam === "very-high") return item.suggestion.confidence >= 0.85;
+          if (filterParam === "high") return item.suggestion.confidence >= 0.7;
+          return true;
+        });
+        const slice = matching.slice(offsetParam, offsetParam + limitParam);
+        return jsonResponse({
+          id: jobId,
+          status: "done",
+          excludeNotebookIds: [id("1")],
+          progress: { total: allItems.length, done: allItems.length, failed: 0 },
+          appliedCount: allItems.filter((it) => it.applied).length,
+          retryableFailedCount: 0,
+          filter: filterParam,
+          filterCounts: computeFilterCounts(),
+          usage: { promptTokens: 1000, completionTokens: 250, totalTokens: 1250 },
+          offset: offsetParam,
+          limit: limitParam,
+          totalItems: matching.length,
+          canUndo,
+          createdAt: 1_700_000_000_000,
+          updatedAt: 1_700_000_010_000,
+          items: slice,
+        });
+      }
+      if (url.pathname === `/api/organize/jobs/${jobId}/targets` && call.method === "GET") {
+        const mode = url.searchParams.get("mode");
+        const threshold = mode === "very-high" ? 0.85 : 0.7;
+        return jsonResponse({
+          noteIds: allItems
+            .filter((it) => !it.applied && it.suggestion.confidence >= threshold)
+            .map((it) => it.noteId),
+        });
+      }
+      if (url.pathname === `/api/organize/jobs/${jobId}/apply` && call.method === "POST") {
+        const body = call.body as {
+          items: Array<{ noteId: string; title?: string }>;
+          undoMode?: "replace" | "append";
+        };
+        if (body.undoMode !== "append") {
+          remainingUndoIds = [];
+        }
+        const results = body.items.map((inp) => {
+          const item = allItems.find((it) => it.noteId === inp.noteId)!;
+          item.applied = true;
+          item.applyStatus = "ok";
+          remainingUndoIds.push(inp.noteId);
+          return { id: inp.noteId, status: "ok" as const, updatedTime: item.updatedTime + 100 };
+        });
+        canUndo = true;
+        return jsonResponse({
+          results,
+          appliedCount: results.length,
+          conflictCount: 0,
+          errorCount: 0,
+          canUndo: true,
+        });
+      }
+      if (url.pathname === `/api/organize/jobs/${jobId}/undo` && call.method === "POST") {
+        const body = (call.body ?? {}) as { limit?: number };
+        const takeCount = body.limit ?? remainingUndoIds.length;
+        const batchIds = remainingUndoIds.slice(0, takeCount);
+        remainingUndoIds = remainingUndoIds.slice(batchIds.length);
+        // Split response at <= 60 per chunk to test multi-chunk undo loop
+        const results = batchIds.map((noteId) => {
+          const item = allItems.find((it) => it.noteId === noteId)!;
+          item.applied = false;
+          delete item.applyStatus;
+          return { id: noteId, status: "ok" as const, updatedTime: item.updatedTime + 200 };
+        });
+        canUndo = remainingUndoIds.length > 0;
+        return jsonResponse({
+          results,
+          revertedCount: results.length,
+          conflictCount: 0,
+          errorCount: 0,
+          canUndo,
+          remainingCount: remainingUndoIds.length,
+        });
+      }
+      return undefined;
+    });
+
+    renderOrganizePage(`/organize/${jobId}`);
+
+    expect(await screen.findByText("Analysed 365 / 365")).toBeTruthy();
+    // Initial default selection is high-confidence unapplied across all pages (4 on page 1 + 165 on page 2 = 169)
+    expect(screen.getByRole("button", { name: "Apply selected (169)" })).toBeTruthy();
+
+    // Select all very-high works even when page 1's 42 very-high items are already applied
+    const selectVhBtn = screen.getByRole("button", { name: "Select all very-high" }) as HTMLButtonElement;
+    expect(selectVhBtn.disabled).toBe(false);
+    fireEvent.click(selectVhBtn);
+
+    expect(infoSpy).toHaveBeenCalledWith(
+      "Selected 165 very-high suggestions across all pages (none unapplied on this page)"
+    );
+    expect(screen.getByRole("button", { name: "Apply selected (165)" })).toBeTruthy();
+
+    // Server-side filter resets offset and fetches ?filter=very-high
+    fireEvent.click(screen.getByRole("button", { name: "Very high (>= 0.85) (207)" }));
+    await waitFor(() => {
+      expect(
+        calls.some(
+          (c) =>
+            c.method === "GET" &&
+            c.path === `/api/organize/jobs/${jobId}?offset=0&limit=200&filter=very-high`
+        )
+      ).toBe(true);
+    });
+    expect(screen.getByRole("button", { name: "All (365)" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "All (365)" }));
+
+    // Navigate to Page 2, edit row 201's title and untick row 202
+    await screen.findByText("Page 1 of 2 (365 notes)");
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    const editedInput = await screen.findByLabelText("Suggested title for Scan_201.pdf");
+    fireEvent.change(editedInput, { target: { value: "Edited Page 2 Invoice" } });
+    const uncheckedBox = screen.getByRole("checkbox", { name: "Select Scan_202.pdf" }) as HTMLInputElement;
+    expect(uncheckedBox.checked).toBe(true);
+    fireEvent.click(uncheckedBox);
+    expect(screen.getByRole("button", { name: "Apply selected (164)" })).toBeTruthy();
+
+    // Return to Page 1 -> cross-page count and edit remain intact
+    fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+    await screen.findByText("Page 1 of 2 (365 notes)");
+    expect(screen.getByRole("button", { name: "Apply selected (164)" })).toBeTruthy();
+
+    // Apply selected (164) -> fetches /targets?mode=very-high and sends 2 chunks (100 replace, 64 append)
+    fireEvent.click(screen.getByRole("button", { name: "Apply selected (164)" }));
+
+    await waitFor(() => expect(successSpy).toHaveBeenCalled());
+    expect(successSpy.mock.calls[0][0]).toBe("Applied changes to 164 notes");
+
+    expect(
+      calls.some((c) => c.method === "GET" && c.path === `/api/organize/jobs/${jobId}/targets?mode=very-high`)
+    ).toBe(true);
+    interface ApplyRequestBody {
+      undoMode?: "replace" | "append";
+      items: Array<{
+        noteId: string;
+        title?: string;
+        notebookId?: string;
+        addTags?: string[];
+        baseUpdatedTime?: number;
+        useSuggestion?: boolean;
+      }>;
+    }
+
+    const applyCalls = calls.filter((c) => c.method === "POST" && c.path.endsWith("/apply"));
+    expect(applyCalls).toHaveLength(2);
+    expect((applyCalls[0].body as ApplyRequestBody).undoMode).toBe("replace");
+    expect((applyCalls[0].body as ApplyRequestBody).items).toHaveLength(100);
+    expect((applyCalls[1].body as ApplyRequestBody).undoMode).toBe("append");
+    expect((applyCalls[1].body as ApplyRequestBody).items).toHaveLength(64);
+
+    const allAppliedInputs = applyCalls.flatMap((c) => (c.body as ApplyRequestBody).items);
+    const editedPayload = allAppliedInputs.find((it) => it.noteId === hexId("aa", 201));
+    expect(editedPayload).toEqual({
+      noteId: hexId("aa", 201),
+      title: "Edited Page 2 Invoice",
+      notebookId: id("3"),
+      addTags: ["statement"],
+      baseUpdatedTime: 1200,
+    });
+    expect(allAppliedInputs.some((it) => it.noteId === hexId("aa", 202))).toBe(false);
+    const uneditedPayload = allAppliedInputs.find((it) => it.noteId === hexId("aa", 203));
+    expect(uneditedPayload).toEqual({
+      noteId: hexId("aa", 203),
+      useSuggestion: true,
+    });
+
+    // Scan_202 stays unapplied, so 1 veryHighUnapplied remains
+    expect((screen.getByRole("button", { name: "Select all very-high" }) as HTMLButtonElement).disabled).toBe(false);
+
+    // Trigger Undo from toolbar -> reverts in 2 chunks (150 then 14)
+    fireEvent.click(screen.getByRole("button", { name: "Undo last apply" }));
+    await waitFor(() => expect(successSpy).toHaveBeenCalledWith("Reverted 164 notes"));
+    const undoCalls = calls.filter((c) => c.method === "POST" && c.path.endsWith("/undo"));
+    expect(undoCalls).toHaveLength(2);
+    expect(undoCalls[0].body).toEqual({ limit: 150 });
+    expect(undoCalls[1].body).toEqual({ limit: 150 });
+  }, 40_000);
 });

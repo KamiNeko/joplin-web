@@ -7,11 +7,14 @@ import {
   OrganizeApplyItemInput,
   OrganizeApplyResponse,
   OrganizeDeleteResponse,
+  OrganizeFilter,
   OrganizeJobResponse,
   OrganizeJobStatus,
   OrganizeJobSummary,
   OrganizeRetryResponse,
+  OrganizeSelectionMode,
   OrganizeStatus,
+  OrganizeTargetsResponse,
   OrganizeUndoResponse,
   Tag,
   SearchResult,
@@ -660,17 +663,29 @@ export async function createOrganizeJob(payload: {
 }
 
 /**
- * Fetches job status, progress, token usage, and a page of note suggestions.
+ * Fetches job status, progress, token usage, filter counts, and a page of note suggestions.
  */
 export async function getOrganizeJob(
   jobId: string,
-  params?: { offset?: number; limit?: number }
+  params?: { offset?: number; limit?: number; filter?: OrganizeFilter }
 ): Promise<OrganizeJobResponse> {
   const query = new URLSearchParams();
   if (params?.offset !== undefined) query.set("offset", String(params.offset));
   if (params?.limit !== undefined) query.set("limit", String(params.limit));
+  if (params?.filter && params.filter !== "all") query.set("filter", params.filter);
   const suffix = query.toString() ? `?${query.toString()}` : "";
   return request<OrganizeJobResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}${suffix}`);
+}
+
+/**
+ * Fetches all unapplied completed `noteId`s matching the confidence mode across the whole job.
+ */
+export async function getOrganizeTargets(
+  jobId: string,
+  mode: OrganizeSelectionMode
+): Promise<OrganizeTargetsResponse> {
+  const query = new URLSearchParams({ mode });
+  return request<OrganizeTargetsResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}/targets?${query.toString()}`);
 }
 
 /**
@@ -705,19 +720,28 @@ export async function retryOrganizeJob(jobId: string): Promise<OrganizeRetryResp
  */
 export async function applyOrganizeJob(
   jobId: string,
-  items: OrganizeApplyItemInput[]
+  items: OrganizeApplyItemInput[],
+  options?: { undoMode?: "replace" | "append" }
 ): Promise<OrganizeApplyResponse> {
+  const payload: { items: OrganizeApplyItemInput[]; undoMode?: "replace" | "append" } = { items };
+  if (options?.undoMode !== undefined) {
+    payload.undoMode = options.undoMode;
+  }
   return request<OrganizeApplyResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}/apply`, {
     method: "POST",
-    body: JSON.stringify({ items }),
+    body: JSON.stringify(payload),
   });
 }
 
 /**
  * Reverts the last apply performed on this organize job (skipping notes changed since).
  */
-export async function undoOrganizeJob(jobId: string): Promise<OrganizeUndoResponse> {
+export async function undoOrganizeJob(
+  jobId: string,
+  options?: { limit?: number }
+): Promise<OrganizeUndoResponse> {
   return request<OrganizeUndoResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}/undo`, {
     method: "POST",
+    ...(options?.limit !== undefined ? { body: JSON.stringify({ limit: options.limit }) } : {}),
   });
 }
