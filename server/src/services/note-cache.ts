@@ -8,23 +8,44 @@ import {
   buildOcrSnippet,
   extractLinkedResourceIds,
   isEmptySearchQuery,
+  matchesDateFilters,
   matchesNamePattern,
   normalizeOcrText,
   parseSearchQuery,
 } from './search-query.js';
+import { extractInlineTasks } from './inline-tasks.js';
+import { reconstructRevisionContent, RevisionDiffRecord } from './revision-patch.js';
 import { trashedTogether } from './trash.js';
 import {
+  DuplicateCluster,
+  FavoriteNotebookSummary,
+  HydratedPreferences,
+  HygieneNoteItem,
+  HygieneReport,
+  InlineTaskItem,
   JoplinDeltaChange,
   JoplinItemType,
   Notebook,
+  NotebookBreadcrumb,
+  NoteAttachment,
+  NoteAttachmentKind,
+  NoteBacklink,
   NoteDetail,
   NoteListItem,
+  NoteRevisionDetail,
+  NoteRevisionMeta,
   NoteTagLink,
   RawJoplinItem,
+  RecentNotesResponse,
+  RecentReadEntry,
+  RecentReadNote,
   ResourceMetadata,
   SearchResult,
   TagItem,
+  TasksResponse,
+  TodoTaskItem,
   TrashedNotebook,
+  UserPreferences,
 } from '../types/index.js';
 
 /**
@@ -158,7 +179,25 @@ function resourceMetadataOf(item: RawJoplinItem): ResourceMetadata {
   };
 }
 
-/** On-disk cache format version; bumped whenever `SavedEntry` changes so old caches rebuild */
+function parsePropTimestamp(val?: string): number {
+  if (!val || val === '0') return 0;
+  const num = Number(val);
+  if (!Number.isNaN(num) && Number.isFinite(num)) return num;
+  const parsed = Date.parse(val);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function attachmentKindOf(mime: string, name: string): NoteAttachmentKind {
+  const lowerMime = mime.toLowerCase();
+  const lowerName = name.toLowerCase();
+  if (lowerMime.startsWith('image/')) return 'image';
+  if (lowerMime === 'application/pdf' || lowerName.endsWith('.pdf')) return 'pdf';
+  if (lowerMime.startsWith('audio/') || /\.(mp3|wav|m4a|ogg|flac|aac|webm)$/i.test(lowerName)) return 'audio';
+  if (lowerMime.startsWith('video/') || /\.(mp4|mov|mkv)$/i.test(lowerName)) return 'video';
+  return 'file';
+}
+
+/** On-disk cache format version; bumped whenever `SavedEntry` changes incompatibly so old caches rebuild */
 const CACHE_FORMAT_VERSION = 2 as const;
 
 /**
@@ -190,6 +229,9 @@ export interface CacheEntry {
   tags: Map<string, RawJoplinItem>;
   noteTags: NoteTagLink[];
   resources: Map<string, ResourceMetadata>;
+  revisionsByItem?: Map<string, NoteRevisionMeta[]>;
+  revisionOwners?: Map<string, string>;
+  revisionsIndexed?: boolean;
   itemTimestamps: Map<string, number>;
   /** `updated_time` of the sync target's info.json in the last listing, null when it has none */
   syncInfoUpdatedTime: number | null;
@@ -224,6 +266,8 @@ interface SavedEntry {
   tags: Array<[string, RawJoplinItem]>;
   noteTags: NoteTagLink[];
   resources: Array<[string, ResourceMetadata]>;
+  revisionsByItem?: Array<[string, NoteRevisionMeta[]]>;
+  revisionsIndexed?: boolean;
   itemTimestamps: Array<[string, number]>;
   syncInfoUpdatedTime: number | null;
   deltaCursor: string | null;
@@ -312,6 +356,9 @@ export class NoteCacheService {
         tags: new Map(),
         noteTags: [],
         resources: new Map(),
+        revisionsByItem: new Map(),
+        revisionOwners: new Map(),
+        revisionsIndexed: false,
         itemTimestamps: new Map(),
         syncInfoUpdatedTime: null,
         deltaCursor: null,
@@ -332,6 +379,11 @@ export class NoteCacheService {
     const saved = readCacheFile<SavedEntry>(entryFile(key));
     if (saved?.version !== CACHE_FORMAT_VERSION) return null;
     console.log(`[NoteCache] Loaded saved cache: ${saved.notes.length} notes`);
+    const revisionsByItem = new Map<string, NoteRevisionMeta[]>(saved.revisionsByItem ?? []);
+    const revisionOwners = new Map<string, string>();
+    for (const [itemId, list] of revisionsByItem) {
+      for (const rev of list) revisionOwners.set(rev.id, itemId);
+    }
     return {
       lastFetched: saved.lastFetched,
       lastAccessed: Date.now(),
@@ -342,6 +394,9 @@ export class NoteCacheService {
       tags: new Map(saved.tags),
       noteTags: saved.noteTags,
       resources: new Map(saved.resources),
+      revisionsByItem,
+      revisionOwners,
+      revisionsIndexed: Boolean(saved.revisionsIndexed),
       itemTimestamps: new Map(saved.itemTimestamps),
       syncInfoUpdatedTime: saved.syncInfoUpdatedTime,
       deltaCursor: saved.deltaCursor,
@@ -364,6 +419,8 @@ export class NoteCacheService {
       tags: [...entry.tags],
       noteTags: entry.noteTags,
       resources: [...entry.resources],
+      revisionsByItem: entry.revisionsByItem ? [...entry.revisionsByItem] : [],
+      revisionsIndexed: entry.revisionsIndexed,
       itemTimestamps: [...entry.itemTimestamps],
       syncInfoUpdatedTime: entry.syncInfoUpdatedTime,
       deltaCursor: entry.deltaCursor,
@@ -526,6 +583,7 @@ export class NoteCacheService {
       if (time < listingStartedAt) entry.localChanges.delete(name);
     }
 
+    entry.revisionsIndexed = true;
     entry.lastFetched = Date.now();
     entry.deltaCursor = deltaCursor;
     this.saveEntry(sessionId, entry);
@@ -592,6 +650,25 @@ export class NoteCacheService {
               case JoplinItemType.Resource: { // 4 = Resource metadata
                 const resource = resourceMetadataOf(parsed);
                 entry.resources.set(resource.id, resource);
+                break;
+              }
+
+              case JoplinItemType.Revision: { // 13 = Revision metadata
+                const itemId = detachString(parsed.properties.item_id || '');
+                const itemType = Number(parsed.properties.item_type || 0);
+                if (itemId && itemType === JoplinItemType.Note && !(parsed.deletedTime > 0)) {
+                  const titleUpdatedTime =
+                    parsePropTimestamp(parsed.properties.item_updated_time) || parsed.updatedTime;
+                  this.upsertRevisionMeta(entry, {
+                    id: detachString(parsed.id),
+                    itemId,
+                    titleUpdatedTime,
+                    updatedTime: parsed.updatedTime,
+                    createdTime: parsed.createdTime,
+                  });
+                } else {
+                  this.removeRevisionMeta(entry, parsed.id);
+                }
                 break;
               }
 
@@ -700,7 +777,45 @@ export class NoteCacheService {
       const tagId = item.properties.tag_id || '';
       entry.noteTags = entry.noteTags.filter((link) => link.id !== item.id);
       if (noteId && tagId) entry.noteTags.push({ id: item.id, noteId, tagId });
+    } else if (item.type_ === JoplinItemType.Revision) {
+      const itemId = detachString(item.properties.item_id || '');
+      const itemType = Number(item.properties.item_type || 0);
+      if (itemId && itemType === JoplinItemType.Note && !(item.deletedTime > 0)) {
+        const titleUpdatedTime =
+          parsePropTimestamp(item.properties.item_updated_time) || item.updatedTime;
+        this.upsertRevisionMeta(entry, {
+          id: detachString(item.id),
+          itemId,
+          titleUpdatedTime,
+          updatedTime: item.updatedTime,
+          createdTime: item.createdTime,
+        });
+      }
     }
+  }
+
+  private upsertRevisionMeta(entry: CacheEntry, meta: NoteRevisionMeta): void {
+    const owners = (entry.revisionOwners ??= new Map<string, string>());
+    const byItem = (entry.revisionsByItem ??= new Map<string, NoteRevisionMeta[]>());
+    const prevOwner = owners.get(meta.id);
+    if (prevOwner && prevOwner !== meta.itemId) {
+      this.removeRevisionMeta(entry, meta.id);
+    }
+    owners.set(meta.id, meta.itemId);
+    const list = (byItem.get(meta.itemId) ?? []).filter((r) => r.id !== meta.id);
+    list.push(meta);
+    byItem.set(meta.itemId, list);
+  }
+
+  private removeRevisionMeta(entry: CacheEntry, revId: string): void {
+    const owner = entry.revisionOwners?.get(revId);
+    if (!owner) return;
+    entry.revisionOwners?.delete(revId);
+    const list = entry.revisionsByItem?.get(owner);
+    if (!list) return;
+    const next = list.filter((r) => r.id !== revId);
+    if (next.length === 0) entry.revisionsByItem?.delete(owner);
+    else entry.revisionsByItem?.set(owner, next);
   }
 
   /**
@@ -719,6 +834,7 @@ export class NoteCacheService {
     entry.notes.delete(id);
     entry.tags.delete(id);
     entry.resources.delete(id);
+    this.removeRevisionMeta(entry, id);
     entry.noteTags = entry.noteTags.filter((link) => link.id !== id);
     entry.encryptedItemIds.delete(id);
     entry.masterKeyIds.delete(id);
@@ -978,6 +1094,9 @@ export class NoteCacheService {
       .filter((t): t is RawJoplinItem => Boolean(t))
       .map((t) => ({ id: t.id, title: tagTitle(t) }));
 
+    const notebookPath = this.notebookPathOf(entry, note.parentId);
+    const backlinks = this.backlinksToNote(entry, noteId);
+
     return {
       id: note.id,
       title: note.title,
@@ -991,6 +1110,8 @@ export class NoteCacheService {
       deletedTime: effectiveDeletedTime,
       notebookId: note.parentId || '',
       notebookTitle: notebook?.title || '',
+      notebookPath,
+      backlinks,
       isTodo: note.isTodo,
       todoCompleted: Boolean(note.todoCompleted),
       todoDue: note.todoDue,
@@ -1076,7 +1197,8 @@ export class NoteCacheService {
     const excludedNotebookIds =
       parsed.excludedNotebooks.length > 0 ? this.notebooksMatching(entry, parsed.excludedNotebooks) : null;
 
-    const needsTags = parsed.tags.length > 0 || parsed.excludedTags.length > 0;
+    const needsTags =
+      parsed.tags.length > 0 || parsed.excludedTags.length > 0 || parsed.tagNone !== undefined;
     const tagTitlesByNote = new Map<string, string[]>();
     if (needsTags) {
       for (const link of entry.noteTags) {
@@ -1105,12 +1227,29 @@ export class NoteCacheService {
       if (parsed.type === 'note' && isTodo) continue;
       if (parsed.completed !== undefined && (!isTodo || Boolean(note.todoCompleted) !== parsed.completed)) continue;
 
+      if (!matchesDateFilters(note.createdTime, parsed.createdFilters)) continue;
+      if (!matchesDateFilters(note.updatedTime, parsed.updatedFilters)) continue;
+
+      if (parsed.sourceUrls.length > 0 || parsed.excludedSourceUrls.length > 0) {
+        const sourceUrlLower = (note.properties.source_url || '').toLowerCase();
+        const matchesSource = (pat: string) =>
+          pat.includes('*') ? matchesNamePattern(sourceUrlLower, pat) : sourceUrlLower.includes(pat);
+        if (parsed.sourceUrls.length > 0 && (!sourceUrlLower || !parsed.sourceUrls.every(matchesSource))) {
+          continue;
+        }
+        if (parsed.excludedSourceUrls.length > 0 && sourceUrlLower && parsed.excludedSourceUrls.some(matchesSource)) {
+          continue;
+        }
+      }
+
       const parentId = note.parentId || '';
       if (notebookFilter && !notebookFilter.has(parentId)) continue;
       if (excludedNotebookIds && excludedNotebookIds.has(parentId)) continue;
 
       if (needsTags) {
         const noteTagTitles = tagTitlesByNote.get(note.id) ?? [];
+        if (parsed.tagNone === true && noteTagTitles.length > 0) continue;
+        if (parsed.tagNone === false && noteTagTitles.length === 0) continue;
         const hasTag = (pattern: string) => noteTagTitles.some((title) => matchesNamePattern(title, pattern));
         if (!parsed.tags.every(hasTag) || parsed.excludedTags.some(hasTag)) continue;
       }
@@ -1120,6 +1259,25 @@ export class NoteCacheService {
       const body = note.body || '';
       const titleLower = title.toLowerCase();
       const bodyLower = body.toLowerCase();
+
+      const linkedResourceIds =
+        !encrypted &&
+        (parsed.hasAttachment !== undefined ||
+          parsed.hasOcr !== undefined ||
+          parsed.excludedTerms.length > 0 ||
+          parsed.terms.length > 0)
+          ? extractLinkedResourceIds(body)
+          : [];
+
+      if (parsed.hasAttachment !== undefined) {
+        const hasAtt = !encrypted && linkedResourceIds.some((id) => entry.resources.has(id));
+        if (parsed.hasAttachment !== hasAtt) continue;
+      }
+      if (parsed.hasOcr !== undefined) {
+        const hasOcrText =
+          !encrypted && linkedResourceIds.some((id) => Boolean(entry.resources.get(id)?.ocrText));
+        if (parsed.hasOcr !== hasOcrText) continue;
+      }
 
       if (parsed.excludedTerms.some((term) => titleLower.includes(term) || bodyLower.includes(term))) {
         continue;
@@ -1133,7 +1291,7 @@ export class NoteCacheService {
       let excludedByAttachment = false;
       const attachmentOcrs: Array<{ normalized: string; lower: string }> = [];
       if (!encrypted && (unmatchedTerms.length > 0 || parsed.excludedTerms.length > 0)) {
-        for (const resId of extractLinkedResourceIds(body)) {
+        for (const resId of linkedResourceIds) {
           const ocrText = entry.resources.get(resId)?.ocrText;
           if (!ocrText) continue;
           const normalized = normalizeOcrText(ocrText);
@@ -1325,6 +1483,515 @@ export class NoteCacheService {
     const entry = await this.ensureFresh(sessionId);
     const cleanId = resourceId.replace(/\.md$/i, '');
     return entry.resources.get(cleanId) || null;
+  }
+
+  private deletedNotebookIdsOf(entry: CacheEntry): Set<string> {
+    const ids = new Set<string>();
+    for (const nb of entry.notebooks.values()) {
+      if (nb.deletedTime && nb.deletedTime > 0) ids.add(nb.id);
+    }
+    return ids;
+  }
+
+  private isNoteActive(note: RawJoplinItem, deletedNotebookIds: Set<string>): boolean {
+    return (
+      !isConflictNote(note) &&
+      !(note.deletedTime && note.deletedTime > 0) &&
+      (!note.parentId || !deletedNotebookIds.has(note.parentId))
+    );
+  }
+
+  private toNoteListItem(entry: CacheEntry, n: RawJoplinItem): NoteListItem {
+    return {
+      id: n.id,
+      title: n.title,
+      parentId: n.parentId || '',
+      createdTime: n.createdTime,
+      updatedTime: n.updatedTime,
+      deletedTime: n.deletedTime || 0,
+      preview: notePreview(n.body, markupLanguageOf(n.properties), 150),
+      isTodo: n.isTodo,
+      todoCompleted: Boolean(n.todoCompleted),
+      todoDue: n.todoDue,
+      isConflict: isConflictNote(n),
+      encrypted: isEncrypted(n),
+      thumbnail: noteThumbnail(n, entry.resources),
+    };
+  }
+
+  private notebookPathOf(entry: CacheEntry, parentId: string): NotebookBreadcrumb[] {
+    if (!parentId) return [];
+    const chain: NotebookBreadcrumb[] = [];
+    const seen = new Set<string>();
+    let curId = parentId;
+    while (curId && !seen.has(curId)) {
+      seen.add(curId);
+      const nb = entry.notebooks.get(curId);
+      if (!nb) break;
+      chain.push({ id: nb.id, title: notebookTitle(nb) });
+      curId = nb.parentId || '';
+    }
+    chain.reverse();
+    return chain;
+  }
+
+  private backlinksToNote(entry: CacheEntry, targetNoteId: string): NoteBacklink[] {
+    const deletedNotebookIds = this.deletedNotebookIdsOf(entry);
+    const targetLower = targetNoteId.toLowerCase();
+    const links: NoteBacklink[] = [];
+
+    for (const other of entry.notes.values()) {
+      if (other.id === targetNoteId || isEncrypted(other) || !this.isNoteActive(other, deletedNotebookIds)) {
+        continue;
+      }
+      if (!other.body || !other.body.includes(':/')) continue;
+      if (!extractLinkedResourceIds(other.body).includes(targetLower)) continue;
+
+      const idx = other.body.toLowerCase().indexOf(`:/${targetLower}`);
+      const start = Math.max(0, idx - 60);
+      const end = Math.min(other.body.length, idx + 120);
+      const slice = other.body.slice(start, end);
+      const snippet = `${start > 0 ? '...' : ''}${notePreview(slice, markupLanguageOf(other.properties), 140)}${
+        end < other.body.length ? '...' : ''
+      }`;
+
+      links.push({
+        id: other.id,
+        title: other.title || 'Untitled Note',
+        parentId: other.parentId || '',
+        updatedTime: other.updatedTime,
+        snippet,
+      });
+    }
+
+    links.sort((a, b) => b.updatedTime - a.updatedTime);
+    return links;
+  }
+
+  public async hydratePreferences(sessionId: string, prefs: UserPreferences): Promise<HydratedPreferences> {
+    const entry = await this.ensureFresh(sessionId);
+    const deletedNotebookIds = this.deletedNotebookIdsOf(entry);
+
+    const favoriteNotes: NoteListItem[] = [];
+    for (const noteId of prefs.favoriteNoteIds) {
+      const note = entry.notes.get(noteId);
+      if (note && this.isNoteActive(note, deletedNotebookIds)) {
+        favoriteNotes.push(this.toNoteListItem(entry, note));
+      }
+    }
+
+    const noteCounts = new Map<string, number>();
+    if (prefs.favoriteNotebookIds.length > 0) {
+      for (const note of entry.notes.values()) {
+        if (this.isNoteActive(note, deletedNotebookIds)) {
+          noteCounts.set(note.parentId, (noteCounts.get(note.parentId) ?? 0) + 1);
+        }
+      }
+    }
+
+    const favoriteNotebooks: FavoriteNotebookSummary[] = [];
+    for (const nbId of prefs.favoriteNotebookIds) {
+      const nb = entry.notebooks.get(nbId);
+      if (nb && !(nb.deletedTime && nb.deletedTime > 0)) {
+        favoriteNotebooks.push({
+          id: nb.id,
+          title: notebookTitle(nb),
+          parentId: nb.parentId || '',
+          noteCount: noteCounts.get(nb.id) ?? 0,
+          encrypted: isEncrypted(nb),
+        });
+      }
+    }
+
+    return {
+      favoriteNoteIds: prefs.favoriteNoteIds,
+      favoriteNotebookIds: prefs.favoriteNotebookIds,
+      savedSearches: prefs.savedSearches,
+      recentReads: prefs.recentReads,
+      scratchpad: prefs.scratchpad,
+      favoriteNotes,
+      favoriteNotebooks,
+    };
+  }
+
+  public async getRecentNotes(
+    sessionId: string,
+    recentReads: RecentReadEntry[],
+    limit = 50
+  ): Promise<RecentNotesResponse> {
+    const entry = await this.ensureFresh(sessionId);
+    const deletedNotebookIds = this.deletedNotebookIdsOf(entry);
+    const capped = Math.min(Math.max(1, limit), 100);
+
+    const recentRead: RecentReadNote[] = [];
+    for (const r of recentReads) {
+      if (recentRead.length >= capped) break;
+      const note = entry.notes.get(r.noteId);
+      if (note && this.isNoteActive(note, deletedNotebookIds)) {
+        recentRead.push({
+          ...this.toNoteListItem(entry, note),
+          readAt: r.readAt,
+        });
+      }
+    }
+
+    const activeNotes: RawJoplinItem[] = [];
+    for (const note of entry.notes.values()) {
+      if (this.isNoteActive(note, deletedNotebookIds)) activeNotes.push(note);
+    }
+    activeNotes.sort((a, b) => b.createdTime - a.createdTime || b.updatedTime - a.updatedTime);
+
+    const recentCreated = activeNotes.slice(0, capped).map((n) => this.toNoteListItem(entry, n));
+    return { recentRead, recentCreated };
+  }
+
+  public async getNoteAttachments(sessionId: string, noteId: string): Promise<NoteAttachment[] | null> {
+    const entry = await this.ensureFresh(sessionId);
+    const note = entry.notes.get(noteId);
+    if (!note) return null;
+    if (isEncrypted(note) || !note.body) return [];
+
+    const attachments: NoteAttachment[] = [];
+    for (const resId of extractLinkedResourceIds(note.body)) {
+      const res = entry.resources.get(resId);
+      if (!res) continue;
+      attachments.push({
+        id: res.id,
+        title: res.title,
+        mime: res.mime,
+        filename: res.filename,
+        fileExtension: res.fileExtension,
+        size: res.size,
+        updatedTime: res.updatedTime,
+        ocrText: res.ocrText,
+        kind: attachmentKindOf(res.mime, res.filename || res.title),
+      });
+    }
+    return attachments;
+  }
+
+  private async ensureRevisionsIndexed(sessionId: string, entry: CacheEntry): Promise<void> {
+    if (entry.revisionsIndexed) return;
+    const owners = (entry.revisionOwners ??= new Map<string, string>());
+    entry.revisionsByItem ??= new Map<string, NoteRevisionMeta[]>();
+
+    const knownNoteTagIds = new Set(entry.noteTags.map((l) => l.id));
+    const unknownItemNames: string[] = [];
+    for (const name of entry.itemTimestamps.keys()) {
+      if (!name.endsWith('.md')) continue;
+      const id = name.replace(/\.md$/i, '');
+      if (
+        entry.notes.has(id) ||
+        entry.notebooks.has(id) ||
+        entry.tags.has(id) ||
+        entry.resources.has(id) ||
+        entry.masterKeyIds.has(id) ||
+        entry.encryptedItemIds.has(id) ||
+        knownNoteTagIds.has(id) ||
+        owners.has(id)
+      ) {
+        continue;
+      }
+      unknownItemNames.push(name);
+    }
+
+    const batchSize = 10;
+    for (let i = 0; i < unknownItemNames.length; i += batchSize) {
+      const batch = unknownItemNames.slice(i, i + batchSize);
+      await Promise.all(
+        batch.map(async (itemName) => {
+          try {
+            const raw = await joplinApi.getItemContent(sessionId, itemName);
+            const parsed = deserialize(raw, itemName);
+            if (parsed.type_ === JoplinItemType.Revision) {
+              const itemId = detachString(parsed.properties.item_id || '');
+              const itemType = Number(parsed.properties.item_type || 0);
+              if (itemId && itemType === JoplinItemType.Note && !(parsed.deletedTime > 0)) {
+                const titleUpdatedTime =
+                  parsePropTimestamp(parsed.properties.item_updated_time) || parsed.updatedTime;
+                this.upsertRevisionMeta(entry, {
+                  id: detachString(parsed.id),
+                  itemId,
+                  titleUpdatedTime,
+                  updatedTime: parsed.updatedTime,
+                  createdTime: parsed.createdTime,
+                });
+              }
+            }
+          } catch {
+            // Skip unreadable internal items
+          }
+        })
+      );
+    }
+
+    entry.revisionsIndexed = true;
+    this.saveEntry(sessionId, entry);
+  }
+
+  public async getNoteRevisions(sessionId: string, noteId: string): Promise<NoteRevisionMeta[] | null> {
+    const entry = await this.ensureFresh(sessionId);
+    if (!entry.notes.has(noteId)) return null;
+    await this.ensureRevisionsIndexed(sessionId, entry);
+    const list = entry.revisionsByItem?.get(noteId) ?? [];
+    return [...list].sort(
+      (a, b) => b.titleUpdatedTime - a.titleUpdatedTime || b.updatedTime - a.updatedTime
+    );
+  }
+
+  public async getNoteRevisionDetail(
+    sessionId: string,
+    noteId: string,
+    revId: string
+  ): Promise<NoteRevisionDetail | null> {
+    const entry = await this.ensureFresh(sessionId);
+    const note = entry.notes.get(noteId);
+    if (!note || isEncrypted(note)) return null;
+    await this.ensureRevisionsIndexed(sessionId, entry);
+    const metas = entry.revisionsByItem?.get(noteId) ?? [];
+    const targetMeta = metas.find((m) => m.id === revId);
+    if (!targetMeta) return null;
+
+    const ordered = [...metas].sort(
+      (a, b) => a.titleUpdatedTime - b.titleUpdatedTime || a.updatedTime - b.updatedTime || a.id.localeCompare(b.id)
+    );
+    const targetIdx = ordered.findIndex((m) => m.id === revId);
+    const relevant = ordered.slice(0, targetIdx + 1);
+
+    const records: RevisionDiffRecord[] = [];
+    const batchSize = 10;
+    for (let i = 0; i < relevant.length; i += batchSize) {
+      const batch = relevant.slice(i, i + batchSize);
+      const parsedBatch = await Promise.all(
+        batch.map(async (meta) => {
+          const raw = await joplinApi.getItemContent(sessionId, `${meta.id}.md`);
+          const parsed = deserialize(raw, `${meta.id}.md`);
+          if (parsed.properties.encryption_applied === '1') {
+            return null;
+          }
+          return {
+            id: parsed.id,
+            parentId: parsed.parentId || '',
+            updatedTime: parsed.updatedTime,
+            titleUpdatedTime:
+              parsePropTimestamp(parsed.properties.item_updated_time) || parsed.updatedTime,
+            titleDiff: parsed.properties.title_diff || '',
+            bodyDiff: parsed.properties.body_diff || '',
+          };
+        })
+      );
+      for (const rec of parsedBatch) {
+        if (rec) records.push(rec);
+      }
+    }
+
+    const reconstructed = reconstructRevisionContent(records, revId);
+    if (!reconstructed) return null;
+
+    return {
+      id: targetMeta.id,
+      itemId: noteId,
+      title: reconstructed.title,
+      body: reconstructed.body,
+      updatedTime: targetMeta.updatedTime,
+      createdTime: targetMeta.createdTime,
+    };
+  }
+
+  public async getAllTasks(sessionId: string): Promise<TasksResponse> {
+    const entry = await this.ensureFresh(sessionId);
+    const deletedNotebookIds = this.deletedNotebookIdsOf(entry);
+
+    const todoNotes: TodoTaskItem[] = [];
+    const inlineTasks: InlineTaskItem[] = [];
+
+    for (const note of entry.notes.values()) {
+      if (!this.isNoteActive(note, deletedNotebookIds)) continue;
+      const nb = note.parentId ? entry.notebooks.get(note.parentId) : null;
+      const nbTitle = nb ? notebookTitle(nb) : '';
+
+      if (note.isTodo) {
+        todoNotes.push({
+          ...this.toNoteListItem(entry, note),
+          notebookTitle: nbTitle,
+        });
+      }
+
+      if (!isEncrypted(note) && markupLanguageOf(note.properties) !== 2 && note.body) {
+        for (const t of extractInlineTasks(note.body)) {
+          inlineTasks.push({
+            noteId: note.id,
+            noteTitle: note.title || 'Untitled Note',
+            parentId: note.parentId || '',
+            notebookTitle: nbTitle,
+            line: t.line,
+            column: t.column,
+            text: t.text,
+            checked: t.checked,
+            updatedTime: note.updatedTime,
+          });
+        }
+      }
+    }
+
+    todoNotes.sort((a, b) => {
+      if (Boolean(a.todoCompleted) !== Boolean(b.todoCompleted)) return a.todoCompleted ? 1 : -1;
+      if (!a.todoCompleted && a.todoDue && b.todoDue) return a.todoDue - b.todoDue;
+      if (!a.todoCompleted && Boolean(a.todoDue) !== Boolean(b.todoDue)) return a.todoDue ? -1 : 1;
+      return b.updatedTime - a.updatedTime;
+    });
+    inlineTasks.sort((a, b) => {
+      if (a.checked !== b.checked) return a.checked ? 1 : -1;
+      return b.updatedTime - a.updatedTime || a.line - b.line;
+    });
+
+    return { todoNotes, inlineTasks };
+  }
+
+  public async getHygieneReport(sessionId: string): Promise<HygieneReport> {
+    const entry = await this.ensureFresh(sessionId);
+    const deletedNotebookIds = this.deletedNotebookIdsOf(entry);
+
+    const taggedNoteIds = new Set<string>();
+    for (const link of entry.noteTags) taggedNoteIds.add(link.noteId);
+
+    const activeNotes: RawJoplinItem[] = [];
+    for (const note of entry.notes.values()) {
+      if (this.isNoteActive(note, deletedNotebookIds)) activeNotes.push(note);
+    }
+
+    const hygieneItem = (n: RawJoplinItem): HygieneNoteItem => {
+      const nb = n.parentId ? entry.notebooks.get(n.parentId) : null;
+      const preview = notePreview(n.body, markupLanguageOf(n.properties), 150);
+      return {
+        ...this.toNoteListItem(entry, n),
+        notebookTitle: nb ? notebookTitle(nb) : '',
+        previewLength: n.body.trim().length || preview.length,
+      };
+    };
+
+    // 1. Empty notes (no body text & unencrypted)
+    const emptyNotes = activeNotes
+      .filter((n) => !isEncrypted(n) && !n.body.trim())
+      .sort((a, b) => b.updatedTime - a.updatedTime)
+      .slice(0, 200)
+      .map(hygieneItem);
+
+    // 2. Untagged notes
+    const untaggedNotes = activeNotes
+      .filter((n) => !taggedNoteIds.has(n.id))
+      .sort((a, b) => b.updatedTime - a.updatedTime)
+      .slice(0, 300)
+      .map(hygieneItem);
+
+    // 3. Duplicate clusters (exact normalized title + similar non-empty body)
+    const duplicateClusters: DuplicateCluster[] = [];
+    const clusteredNoteIds = new Set<string>();
+
+    const byNormalizedTitle = new Map<string, RawJoplinItem[]>();
+    for (const n of activeNotes) {
+      if (isEncrypted(n)) continue;
+      const norm = n.title.trim().toLowerCase().replace(/\s+/g, ' ');
+      if (norm.length < 2 || norm === 'untitled' || norm === 'untitled note') continue;
+      const group = byNormalizedTitle.get(norm) ?? [];
+      group.push(n);
+      byNormalizedTitle.set(norm, group);
+    }
+
+    for (const [normTitle, group] of byNormalizedTitle) {
+      if (group.length < 2) continue;
+      group.sort((a, b) => b.updatedTime - a.updatedTime);
+      for (const n of group) clusteredNoteIds.add(n.id);
+      duplicateClusters.push({
+        id: `title-${group[0].id}`,
+        reason: 'exact-title',
+        score: 1,
+        notes: group.map(hygieneItem),
+      });
+      void normTitle;
+    }
+
+    // Near-duplicate content using inverted token index on up to 1500 non-empty notes
+    const candidates = activeNotes
+      .filter((n) => !isEncrypted(n) && !clusteredNoteIds.has(n.id) && n.body.trim().length >= 80)
+      .sort((a, b) => b.updatedTime - a.updatedTime)
+      .slice(0, 1500);
+
+    const tokenSets: Array<Set<string>> = [];
+    const inverted = new Map<string, number[]>();
+
+    for (let idx = 0; idx < candidates.length; idx++) {
+      const plain = notePreview(candidates[idx].body, markupLanguageOf(candidates[idx].properties), 1200).toLowerCase();
+      const rawTokens = plain.match(/[a-z0-9]{3,}|[\u4e00-\u9fff]{2}/g) ?? [];
+      const unique = new Set(rawTokens.slice(0, 120));
+      tokenSets.push(unique);
+      if (unique.size < 8) continue;
+      for (const tok of unique) {
+        const list = inverted.get(tok);
+        if (list) list.push(idx);
+        else inverted.set(tok, [idx]);
+      }
+    }
+
+    const parent = candidates.map((_, i) => i);
+    const find = (x: number): number => (parent[x] === x ? x : (parent[x] = find(parent[x])));
+    const unite = (a: number, b: number) => {
+      const ra = find(a);
+      const rb = find(b);
+      if (ra !== rb) parent[rb] = ra;
+    };
+    const maxScoreByRoot = new Map<number, number>();
+
+    const overlapCounts = new Map<number, number>();
+    for (let i = 0; i < candidates.length; i++) {
+      const setA = tokenSets[i];
+      if (setA.size < 8) continue;
+      overlapCounts.clear();
+      for (const tok of setA) {
+        const postings = inverted.get(tok);
+        if (!postings || postings.length > Math.max(50, candidates.length * 0.25)) continue;
+        for (const j of postings) {
+          if (j <= i) continue;
+          overlapCounts.set(j, (overlapCounts.get(j) ?? 0) + 1);
+        }
+      }
+      for (const [j, overlap] of overlapCounts) {
+        const setB = tokenSets[j];
+        const union = setA.size + setB.size - overlap;
+        const jaccard = union > 0 ? overlap / union : 0;
+        if (jaccard >= 0.72) {
+          unite(i, j);
+          const root = find(i);
+          maxScoreByRoot.set(root, Math.max(maxScoreByRoot.get(root) ?? 0, jaccard));
+        }
+      }
+    }
+
+    const nearGroups = new Map<number, RawJoplinItem[]>();
+    for (let i = 0; i < candidates.length; i++) {
+      const root = find(i);
+      const arr = nearGroups.get(root) ?? [];
+      arr.push(candidates[i]);
+      nearGroups.set(root, arr);
+    }
+
+    for (const [root, group] of nearGroups) {
+      if (group.length < 2) continue;
+      group.sort((a, b) => b.updatedTime - a.updatedTime);
+      duplicateClusters.push({
+        id: `content-${group[0].id}`,
+        reason: 'similar-content',
+        score: Math.round((maxScoreByRoot.get(root) ?? 0.75) * 100) / 100,
+        notes: group.map(hygieneItem),
+      });
+    }
+
+    duplicateClusters.sort((a, b) => b.notes.length - a.notes.length || b.score - a.score);
+    return {
+      duplicateClusters: duplicateClusters.slice(0, 50),
+      emptyNotes,
+      untaggedNotes,
+    };
   }
 }
 

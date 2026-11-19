@@ -4,6 +4,7 @@ import { Notebook, NoteListItem as NoteListItemType, Tag } from "@/lib/types";
 import { jsonResponse, mockFetch } from "@/test/fetch-mock";
 import { renderWithProviders } from "@/test/render";
 import { NOTE_LIST_PAGE_SIZE, NoteList } from "./NoteList";
+import { NOTE_LIST_VIEW_STORAGE_KEY } from "@/lib/ui-constants";
 
 const nbId = (c: string) => c.repeat(32);
 const noteId = (n: number) => n.toString(16).padStart(32, "0");
@@ -193,5 +194,72 @@ describe("NoteList bulk selection", () => {
     expect(within(bar).getByRole("button", { name: "Move to…" })).toBeTruthy();
     expect(within(bar).queryByRole("button", { name: "Add tag…" })).toBeNull();
     expect(within(bar).getByRole("button", { name: "Move to trash" })).toBeTruthy();
+  });
+});
+
+describe("NoteList collection views & favorites", () => {
+  it("switches between List, Gallery, Table, and Board views and persists layout choice", () => {
+    localStorage.clear();
+    mockFetch((c) => (c.path === "/api/tags" ? jsonResponse(tags) : undefined));
+    const notes: NoteListItemType[] = [
+      ...makeNotes(2),
+      {
+        id: noteId(3),
+        title: "Pay invoice",
+        preview: "Due soon",
+        createdTime: 1_700_000_000_000,
+        updatedTime: 1_700_000_000_000,
+        parentId: nbId("1"),
+        isTodo: true,
+        todoCompleted: false,
+      },
+      {
+        id: noteId(4),
+        title: "Book flight",
+        preview: "Done",
+        createdTime: 1_700_000_000_000,
+        updatedTime: 1_700_000_000_000,
+        parentId: nbId("1"),
+        isTodo: true,
+        todoCompleted: true,
+      },
+    ];
+    const onSelectNote = vi.fn();
+    const onToggleTodo = vi.fn();
+
+    renderWithProviders(
+      <NoteList
+        notes={notes}
+        notebooks={notebooks}
+        onSelectNote={onSelectNote}
+        onToggleTodo={onToggleTodo}
+        favoriteNoteIds={new Set([notes[0].id])}
+      />
+    );
+
+    // Gallery view
+    fireEvent.click(screen.getByRole("button", { name: "Gallery view" }));
+    expect(localStorage.getItem(NOTE_LIST_VIEW_STORAGE_KEY)).toBe("gallery");
+    expect(screen.getByText("Pay invoice")).toBeTruthy();
+
+    // Table view
+    fireEvent.click(screen.getByRole("button", { name: "Table view" }));
+    expect(localStorage.getItem(NOTE_LIST_VIEW_STORAGE_KEY)).toBe("table");
+    expect(screen.getByRole("columnheader", { name: "Title" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "Type" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "Updated" })).toBeTruthy();
+
+    // Board view groups into Open To-dos, Completed, and Notes
+    fireEvent.click(screen.getByRole("button", { name: "Board view" }));
+    expect(localStorage.getItem(NOTE_LIST_VIEW_STORAGE_KEY)).toBe("board");
+    expect(screen.getByRole("heading", { level: 4, name: "Open To-dos" })).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 4, name: "Completed" })).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 4, name: "Notes" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle Pay invoice" }));
+    expect(onToggleTodo).toHaveBeenCalledWith(notes[2].id, true);
+
+    fireEvent.click(screen.getByRole("button", { name: "List view" }));
+    expect(localStorage.getItem(NOTE_LIST_VIEW_STORAGE_KEY)).toBe("list");
   });
 });

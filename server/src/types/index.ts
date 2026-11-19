@@ -96,6 +96,19 @@ export interface NoteListItem {
   thumbnail?: { resourceId: string; kind: 'image' | 'pdf' };
 }
 
+export interface NotebookBreadcrumb {
+  id: string;
+  title: string;
+}
+
+export interface NoteBacklink {
+  id: string;
+  title: string;
+  parentId: string;
+  updatedTime: number;
+  snippet: string;
+}
+
 /**
  * Full detail of a note including parent notebook and linked tags
  */
@@ -109,6 +122,10 @@ export interface NoteDetail {
   notebook: { id: string; title: string } | null;
   notebookId: string;
   notebookTitle: string;
+  /** Clickable ancestor chain from root notebook down to parent notebook */
+  notebookPath?: NotebookBreadcrumb[];
+  /** Active notes containing a `:/<id>` link pointing to this note */
+  backlinks?: NoteBacklink[];
   tags: Array<{ id: string; title: string }>;
   createdTime: number;
   updatedTime: number;
@@ -383,7 +400,163 @@ export interface OrganizeUndoResponse {
   canUndo: boolean;
 }
 
+export interface SavedSearch {
+  id: string;
+  name: string;
+  query: string;
+  createdAt: number;
+}
+
+export interface RecentReadEntry {
+  noteId: string;
+  readAt: number;
+}
+
+export interface UserPreferences {
+  version: 1;
+  favoriteNoteIds: string[];
+  favoriteNotebookIds: string[];
+  savedSearches: SavedSearch[];
+  recentReads: RecentReadEntry[];
+  scratchpad: string;
+}
+
+export interface FavoriteNotebookSummary {
+  id: string;
+  title: string;
+  parentId: string;
+  noteCount: number;
+  encrypted: boolean;
+}
+
+export interface HydratedPreferences {
+  favoriteNoteIds: string[];
+  favoriteNotebookIds: string[];
+  savedSearches: SavedSearch[];
+  recentReads: RecentReadEntry[];
+  scratchpad: string;
+  favoriteNotes: NoteListItem[];
+  favoriteNotebooks: FavoriteNotebookSummary[];
+}
+
+export interface RecentReadNote extends NoteListItem {
+  readAt: number;
+}
+
+export interface RecentNotesResponse {
+  recentRead: RecentReadNote[];
+  recentCreated: NoteListItem[];
+}
+
+export type NoteAttachmentKind = 'image' | 'pdf' | 'audio' | 'video' | 'file';
+
+export interface NoteAttachment {
+  id: string;
+  title: string;
+  mime: string;
+  filename: string;
+  fileExtension: string;
+  size: number;
+  updatedTime: number;
+  ocrText: string;
+  kind: NoteAttachmentKind;
+}
+
+export interface NoteRevisionMeta {
+  id: string;
+  itemId: string;
+  titleUpdatedTime: number;
+  updatedTime: number;
+  createdTime: number;
+}
+
+export interface NoteRevisionDetail {
+  id: string;
+  itemId: string;
+  title: string;
+  body: string;
+  updatedTime: number;
+  createdTime: number;
+}
+
+export interface TodoTaskItem extends NoteListItem {
+  notebookTitle: string;
+}
+
+export interface InlineTaskItem {
+  noteId: string;
+  noteTitle: string;
+  parentId: string;
+  notebookTitle: string;
+  line: number;
+  column: number;
+  text: string;
+  checked: boolean;
+  updatedTime: number;
+}
+
+export interface TasksResponse {
+  todoNotes: TodoTaskItem[];
+  inlineTasks: InlineTaskItem[];
+}
+
+export interface HygieneNoteItem extends NoteListItem {
+  notebookTitle: string;
+  previewLength?: number;
+}
+
+export interface DuplicateCluster {
+  id: string;
+  reason: 'exact-title' | 'similar-content';
+  score: number;
+  notes: HygieneNoteItem[];
+}
+
+export interface HygieneReport {
+  duplicateClusters: DuplicateCluster[];
+  emptyNotes: HygieneNoteItem[];
+  untaggedNotes: HygieneNoteItem[];
+}
+
+export interface AiFeatureStatus {
+  enabled: boolean;
+  model?: string;
+}
+
+export interface AskNotesCitation {
+  id: string;
+  title: string;
+  notebookTitle: string;
+  updatedTime: number;
+  excerpt: string;
+}
+
+export interface AskNotesResponse {
+  answer: string;
+  citations: AskNotesCitation[];
+  usage?: OrganizeUsage;
+}
+
+export type NoteAssistAction = 'summarize' | 'action-items' | 'suggest-tags' | 'cleanup';
+
+export interface NoteAssistResponse {
+  result: string;
+  tags?: string[];
+  usage?: OrganizeUsage;
+}
+
+export interface ClipResponse {
+  note: NoteDetail;
+  extractedTitle: string;
+  siteName?: string;
+}
+
+export interface EmailIngestResponse {
+  note: NoteDetail;
+}
+
 import type { AppConfig } from '../config.js';
+import type { PreferencesStore } from '../services/preferences-store.js';
 import type { TwoFactorStore } from '../services/two-factor-store.js';
 
 export interface AppAuthState {
@@ -401,6 +574,7 @@ declare global {
       userEmail?: string;
       appConfig?: AppConfig;
       twoFactorStore?: TwoFactorStore;
+      preferencesStore?: PreferencesStore;
       authState?: AppAuthState;
     }
   }

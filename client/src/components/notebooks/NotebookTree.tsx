@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Notebook } from "@/lib/types";
 import { collectNotebookIds, findNotebookAncestors } from "@/lib/notebooks";
-import { ChevronRight, Folder, FolderInput, FolderOpen, FolderPlus, Lock, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import { ChevronRight, Folder, FolderInput, FolderOpen, FolderPlus, Lock, MoreHorizontal, Pencil, Star, Trash2 } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -50,9 +50,11 @@ interface NotebookTreeProps {
   selectedNotebookId?: string | null;
   /** Notebook containing the currently open note, so its ancestors expand even outside its folder */
   openNoteNotebookId?: string | null;
+  favoriteNotebookIds?: ReadonlySet<string>;
   onSelectNotebook: (id: string) => void;
   /** Enables the per-notebook actions menu (never shown for encrypted notebooks, which can't be changed here) */
   onNotebookAction?: (action: NotebookAction, notebook: Notebook) => void;
+  onToggleFavoriteNotebook?: (notebook: Notebook) => void;
   depth?: number;
 }
 
@@ -60,9 +62,11 @@ interface NotebookItemProps {
   notebook: Notebook;
   selectedNotebookId?: string | null;
   expandedIds: ReadonlySet<string>;
+  favoriteNotebookIds?: ReadonlySet<string>;
   onToggleExpand: (id: string) => void;
   onSelectNotebook: (id: string) => void;
   onNotebookAction?: (action: NotebookAction, notebook: Notebook) => void;
+  onToggleFavoriteNotebook?: (notebook: Notebook) => void;
   depth: number;
 }
 
@@ -70,15 +74,19 @@ function NotebookItem({
   notebook,
   selectedNotebookId,
   expandedIds,
+  favoriteNotebookIds,
   onToggleExpand,
   onSelectNotebook,
   onNotebookAction,
+  onToggleFavoriteNotebook,
   depth,
 }: NotebookItemProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const hasChildren = Boolean(notebook.children && notebook.children.length > 0);
   const isSelected = selectedNotebookId === notebook.id;
   const isOpen = expandedIds.has(notebook.id);
+  const isFavorite = Boolean(favoriteNotebookIds?.has(notebook.id));
+  const hasMenuActions = Boolean((onNotebookAction || onToggleFavoriteNotebook) && !notebook.encrypted);
 
   const toggleOpen = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -142,6 +150,9 @@ function NotebookItem({
             )}
           />
           <span className={cn("truncate", notebook.encrypted && "italic")}>{title}</span>
+          {isFavorite && (
+            <Star className="h-3 w-3 shrink-0 fill-amber-500 text-amber-500" aria-hidden="true" />
+          )}
           {hasCount && (
             <span className="sr-only">
               , {notebook.noteCount} {notebook.noteCount === 1 ? "note" : "notes"}
@@ -149,7 +160,7 @@ function NotebookItem({
           )}
         </button>
 
-        {onNotebookAction && !notebook.encrypted && (
+        {hasMenuActions && (
           <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
             <DropdownMenuTrigger asChild>
               <button
@@ -165,26 +176,40 @@ function NotebookItem({
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="w-48" onClick={(e) => e.stopPropagation()}>
-              <DropdownMenuItem onClick={() => onNotebookAction("create-child", notebook)}>
-                <FolderPlus className="h-4 w-4" />
-                New sub-notebook
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => onNotebookAction("rename", notebook)}>
-                <Pencil className="h-4 w-4" />
-                Rename
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => onNotebookAction("move", notebook)}>
-                <FolderInput className="h-4 w-4" />
-                Move to…
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                onClick={() => onNotebookAction("delete", notebook)}
-                className="text-destructive focus:text-destructive"
-              >
-                <Trash2 className="h-4 w-4" />
-                Move to trash
-              </DropdownMenuItem>
+              {onNotebookAction && (
+                <>
+                  <DropdownMenuItem onClick={() => onNotebookAction("create-child", notebook)}>
+                    <FolderPlus className="h-4 w-4" />
+                    New sub-notebook
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => onNotebookAction("rename", notebook)}>
+                    <Pencil className="h-4 w-4" />
+                    Rename
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => onNotebookAction("move", notebook)}>
+                    <FolderInput className="h-4 w-4" />
+                    Move to…
+                  </DropdownMenuItem>
+                </>
+              )}
+              {onToggleFavoriteNotebook && (
+                <DropdownMenuItem onClick={() => onToggleFavoriteNotebook(notebook)}>
+                  <Star className={cn("h-4 w-4", isFavorite && "fill-amber-500 text-amber-500")} />
+                  {isFavorite ? "Remove from shortcuts" : "Pin to shortcuts"}
+                </DropdownMenuItem>
+              )}
+              {onNotebookAction && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={() => onNotebookAction("delete", notebook)}
+                    className="text-destructive focus:text-destructive"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    Move to trash
+                  </DropdownMenuItem>
+                </>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         )}
@@ -214,9 +239,11 @@ function NotebookItem({
               notebook={child}
               selectedNotebookId={selectedNotebookId}
               expandedIds={expandedIds}
+              favoriteNotebookIds={favoriteNotebookIds}
               onToggleExpand={onToggleExpand}
               onSelectNotebook={onSelectNotebook}
               onNotebookAction={onNotebookAction}
+              onToggleFavoriteNotebook={onToggleFavoriteNotebook}
               depth={depth + 1}
             />
           ))}
@@ -234,8 +261,10 @@ export function NotebookTree({
   notebooks,
   selectedNotebookId,
   openNoteNotebookId,
+  favoriteNotebookIds,
   onSelectNotebook,
   onNotebookAction,
+  onToggleFavoriteNotebook,
   depth = 0,
 }: NotebookTreeProps) {
   const [persistedExpanded, setPersistedExpanded] = useState<Set<string>>(loadExpandedNotebooks);
@@ -335,9 +364,11 @@ export function NotebookTree({
           notebook={notebook}
           selectedNotebookId={selectedNotebookId}
           expandedIds={expandedIds}
+          favoriteNotebookIds={favoriteNotebookIds}
           onToggleExpand={handleToggleExpand}
           onSelectNotebook={onSelectNotebook}
           onNotebookAction={onNotebookAction}
+          onToggleFavoriteNotebook={onToggleFavoriteNotebook}
           depth={depth}
         />
       ))}

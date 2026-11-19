@@ -1,19 +1,31 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NoteListItem as NoteListItemType, Notebook } from "@/lib/types";
 import { NoteListItem } from "./NoteListItem";
+import { getResourceUrl } from "@/lib/api";
+import { formatRelativeTime, noteDisplayTitle } from "@/lib/format";
+import { NOTE_LIST_VIEW_STORAGE_KEY } from "@/lib/ui-constants";
+import { cn } from "@/lib/utils";
+import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   ArrowDownUp,
+  Check,
   CheckSquare,
+  Columns3,
   FileQuestion,
   FileText,
   FolderInput,
+  LayoutGrid,
+  LayoutList,
   ListChecks,
   Loader2,
   Plus,
   Search,
   Sparkles,
+  Square,
+  Star,
+  Table2,
   Tag as TagIcon,
   Trash2,
 } from "lucide-react";
@@ -78,10 +90,30 @@ interface NoteListProps {
   onAutoOrganize?: (notes: NoteListItemType[], defaultExcludedNotebookId: string | null) => void;
   isBulkPending?: boolean;
   bulkProgress?: BulkUpdateProgress | null;
+  favoriteNoteIds?: ReadonlySet<string>;
 }
 
 type SortField = "updated" | "created" | "title";
 type SortOrder = "asc" | "desc";
+type CollectionViewMode = "list" | "gallery" | "table" | "board";
+
+function loadViewMode(): CollectionViewMode {
+  try {
+    const raw = localStorage.getItem(NOTE_LIST_VIEW_STORAGE_KEY);
+    if (raw === "list" || raw === "gallery" || raw === "table" || raw === "board") return raw;
+  } catch {
+    // storage unavailable
+  }
+  return "list";
+}
+
+function saveViewMode(mode: CollectionViewMode) {
+  try {
+    localStorage.setItem(NOTE_LIST_VIEW_STORAGE_KEY, mode);
+  } catch {
+    // storage unavailable
+  }
+}
 
 const SORT_FIELD_LABELS: Record<SortField, string> = {
   updated: "Updated date",
@@ -161,9 +193,11 @@ export function NoteList({
   onAutoOrganize,
   isBulkPending = false,
   bulkProgress = null,
+  favoriteNoteIds,
 }: NoteListProps) {
   const [filterText, setFilterText] = useState("");
   const [sort, setSort] = useState<SortChoice>(loadSort);
+  const [viewMode, setViewMode] = useState<CollectionViewMode>(loadViewMode);
   const { field: sortField, order: sortOrder } = sort;
   const [renderLimit, setRenderLimit] = useState(NOTE_LIST_PAGE_SIZE);
   const [moveOpen, setMoveOpen] = useState(false);
@@ -188,6 +222,11 @@ export function NoteList({
   const updateSort = (next: SortChoice) => {
     setSort(next);
     saveSort(next);
+  };
+
+  const updateViewMode = (next: CollectionViewMode) => {
+    setViewMode(next);
+    saveViewMode(next);
   };
 
   const filteredAndSortedNotes = useMemo(() => {
@@ -438,22 +477,56 @@ export function NoteList({
           </div>
         </div>
 
-        {/* Filter input (only narrows this list; the header search covers all notes) */}
-        <div className="relative">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-          <Input
-            placeholder="Filter this list..."
-            aria-label="Filter this list"
-            value={filterText}
-            onChange={(e) => setFilterText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Escape" && filterText) {
-                e.stopPropagation();
-                setFilterText("");
-              }
-            }}
-            className="h-8 pl-8 text-xs bg-muted/40 border-border/40 focus-visible:ring-primary/70"
-          />
+        {/* Filter input & collection view switcher */}
+        <div className="flex items-center gap-1.5">
+          <div className="relative flex-1 min-w-0">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+            <Input
+              placeholder="Filter this list..."
+              aria-label="Filter this list"
+              value={filterText}
+              onChange={(e) => setFilterText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape" && filterText) {
+                  e.stopPropagation();
+                  setFilterText("");
+                }
+              }}
+              className="h-8 pl-8 text-xs bg-muted/40 border-border/40 focus-visible:ring-primary/70"
+            />
+          </div>
+
+          <div
+            role="group"
+            aria-label="Collection view mode"
+            className="inline-flex h-8 shrink-0 items-center rounded-md border border-border/50 bg-muted/30 p-0.5"
+          >
+            {(
+              [
+                { mode: "list", label: "List view", icon: LayoutList },
+                { mode: "gallery", label: "Gallery view", icon: LayoutGrid },
+                { mode: "table", label: "Table view", icon: Table2 },
+                { mode: "board", label: "Board view", icon: Columns3 },
+              ] as const
+            ).map(({ mode, label, icon: Icon }) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => updateViewMode(mode)}
+                aria-label={label}
+                aria-pressed={viewMode === mode}
+                title={label}
+                className={cn(
+                  "h-7 w-7 inline-flex items-center justify-center rounded-sm transition-colors",
+                  viewMode === mode
+                    ? "bg-background text-foreground shadow-xs"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+            ))}
+          </div>
         </div>
 
         {isSelecting && (
@@ -545,17 +618,264 @@ export function NoteList({
           </div>
         ) : (
           <div className="space-y-2 pb-6">
-            {visibleNotes.map((note) => (
-              <NoteListItem
-                key={note.id}
-                note={note}
-                isActive={!isSelecting && selectedNoteId === note.id}
-                selectionMode={isSelecting}
-                isSelected={isSelecting && selectedIds.has(note.id)}
-                onActivate={handleActivateItem}
-                onToggleTodoById={onToggleTodo ? handleToggleTodoById : undefined}
-              />
-            ))}
+            {viewMode === "list" &&
+              visibleNotes.map((note) => (
+                <NoteListItem
+                  key={note.id}
+                  note={note}
+                  isActive={!isSelecting && selectedNoteId === note.id}
+                  isFavorite={Boolean(favoriteNoteIds?.has(note.id))}
+                  selectionMode={isSelecting}
+                  isSelected={isSelecting && selectedIds.has(note.id)}
+                  onActivate={handleActivateItem}
+                  onToggleTodoById={onToggleTodo ? handleToggleTodoById : undefined}
+                />
+              ))}
+
+            {viewMode === "gallery" && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {visibleNotes.map((note) => {
+                  const itemTitle = noteDisplayTitle(note);
+                  const active = !isSelecting && selectedNoteId === note.id;
+                  const selected = isSelecting && selectedIds.has(note.id);
+                  return (
+                    <div
+                      key={note.id}
+                      role="button"
+                      tabIndex={0}
+                      aria-current={active ? "true" : undefined}
+                      onClick={(e) => {
+                        if (e.ctrlKey || e.metaKey || (isSelecting && e.shiftKey)) e.preventDefault();
+                        handleActivateItem(note.id, { shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey });
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          handleActivateItem(note.id, { shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey });
+                        }
+                      }}
+                      className={cn(
+                        "group flex flex-col justify-between rounded-xl border p-3 text-left cursor-pointer transition-colors overflow-hidden",
+                        selected
+                          ? "bg-primary/10 border-primary/50"
+                          : active
+                            ? "bg-card border-primary"
+                            : "bg-card/40 border-border/60 hover:bg-muted/60"
+                      )}
+                    >
+                      <div className="space-y-2">
+                        {note.thumbnail?.kind === "image" && !note.encrypted ? (
+                          <div className="h-24 w-full overflow-hidden rounded-lg border border-border/40 bg-muted">
+                            <img
+                              src={getResourceUrl(note.thumbnail.resourceId)}
+                              alt=""
+                              loading="lazy"
+                              className="h-full w-full object-cover"
+                            />
+                          </div>
+                        ) : null}
+                        <div className="flex items-start gap-1.5 min-w-0">
+                          {isSelecting && (
+                            <button
+                              type="button"
+                              role="checkbox"
+                              aria-checked={selected}
+                              aria-label={`Select ${itemTitle}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleActivateItem(note.id, { shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey });
+                              }}
+                              className={cn(
+                                "shrink-0 mt-0.5 flex h-4 w-4 items-center justify-center rounded-sm border",
+                                selected ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/50"
+                              )}
+                            >
+                              {selected && <Check className="h-3 w-3 stroke-[3]" />}
+                            </button>
+                          )}
+                          <h3 className="font-semibold text-xs text-foreground line-clamp-2 flex-1">{itemTitle}</h3>
+                          {favoriteNoteIds?.has(note.id) && (
+                            <Star className="h-3.5 w-3.5 fill-amber-500 text-amber-500 shrink-0" aria-hidden="true" />
+                          )}
+                        </div>
+                        <p className="text-[11px] text-muted-foreground line-clamp-2">
+                          {note.encrypted ? "End-to-end encrypted" : note.preview || "Empty note"}
+                        </p>
+                      </div>
+                      <div className="mt-2 pt-1.5 border-t border-border/40 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+                        <span className="font-mono">{formatRelativeTime(note.updatedTime || note.createdTime)}</span>
+                        {note.isTodo && (
+                          <span className={cn("font-medium", note.todoCompleted ? "text-success" : "text-warning")}>
+                            {note.todoCompleted ? "Done" : "To-do"}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {viewMode === "table" && (
+              <div className="overflow-x-auto rounded-lg border border-border">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-muted/50 text-muted-foreground font-medium border-b border-border">
+                    <tr>
+                      {isSelecting && <th className="w-7 px-2 py-2" />}
+                      <th className="px-2.5 py-2">Title</th>
+                      <th className="px-2 py-2">Type</th>
+                      <th className="px-2 py-2 text-right">Updated</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border/50">
+                    {visibleNotes.map((note) => {
+                      const itemTitle = noteDisplayTitle(note);
+                      const active = !isSelecting && selectedNoteId === note.id;
+                      const selected = isSelecting && selectedIds.has(note.id);
+                      return (
+                        <tr
+                          key={note.id}
+                          onClick={(e) => {
+                            if (e.ctrlKey || e.metaKey || (isSelecting && e.shiftKey)) e.preventDefault();
+                            handleActivateItem(note.id, { shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey });
+                          }}
+                          className={cn(
+                            "cursor-pointer transition-colors",
+                            selected ? "bg-primary/10" : active ? "bg-card font-medium" : "hover:bg-muted/40"
+                          )}
+                        >
+                          {isSelecting && (
+                            <td className="px-2 py-2">
+                              <input
+                                type="checkbox"
+                                checked={selected}
+                                aria-label={`Select ${itemTitle}`}
+                                onChange={() => undefined}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleActivateItem(note.id, { shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey });
+                                }}
+                              />
+                            </td>
+                          )}
+                          <td className="px-2.5 py-2 max-w-[160px]">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleActivateItem(note.id, { shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey });
+                              }}
+                              className="flex items-center gap-1.5 text-left w-full font-medium text-foreground truncate"
+                            >
+                              {favoriteNoteIds?.has(note.id) && (
+                                <Star className="h-3 w-3 fill-amber-500 text-amber-500 shrink-0" aria-hidden="true" />
+                              )}
+                              <span className="truncate">{itemTitle}</span>
+                            </button>
+                          </td>
+                          <td className="px-2 py-2 whitespace-nowrap">
+                            {note.isTodo ? (
+                              <Badge variant="outline" className={cn("text-[10px] px-1.5 py-0", note.todoCompleted ? "text-success border-success/30" : "text-warning border-warning/30")}>
+                                {note.todoCompleted ? "Done" : "To-do"}
+                              </Badge>
+                            ) : (
+                              <span className="text-muted-foreground">Note</span>
+                            )}
+                          </td>
+                          <td className="px-2 py-2 text-right font-mono text-[11px] text-muted-foreground whitespace-nowrap">
+                            {formatRelativeTime(note.updatedTime || note.createdTime)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {viewMode === "board" && (
+              <div className="space-y-4">
+                {(
+                  [
+                    { label: "Open To-dos", items: visibleNotes.filter((n) => n.isTodo && !n.todoCompleted) },
+                    { label: "Completed", items: visibleNotes.filter((n) => n.isTodo && n.todoCompleted) },
+                    { label: "Notes", items: visibleNotes.filter((n) => !n.isTodo) },
+                  ] as const
+                )
+                  .filter((lane) => lane.items.length > 0)
+                  .map((lane) => (
+                    <section key={lane.label} className="rounded-xl border border-border/70 bg-muted/20 p-2.5 space-y-2">
+                      <div className="flex items-center justify-between px-1">
+                        <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                          {lane.label}
+                        </h4>
+                        <Badge variant="secondary" className="text-[10px] font-mono h-4 px-1.5">
+                          {lane.items.length}
+                        </Badge>
+                      </div>
+                      <div className="space-y-1.5">
+                        {lane.items.map((note) => {
+                          const itemTitle = noteDisplayTitle(note);
+                          const active = !isSelecting && selectedNoteId === note.id;
+                          return (
+                            <div
+                              key={note.id}
+                              role="button"
+                              tabIndex={0}
+                              onClick={(e) => {
+                                handleActivateItem(note.id, { shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey });
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  handleActivateItem(note.id, { shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey });
+                                }
+                              }}
+                              className={cn(
+                                "flex items-start gap-2 rounded-lg border p-2.5 bg-background cursor-pointer transition-colors",
+                                active ? "border-primary" : "border-border/50 hover:bg-muted/50"
+                              )}
+                            >
+                              {note.isTodo && (
+                                <button
+                                  type="button"
+                                  disabled={!onToggleTodo}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    onToggleTodo?.(note.id, !note.todoCompleted);
+                                  }}
+                                  aria-label={`Toggle ${itemTitle}`}
+                                  className="mt-0.5 shrink-0"
+                                >
+                                  {note.todoCompleted ? (
+                                    <CheckSquare className="h-3.5 w-3.5 text-success" />
+                                  ) : (
+                                    <Square className="h-3.5 w-3.5 text-warning" />
+                                  )}
+                                </button>
+                              )}
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1">
+                                  <span className={cn("text-xs font-medium text-foreground truncate", note.todoCompleted && "line-through text-muted-foreground")}>
+                                    {itemTitle}
+                                  </span>
+                                  {favoriteNoteIds?.has(note.id) && (
+                                    <Star className="h-3 w-3 fill-amber-500 text-amber-500 shrink-0" aria-hidden="true" />
+                                  )}
+                                </div>
+                                {note.preview && !note.encrypted && (
+                                  <p className="text-[11px] text-muted-foreground truncate mt-0.5">{note.preview}</p>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  ))}
+              </div>
+            )}
+
             {visibleCount < filteredAndSortedNotes.length && (
               <div className="pt-2 text-center">
                 <Button

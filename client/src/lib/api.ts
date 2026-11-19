@@ -1,9 +1,19 @@
 import {
+  AiFeatureStatus,
+  AskNotesResponse,
   BatchNoteRequest,
   BatchNoteResult,
+  ClipResponse,
+  EmailIngestResponse,
+  HygieneReport,
   Notebook,
+  NoteAssistAction,
+  NoteAssistResponse,
+  NoteAttachment,
   NoteListItem,
   Note,
+  NoteRevisionDetail,
+  NoteRevisionMeta,
   OrganizeApplyItemInput,
   OrganizeApplyResponse,
   OrganizeDeleteResponse,
@@ -13,10 +23,14 @@ import {
   OrganizeRetryResponse,
   OrganizeStatus,
   OrganizeUndoResponse,
+  RecentNotesResponse,
+  SavedSearch,
   Tag,
+  TasksResponse,
   SearchResult,
   LoginResponse,
   TrashedNotebook,
+  UserPreferences,
   WriteState,
   TwoFactorStatus,
   PasskeyItem,
@@ -568,6 +582,8 @@ export async function createNote(input: {
   title?: string;
   body?: string;
   isTodo?: boolean;
+  sourceUrl?: string;
+  author?: string;
 }): Promise<Note> {
   return request<Note>("/api/notes", { method: "POST", body: JSON.stringify(input) });
 }
@@ -942,5 +958,230 @@ export async function applyOrganizeJob(
 export async function undoOrganizeJob(jobId: string): Promise<OrganizeUndoResponse> {
   return request<OrganizeUndoResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}/undo`, {
     method: "POST",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Preferences (Shortcuts, Saved Searches, Recent Reads, Scratchpad)
+// ---------------------------------------------------------------------------
+
+export const EMPTY_USER_PREFERENCES: UserPreferences = {
+  favoriteNoteIds: [],
+  favoriteNotebookIds: [],
+  savedSearches: [],
+  recentReads: [],
+  scratchpad: "",
+  favoriteNotes: [],
+  favoriteNotebooks: [],
+};
+
+function normalizePreferences(data: unknown): UserPreferences {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return EMPTY_USER_PREFERENCES;
+  }
+  const obj = data as Partial<UserPreferences>;
+  return {
+    favoriteNoteIds: Array.isArray(obj.favoriteNoteIds) ? obj.favoriteNoteIds : [],
+    favoriteNotebookIds: Array.isArray(obj.favoriteNotebookIds) ? obj.favoriteNotebookIds : [],
+    savedSearches: Array.isArray(obj.savedSearches) ? obj.savedSearches : [],
+    recentReads: Array.isArray(obj.recentReads) ? obj.recentReads : [],
+    scratchpad: typeof obj.scratchpad === "string" ? obj.scratchpad : "",
+    favoriteNotes: Array.isArray(obj.favoriteNotes) ? obj.favoriteNotes : [],
+    favoriteNotebooks: Array.isArray(obj.favoriteNotebooks) ? obj.favoriteNotebooks : [],
+  };
+}
+
+export async function getPreferences(): Promise<UserPreferences> {
+  const data = await request<unknown>("/api/preferences");
+  return normalizePreferences(data);
+}
+
+export async function favoriteNote(id: string): Promise<UserPreferences> {
+  const data = await request<unknown>(`/api/preferences/favorites/notes/${encodeURIComponent(id)}`, {
+    method: "POST",
+  });
+  return normalizePreferences(data);
+}
+
+export async function unfavoriteNote(id: string): Promise<UserPreferences> {
+  const data = await request<unknown>(`/api/preferences/favorites/notes/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  return normalizePreferences(data);
+}
+
+export async function favoriteNotebook(id: string): Promise<UserPreferences> {
+  const data = await request<unknown>(`/api/preferences/favorites/notebooks/${encodeURIComponent(id)}`, {
+    method: "POST",
+  });
+  return normalizePreferences(data);
+}
+
+export async function unfavoriteNotebook(id: string): Promise<UserPreferences> {
+  const data = await request<unknown>(`/api/preferences/favorites/notebooks/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  return normalizePreferences(data);
+}
+
+export async function createSavedSearch(name: string, query: string): Promise<SavedSearch> {
+  return request<SavedSearch>("/api/preferences/saved-searches", {
+    method: "POST",
+    body: JSON.stringify({ name, query }),
+  });
+}
+
+export async function deleteSavedSearch(id: string): Promise<void> {
+  await request(`/api/preferences/saved-searches/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+/** Records a note open without triggering pendingWrites tracking or session-expired dialogs. */
+export async function recordRecentRead(noteId: string): Promise<void> {
+  await request(`/api/preferences/recent-reads/${encodeURIComponent(noteId)}`, {
+    method: "POST",
+    isRead: true,
+    skipAuthRedirect: true,
+  });
+}
+
+export async function saveScratchpad(scratchpad: string): Promise<{ scratchpad: string }> {
+  const data = await request<{ scratchpad?: unknown } | null>("/api/preferences/scratchpad", {
+    method: "PUT",
+    body: JSON.stringify({ scratchpad }),
+  });
+  return { scratchpad: typeof data?.scratchpad === "string" ? data.scratchpad : scratchpad };
+}
+
+// ---------------------------------------------------------------------------
+// Recent, Attachments, Revisions, Tasks, Hygiene, AI & Capture Pipelines
+// ---------------------------------------------------------------------------
+
+export async function getRecentNotes(): Promise<RecentNotesResponse> {
+  const data = await request<Partial<RecentNotesResponse> | unknown[] | null>("/api/notes/recent");
+  if (!data || Array.isArray(data)) {
+    return { recentRead: [], recentCreated: [] };
+  }
+  return {
+    recentRead: Array.isArray(data.recentRead) ? data.recentRead : [],
+    recentCreated: Array.isArray(data.recentCreated) ? data.recentCreated : [],
+  };
+}
+
+export async function getNoteAttachments(noteId: string): Promise<NoteAttachment[]> {
+  const data = await request<unknown>(`/api/notes/${encodeURIComponent(noteId)}/attachments`);
+  return Array.isArray(data) ? (data as NoteAttachment[]) : [];
+}
+
+export async function getNoteRevisions(noteId: string): Promise<NoteRevisionMeta[]> {
+  const data = await request<unknown>(`/api/notes/${encodeURIComponent(noteId)}/revisions`);
+  return Array.isArray(data) ? (data as NoteRevisionMeta[]) : [];
+}
+
+export async function getNoteRevisionDetail(noteId: string, revId: string): Promise<NoteRevisionDetail> {
+  return request<NoteRevisionDetail>(
+    `/api/notes/${encodeURIComponent(noteId)}/revisions/${encodeURIComponent(revId)}`
+  );
+}
+
+export async function restoreNoteRevision(noteId: string, revId: string): Promise<Note> {
+  return request<Note>(
+    `/api/notes/${encodeURIComponent(noteId)}/revisions/${encodeURIComponent(revId)}/restore`,
+    { method: "POST" }
+  );
+}
+
+export async function getTasks(): Promise<TasksResponse> {
+  const data = await request<Partial<TasksResponse> | unknown[] | null>("/api/tasks");
+  if (!data || Array.isArray(data)) {
+    return { todoNotes: [], inlineTasks: [] };
+  }
+  return {
+    todoNotes: Array.isArray(data.todoNotes) ? data.todoNotes : [],
+    inlineTasks: Array.isArray(data.inlineTasks) ? data.inlineTasks : [],
+  };
+}
+
+export async function toggleInlineTask(payload: {
+  noteId: string;
+  line: number;
+  column: number;
+  checked: boolean;
+  baseUpdatedTime?: number;
+}): Promise<Note> {
+  return request<Note>("/api/tasks/toggle", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getHygieneReport(): Promise<HygieneReport> {
+  const data = await request<Partial<HygieneReport> | unknown[] | null>("/api/organize/hygiene");
+  if (!data || Array.isArray(data)) {
+    return { duplicateClusters: [], emptyNotes: [], untaggedNotes: [] };
+  }
+  return {
+    duplicateClusters: Array.isArray(data.duplicateClusters) ? data.duplicateClusters : [],
+    emptyNotes: Array.isArray(data.emptyNotes) ? data.emptyNotes : [],
+    untaggedNotes: Array.isArray(data.untaggedNotes) ? data.untaggedNotes : [],
+  };
+}
+
+export async function getAiStatus(): Promise<AiFeatureStatus> {
+  const data = await request<Partial<AiFeatureStatus> | unknown[] | null>("/api/ai/status");
+  if (!data || Array.isArray(data)) return { enabled: false };
+  const enabled = data.enabled === true;
+  return {
+    enabled,
+    ...(enabled && typeof data.model === "string" ? { model: data.model } : {}),
+  };
+}
+
+export async function askNotes(payload: {
+  question: string;
+  scopeNotebookId?: string;
+  scopeTagId?: string;
+}): Promise<AskNotesResponse> {
+  return request<AskNotesResponse>("/api/ai/ask", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function noteAssist(payload: {
+  noteId: string;
+  action: NoteAssistAction;
+}): Promise<NoteAssistResponse> {
+  return request<NoteAssistResponse>("/api/ai/note-assist", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function clipUrl(payload: {
+  url: string;
+  parentId?: string;
+  tags?: string[];
+  includeSourceBanner?: boolean;
+}): Promise<ClipResponse> {
+  return request<ClipResponse>("/api/clip", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function ingestEmail(payload: {
+  raw?: string;
+  subject?: string;
+  from?: string;
+  text?: string;
+  html?: string;
+  parentId?: string;
+  tags?: string[];
+}): Promise<EmailIngestResponse> {
+  return request<EmailIngestResponse>("/api/integrations/email", {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
 }

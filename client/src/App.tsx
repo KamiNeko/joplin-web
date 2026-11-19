@@ -13,6 +13,11 @@ import { ThemeProvider } from "@/components/common/ThemeProvider";
 import { LoginPage } from "@/pages/LoginPage";
 import { NotesPage } from "@/pages/NotesPage";
 import { OrganizePage } from "@/pages/OrganizePage";
+import { HomePage } from "@/pages/HomePage";
+import { RecentPage } from "@/pages/RecentPage";
+import { TasksPage } from "@/pages/TasksPage";
+import { HygienePage } from "@/pages/HygienePage";
+import { ClipPage } from "@/pages/ClipPage";
 import { Toaster } from "@/components/ui/sonner";
 import { Loader2 } from "lucide-react";
 import { ApiError } from "@/lib/api";
@@ -179,6 +184,54 @@ export function App() {
                   element={
                     <ProtectedRoute>
                       <OrganizePage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/home"
+                  element={
+                    <ProtectedRoute>
+                      <HomePage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/recent"
+                  element={
+                    <ProtectedRoute>
+                      <RecentPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/recent/:id"
+                  element={
+                    <ProtectedRoute>
+                      <RecentPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/tasks"
+                  element={
+                    <ProtectedRoute>
+                      <TasksPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/hygiene"
+                  element={
+                    <ProtectedRoute>
+                      <HygienePage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/clip"
+                  element={
+                    <ProtectedRoute>
+                      <ClipPage />
                     </ProtectedRoute>
                   }
                 />

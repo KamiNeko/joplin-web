@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.js';
+import { noteCache } from '../services/note-cache.js';
 import { organizerService, OrganizerService } from '../services/organizer.js';
 import { isTrueFlag } from './query.js';
 
@@ -15,6 +16,15 @@ export function createOrganizeRouter(service: OrganizerService = organizerServic
    */
   router.get('/status', (req, res) => {
     res.status(200).json(service.getStatus(req.sessionId!));
+  });
+
+  /**
+   * GET /api/organize/hygiene
+   * Detects duplicate clusters, empty notes, and untagged notes locally without calling the LLM.
+   */
+  router.get('/hygiene', async (req, res) => {
+    const report = await noteCache.getHygieneReport(req.sessionId!);
+    res.status(200).json(report);
   });
 
   /**

@@ -4,6 +4,7 @@ import {
   buildOcrSnippet,
   extractLinkedResourceIds,
   isEmptySearchQuery,
+  matchesDateFilters,
   matchesNamePattern,
   normalizeOcrText,
   parseSearchQuery,
@@ -127,5 +128,38 @@ describe('OCR normalization and snippets', () => {
     assert.ok(snippet.endsWith('...'));
     assert.ok(snippet.includes('Backup Storage Renewal'));
     assert.equal(buildOcrSnippet('Nothing here', ['invoice']), null);
+  });
+
+  test('tag:none, has:attachment, has:ocr, sourceurl, created and updated filters', () => {
+    const fixedNow = Date.UTC(2026, 4, 15, 12, 0, 0);
+    const q = parseSearchQuery(
+      'tag:none has:attachment -has:ocr sourceurl:github.com -sourceurl:gist.github.com created:>=2026-01-01 updated:today',
+      fixedNow
+    );
+    assert.equal(q.tagNone, true);
+    assert.equal(q.hasAttachment, true);
+    assert.equal(q.hasOcr, false);
+    assert.deepEqual(q.sourceUrls, ['github.com']);
+    assert.deepEqual(q.excludedSourceUrls, ['gist.github.com']);
+    assert.equal(q.createdFilters.length, 1);
+    assert.equal(q.updatedFilters.length, 1);
+    assert.equal(isEmptySearchQuery(q), false);
+
+    assert.equal(matchesDateFilters(Date.UTC(2026, 4, 15, 9, 0, 0), q.updatedFilters), true);
+    assert.equal(matchesDateFilters(Date.UTC(2026, 4, 14, 9, 0, 0), q.updatedFilters), false);
+    assert.equal(matchesDateFilters(Date.UTC(2026, 2, 1, 0, 0, 0), q.createdFilters), true);
+    assert.equal(matchesDateFilters(Date.UTC(2025, 11, 31, 23, 59, 59), q.createdFilters), false);
+  });
+
+  test('negated tag:none and week/month date specs', () => {
+    const fixedNow = Date.UTC(2026, 4, 15, 12, 0, 0);
+    const q = parseSearchQuery('-tag:none created:week-1 -updated:2026-04', fixedNow);
+    assert.equal(q.tagNone, false);
+    assert.equal(q.createdFilters.length, 1);
+    assert.equal(q.updatedFilters.length, 1);
+    assert.equal(q.updatedFilters[0].negated, true);
+    assert.equal(matchesDateFilters(Date.UTC(2026, 4, 10, 0, 0, 0), q.createdFilters), true);
+    assert.equal(matchesDateFilters(Date.UTC(2026, 3, 15, 0, 0, 0), q.updatedFilters), false);
+    assert.equal(matchesDateFilters(Date.UTC(2026, 4, 15, 0, 0, 0), q.updatedFilters), true);
   });
 });

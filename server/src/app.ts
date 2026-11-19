@@ -12,14 +12,19 @@ import { errorHandler } from './middleware/error-handler.js';
 import { createOriginCheck } from './middleware/origin-check.js';
 import { requestLogger } from './middleware/request-logger.js';
 import { accountRouter } from './routes/account.js';
+import { askRouter } from './routes/ask.js';
 import { createAuthRouter } from './routes/auth.js';
+import { createClipRouter, createEmailWebhookRouter } from './routes/clip.js';
 import { notebooksRouter } from './routes/notebooks.js';
 import { notesRouter } from './routes/notes.js';
 import { createOrganizeRouter } from './routes/organize.js';
+import { createPreferencesRouter } from './routes/preferences.js';
 import { resourcesRouter } from './routes/resources.js';
 import { searchRouter } from './routes/search.js';
 import { tagsRouter } from './routes/tags.js';
+import { tasksRouter } from './routes/tasks.js';
 import { organizerService, OrganizerService } from './services/organizer.js';
+import { PreferencesStore } from './services/preferences-store.js';
 import { TwoFactorStore } from './services/two-factor-store.js';
 import { noteCache } from './services/note-cache.js';
 
@@ -39,6 +44,7 @@ export function cspDirectives(
 ): Record<string, string[] | null> {
   return {
     'img-src': ["'self'", 'data:', 'blob:', ...(config.allowRemoteImages ? ['https:'] : [])],
+    'media-src': ["'self'", 'blob:'],
     'style-src': ["'self'", "'unsafe-inline'"],
     'font-src': ["'self'", 'data:'],
     'object-src': ["'none'"],
@@ -64,6 +70,7 @@ export function createApp(config: AppConfig, deps: { organizer?: OrganizerServic
   if (config.require2fa) {
     twoFactorStore.ensureAuthDir();
   }
+  const preferencesStore = new PreferencesStore(config.cacheDir);
   const authState = createAppAuthState();
 
   const app = express();
@@ -134,10 +141,11 @@ export function createApp(config: AppConfig, deps: { organizer?: OrganizerServic
   // CSRF protection for cookie-authenticated writes
   app.use('/api/', createOriginCheck(config));
 
-  // Attach per-instance configuration, 2FA store, and session validation cache
+  // Attach per-instance configuration, 2FA store, preferences store, and session validation cache
   app.use('/api/', (req, _res, next) => {
     req.appConfig = config;
     req.twoFactorStore = twoFactorStore;
+    req.preferencesStore = preferencesStore;
     req.authState = authState;
     next();
   });
@@ -157,9 +165,14 @@ export function createApp(config: AppConfig, deps: { organizer?: OrganizerServic
   app.use('/api/notebooks', notebooksRouter);
   app.use('/api/notes', notesRouter);
   app.use('/api/organize', createOrganizeRouter(organizer));
+  app.use('/api/preferences', createPreferencesRouter(preferencesStore));
+  app.use('/api/tasks', tasksRouter);
+  app.use('/api/ai', askRouter);
+  app.use('/api/webhooks', createEmailWebhookRouter(config));
   app.use('/api/tags', tagsRouter);
   app.use('/api/search', searchRouter);
   app.use('/api/resources', resourcesRouter);
+  app.use('/api', createClipRouter());
 
   // Serve frontend static assets if available (production mode)
   if (fs.existsSync(config.clientDistPath)) {

@@ -47,6 +47,7 @@ const LIST_KEYS = [["notes"], ["notebooks"], ["tags"], ["search"]];
 let queryClient: QueryClient;
 let calls: FetchCall[];
 let invalidated: unknown[];
+let invalidateFilters: Array<Parameters<QueryClient["invalidateQueries"]>[0]>;
 
 /** Seeds every query a write can touch, so we can see which ones were invalidated or removed */
 function seedCache() {
@@ -66,9 +67,11 @@ beforeEach(() => {
   queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
   seedCache();
   invalidated = [];
+  invalidateFilters = [];
   const original = queryClient.invalidateQueries.bind(queryClient);
   vi.spyOn(queryClient, "invalidateQueries").mockImplementation((filters, options) => {
     invalidated.push(filters?.queryKey);
+    invalidateFilters.push(filters);
     return original(filters, options);
   });
   calls = mockFetch(({ method, path }) => {
@@ -97,41 +100,49 @@ async function run<TVars>(hook: () => { mutateAsync: (v: TVars) => Promise<unkno
 }
 
 describe("note mutations", () => {
-  it("useCreateNote posts the note, caches it and invalidates the lists", async () => {
+  it("useCreateNote posts the note, caches it and invalidates lists and other notes lazily", async () => {
     await run(useCreateNote, { parentId: NB_ID, title: "New" });
     expect(calls).toContainEqual({ method: "POST", path: "/api/notes", body: { parentId: NB_ID, title: "New" } });
     expect(queryClient.getQueryData<Note>(["note", NOTE_ID])?.title).toBe("Saved");
     expectListsInvalidated();
+    expect(isStale(["note", NOTE_ID])).toBe(false);
+    expect(isStale(["note", OTHER_ID])).toBe(true);
+    expect(invalidateFilters.find((f) => JSON.stringify(f?.queryKey) === JSON.stringify(["note"]))?.refetchType).toBe("none");
   });
 
-  it("useUpdateNote replaces the cached note and invalidates the lists, but not other notes", async () => {
+  it("useUpdateNote replaces the cached note, invalidates lists, and marks other notes stale lazily", async () => {
     await run(useUpdateNote, { id: NOTE_ID, changes: { parentId: OTHER_ID } });
     expect(calls).toContainEqual({ method: "PUT", path: `/api/notes/${NOTE_ID}`, body: { parentId: OTHER_ID } });
     expect(queryClient.getQueryData<Note>(["note", NOTE_ID])?.updatedTime).toBe(2000);
     expectListsInvalidated();
-    expect(isStale(["note", OTHER_ID])).toBe(false);
+    expect(isStale(["note", NOTE_ID])).toBe(false);
+    expect(isStale(["note", OTHER_ID])).toBe(true);
+    expect(invalidateFilters.find((f) => JSON.stringify(f?.queryKey) === JSON.stringify(["note"]))?.refetchType).toBe("none");
   });
 
-  it("useDeleteNote (trash) invalidates the note so it shows as trashed", async () => {
+  it("useDeleteNote (trash) invalidates the trashed note and marks other notes stale lazily", async () => {
     await run(useDeleteNote, { id: NOTE_ID });
     expect(calls).toContainEqual({ method: "DELETE", path: `/api/notes/${NOTE_ID}`, body: undefined });
     expect(isStale(["note", NOTE_ID])).toBe(true);
-    expect(isStale(["note", OTHER_ID])).toBe(false);
+    expect(isStale(["note", OTHER_ID])).toBe(true);
     expectListsInvalidated();
   });
 
-  it("useDeleteNote (permanent) removes the note from the cache", async () => {
+  it("useDeleteNote (permanent) removes the note from cache and marks other notes stale lazily", async () => {
     await run(useDeleteNote, { id: NOTE_ID, permanent: true });
     expect(last()?.path).toBe(`/api/notes/${NOTE_ID}?permanent=true`);
     expect(queryClient.getQueryState(["note", NOTE_ID])).toBeUndefined();
     expect(queryClient.getQueryData(["note", OTHER_ID])).toBeDefined();
+    expect(isStale(["note", OTHER_ID])).toBe(true);
     expectListsInvalidated();
   });
 
-  it("useRestoreNote caches the restored note and invalidates the lists", async () => {
+  it("useRestoreNote caches the restored note, invalidates lists, and marks other notes stale lazily", async () => {
     await run(useRestoreNote, NOTE_ID);
     expect(last()).toMatchObject({ method: "POST", path: `/api/notes/${NOTE_ID}/restore` });
     expect(queryClient.getQueryData<Note>(["note", NOTE_ID])?.title).toBe("Saved");
+    expect(isStale(["note", NOTE_ID])).toBe(false);
+    expect(isStale(["note", OTHER_ID])).toBe(true);
     expectListsInvalidated();
   });
 

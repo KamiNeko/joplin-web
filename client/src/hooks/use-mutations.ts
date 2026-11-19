@@ -31,7 +31,23 @@ export function invalidateLists(queryClient: QueryClient) {
   queryClient.invalidateQueries({ queryKey: NOTEBOOKS_QUERY_KEY });
   queryClient.invalidateQueries({ queryKey: TAGS_QUERY_KEY });
   queryClient.invalidateQueries({ queryKey: ["search"] });
+  queryClient.invalidateQueries({ queryKey: ["preferences"] });
+  queryClient.invalidateQueries({ queryKey: ["recent-notes"] });
+  queryClient.invalidateQueries({ queryKey: ["tasks"] });
+  queryClient.invalidateQueries({ queryKey: ["hygiene"] });
   announceWrite();
+}
+
+/**
+ * Marks every cached single-note query except `excludeNoteId` stale without triggering immediate
+ * background refetches, so derived fields like `backlinks` reload when the user opens another note.
+ */
+export function invalidateOtherNotes(queryClient: QueryClient, excludeNoteId?: string) {
+  queryClient.invalidateQueries({
+    queryKey: ["note"],
+    predicate: (query) => query.queryKey[1] !== excludeNoteId,
+    refetchType: "none",
+  });
 }
 
 /**
@@ -67,6 +83,7 @@ export function useCreateNote() {
     mutationFn: createNote,
     onSuccess: (note) => {
       queryClient.setQueryData(["note", note.id], note);
+      invalidateOtherNotes(queryClient, note.id);
       invalidateLists(queryClient);
     },
   });
@@ -82,6 +99,7 @@ export function useUpdateNote() {
     mutationFn: ({ id, changes }: { id: string; changes: NoteUpdate }) => updateNote(id, changes),
     onSuccess: (note) => {
       queryClient.setQueryData<Note>(["note", note.id], note);
+      invalidateOtherNotes(queryClient, note.id);
       invalidateLists(queryClient);
     },
   });
@@ -97,6 +115,7 @@ export function useDeleteNote() {
       } else {
         queryClient.invalidateQueries({ queryKey: ["note", id] });
       }
+      invalidateOtherNotes(queryClient, id);
       invalidateLists(queryClient);
     },
   });
@@ -108,6 +127,7 @@ export function useRestoreNote() {
     mutationFn: (id: string) => restoreNote(id),
     onSuccess: (note) => {
       queryClient.setQueryData(["note", note.id], note);
+      invalidateOtherNotes(queryClient, note.id);
       invalidateLists(queryClient);
     },
   });

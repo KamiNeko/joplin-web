@@ -11,6 +11,7 @@ import { useTags } from "@/hooks/use-tags";
 import { useNotes, useNote, useConflictNotes } from "@/hooks/use-notes";
 import { useSearch } from "@/hooks/use-search";
 import { BulkUpdateProgress, useBulkUpdateNotes, useCreateNote, useUpdateNote } from "@/hooks/use-mutations";
+import { useCreateSavedSearch, usePreferences, useRecordRecentRead } from "@/hooks/use-preferences";
 import { useNoteSelection } from "@/hooks/use-note-selection";
 import { findNotebookById, flattenNotebooks } from "@/lib/notebooks";
 import { BatchNoteItem, BatchNoteResult, NoteListItem } from "@/lib/types";
@@ -80,7 +81,7 @@ export function NotesPage() {
   const params = useParams();
   const { pathname, hash } = useLocation();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const isTrashSelected = pathname.startsWith("/trash");
   const isConflictsSelected = pathname.startsWith("/conflicts");
@@ -102,7 +103,21 @@ export function NotesPage() {
     ? { kind: "tag", tagId: selectedTagId }
     : { kind: "all" };
 
-  const [searchQuery, setSearchQuery] = useState<string>("");
+  const urlQueryParam = searchParams.get("q") ?? "";
+  const [prevUrlQuery, setPrevUrlQuery] = useState<string>(urlQueryParam);
+  const [searchQuery, setSearchQuery] = useState<string>(urlQueryParam);
+  if (urlQueryParam !== prevUrlQuery) {
+    setPrevUrlQuery(urlQueryParam);
+    setSearchQuery(urlQueryParam);
+  }
+  const handleSearchChange = (q: string) => {
+    setSearchQuery(q);
+    if (!q && searchParams.has("q")) {
+      const next = new URLSearchParams(searchParams);
+      next.delete("q");
+      setSearchParams(next, { replace: true });
+    }
+  };
   // Note that should open in the editor (set right after creating it)
   const [editIntentNoteId, setEditIntentNoteId] = useState<string | null>(null);
   const [bulkProgress, setBulkProgress] = useState<BulkUpdateProgress | null>(null);
@@ -123,8 +138,15 @@ export function NotesPage() {
   );
   const createOrganizeJob = useCreateOrganizeJob();
   const cancelOrganizeJob = useCancelOrganizeJob();
+  const createSavedSearch = useCreateSavedSearch();
+  const recordRecentRead = useRecordRecentRead();
   // An account with end-to-end encryption is read-only: no editing, creating, tagging or uploads
   const { readOnly, reason: readOnlyReason } = useWriteState();
+  const { data: preferences } = usePreferences(!readOnly);
+  const favoriteNoteIds = useMemo(
+    () => new Set(preferences?.favoriteNoteIds ?? []),
+    [preferences?.favoriteNoteIds]
+  );
 
   // TanStack queries
   const { data: notebooks } = useNotebooks();
@@ -144,6 +166,23 @@ export function NotesPage() {
   const { data: fullNote, isLoading: isLoadingNote, error: noteError } = noteQuery;
   const searchQueryResult = useSearch(searchQuery);
   const { data: searchResults, isLoading: isLoadingSearch, debouncedQuery } = searchQueryResult;
+
+  // Record note opens in recent-reads after a brief dwell (never blocks UI or triggers before fast list auto-opens)
+  const lastRecordedReadRef = useRef<string | null>(null);
+  const recordReadMutateRef = useRef(recordRecentRead.mutate);
+  useEffect(() => {
+    recordReadMutateRef.current = recordRecentRead.mutate;
+  }, [recordRecentRead.mutate]);
+  useEffect(() => {
+    const id = fullNote?.id;
+    if (!id || readOnly || fullNote.deletedTime || fullNote.encrypted) return;
+    if (lastRecordedReadRef.current === id) return;
+    const timer = window.setTimeout(() => {
+      lastRecordedReadRef.current = id;
+      recordReadMutateRef.current(id);
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [fullNote?.id, fullNote?.deletedTime, fullNote?.encrypted, readOnly]);
 
   const isSearchActive = debouncedQuery.length >= 2;
   // Remount the list per scope so its filter doesn't carry over to another notebook or tag
@@ -504,23 +543,30 @@ export function NotesPage() {
   return (
     <AppLayout
       notebookTitle={notebookTitle}
+      notebookPath={!isSearchActive && fullNote ? fullNote.notebookPath : undefined}
       noteTitle={noteTitle}
+      onSelectNotebook={handleSelectNotebook}
+      defaultAiNotebookId={selectedNotebookId}
+      defaultAiTagId={selectedTagId}
       isSearchActive={isSearchActive}
       searchQuery={searchQuery}
-      onSearchChange={setSearchQuery}
+      onSearchChange={handleSearchChange}
       readOnly={readOnly}
       readOnlyReason={readOnlyReason}
-      sidebar={({ onCloseMobile }) => (
+      sidebar={({ onCloseMobile, aiEnabled, onOpenAskAi }) => (
         <Sidebar
           selectedNotebookId={selectedNotebookId}
           openNoteNotebookId={openNoteNotebookId}
           selectedTagId={selectedTagId}
+          activeView={isTrashSelected ? "trash" : isConflictsSelected ? "conflicts" : "notes"}
           isAllNotesSelected={!selectedNotebookId && !selectedTagId && !isTrashSelected && !isConflictsSelected}
           isTrashSelected={isTrashSelected}
           isConflictsSelected={isConflictsSelected}
           conflictCount={conflictNotesQuery.data?.length ?? 0}
           organizeJobCount={organizeJobs.length}
           runningOrganizeJob={Boolean(runningOrganizeJob)}
+          aiEnabled={aiEnabled}
+          onOpenAskAi={onOpenAskAi}
           onSelectConflicts={() => {
             handleSelectConflicts();
             onCloseMobile?.();
@@ -546,8 +592,18 @@ export function NotesPage() {
             handleSelectTag(id);
             onCloseMobile?.();
           }}
+          onOpenNote={(id) => {
+            handleSearchChange("");
+            navigate(`/notes/${id}`);
+          }}
+          onApplySavedSearch={(savedQuery) => {
+            setSearchQuery(savedQuery);
+            if (!pathname.startsWith("/notes")) {
+              navigate(`/notes?q=${encodeURIComponent(savedQuery)}`);
+            }
+          }}
           searchQuery={searchQuery}
-          onSearchChange={setSearchQuery}
+          onSearchChange={handleSearchChange}
           onCloseMobile={onCloseMobile}
           readOnly={readOnly}
         />
@@ -570,13 +626,29 @@ export function NotesPage() {
               isRetrying={searchQueryResult.isFetching}
               selectedNoteId={selectedNoteId}
               onSelectNote={handleSelectNote}
-              onClearQuery={() => setSearchQuery("")}
+              onClearQuery={() => handleSearchChange("")}
+              onSaveSearch={
+                readOnly
+                  ? undefined
+                  : async (name, queryText) => {
+                      try {
+                        await createSavedSearch.mutateAsync({ name, query: queryText });
+                        toast.success(`Saved search "${name}"`);
+                      } catch (err) {
+                        toast.error("Could not save search", {
+                          description: err instanceof Error ? err.message : undefined,
+                        });
+                      }
+                    }
+              }
+              isSavingSearch={createSavedSearch.isPending}
             />
           ) : (
             <NoteList
               key={listKey}
               notes={notes || []}
               notebooks={notebooks}
+              favoriteNoteIds={favoriteNoteIds}
               selection={selection}
               canSelect={!readOnly && !isTrashSelected}
               canBulkTag={!isConflictsSelected}

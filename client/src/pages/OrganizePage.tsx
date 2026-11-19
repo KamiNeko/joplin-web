@@ -585,10 +585,11 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
       }}
       readOnly={readOnly}
       readOnlyReason={readOnlyReason}
-      sidebar={({ onCloseMobile }) => (
+      sidebar={({ onCloseMobile, aiEnabled, onOpenAskAi }) => (
         <Sidebar
           selectedNotebookId={null}
           selectedTagId={null}
+          activeView="organize"
           isAllNotesSelected={false}
           isTrashSelected={false}
           isConflictsSelected={false}
@@ -596,6 +597,8 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
           conflictCount={conflictNotes?.length ?? 0}
           organizeJobCount={organizeJobs.length}
           runningOrganizeJob={hasRunningJob}
+          aiEnabled={aiEnabled}
+          onOpenAskAi={onOpenAskAi}
           onSelectConflicts={() => {
             navigate("/conflicts");
             onCloseMobile?.();

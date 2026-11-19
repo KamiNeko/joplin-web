@@ -278,19 +278,58 @@ export class NoteWriterService {
 
   public async createNote(
     sessionId: string,
-    input: { title?: string; body?: string; parentId: string; isTodo?: boolean }
+    input: {
+      title?: string;
+      body?: string;
+      parentId: string;
+      isTodo?: boolean;
+      sourceUrl?: string;
+      author?: string;
+      markupLanguage?: number;
+    }
   ): Promise<NoteDetail> {
     assertValidId(input.parentId, 'notebook id');
     await this.assertWritable(sessionId);
     await this.assertActiveNotebook(sessionId, input.parentId);
     const id = newId();
+    const props = defaultNoteProperties(id, input.parentId, Boolean(input.isTodo));
+    if (typeof input.sourceUrl === 'string' && input.sourceUrl.trim()) {
+      props.source_url = input.sourceUrl.trim().slice(0, 2000);
+    }
+    if (typeof input.author === 'string' && input.author.trim()) {
+      props.author = input.author.trim().slice(0, 500);
+    }
+    if (input.markupLanguage === 1 || input.markupLanguage === 2) {
+      props.markup_language = String(input.markupLanguage);
+    }
     await this.write(sessionId, {
       type_: JoplinItemType.Note,
       title: sanitizeTitle(input.title),
       body: input.body ?? '',
-      properties: defaultNoteProperties(id, input.parentId, Boolean(input.isTodo)),
+      properties: props,
     });
     return this.noteDetail(sessionId, id);
+  }
+
+  public async restoreNoteRevision(
+    sessionId: string,
+    noteId: string,
+    revId: string,
+    options: { baseUpdatedTime?: number; force?: boolean } = {}
+  ): Promise<NoteDetail> {
+    assertValidId(noteId, 'note id');
+    assertValidId(revId, 'revision id');
+    await this.assertWritable(sessionId);
+    const rev = await noteCache.getNoteRevisionDetail(sessionId, noteId, revId);
+    if (!rev) {
+      throw new WriteValidationError(`Revision not found: ${revId}`, 404);
+    }
+    return this.updateNote(sessionId, noteId, {
+      title: rev.title,
+      body: rev.body,
+      baseUpdatedTime: options.baseUpdatedTime,
+      force: options.force,
+    });
   }
 
   public async updateNote(

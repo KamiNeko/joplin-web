@@ -1,13 +1,14 @@
-import React from "react";
+import React, { useState } from "react";
 import { SearchResult } from "@/lib/types";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Search, FileText, Paperclip, X } from "lucide-react";
+import { BookmarkPlus, Search, FileText, Paperclip, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/format";
 import { QueryError } from "@/components/common/QueryError";
 import { SEARCH_SYNTAX_HINT } from "@/lib/ui-constants";
+import { PromptDialog } from "@/components/common/Dialogs";
 
 interface SearchResultsProps {
   query: string;
@@ -20,6 +21,8 @@ interface SearchResultsProps {
   selectedNoteId?: string | null;
   onSelectNote: (id: string) => void;
   onClearQuery?: () => void;
+  onSaveSearch?: (name: string, query: string) => void;
+  isSavingSearch?: boolean;
 }
 
 /**
@@ -75,7 +78,11 @@ export function SearchResults({
   selectedNoteId,
   onSelectNote,
   onClearQuery,
+  onSaveSearch,
+  isSavingSearch = false,
 }: SearchResultsProps) {
+  const [saveDialogOpen, setSaveDialogOpen] = useState(false);
+
   return (
     <div className="flex flex-col h-full bg-background border-r border-border">
       {/* Header bar */}
@@ -94,6 +101,18 @@ export function SearchResults({
           <span className="text-xs text-muted-foreground font-mono">
             {!isLoading && !error && `${results.length} found`}
           </span>
+          {onSaveSearch && query.trim() && (
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setSaveDialogOpen(true)}
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              aria-label="Save search"
+              title="Pin this search to Shortcuts"
+            >
+              <BookmarkPlus className="h-3.5 w-3.5" />
+            </Button>
+          )}
           {onClearQuery && (
             <Button
               variant="ghost"
@@ -169,7 +188,6 @@ export function SearchResults({
                       : "bg-transparent border-transparent hover:bg-muted/60"
                   )}
                 >
-
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex items-center gap-1.5 min-w-0">
                       <FileText
@@ -211,6 +229,23 @@ export function SearchResults({
           </div>
         )}
       </ScrollArea>
+
+      {onSaveSearch && (
+        <PromptDialog
+          open={saveDialogOpen}
+          onOpenChange={setSaveDialogOpen}
+          title="Save search shortcut"
+          description={`Query: "${query}"`}
+          initialValue={query.slice(0, 50)}
+          placeholder="Shortcut name"
+          confirmLabel="Save shortcut"
+          isPending={isSavingSearch}
+          onSubmit={(name) => {
+            onSaveSearch(name, query);
+            setSaveDialogOpen(false);
+          }}
+        />
+      )}
     </div>
   );
 }

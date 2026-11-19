@@ -1,6 +1,13 @@
 import { useNotebooks } from "@/hooks/use-notebooks";
 import { useTags } from "@/hooks/use-tags";
-import { useId, useEffect, useState } from "react";
+import {
+  useDeleteSavedSearch,
+  usePreferences,
+  useToggleFavoriteNote,
+  useToggleFavoriteNotebook,
+} from "@/hooks/use-preferences";
+import { useId, useEffect, useMemo, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { NotebookTree, NotebookAction } from "@/components/notebooks/NotebookTree";
 import { MoveNotebookDialog } from "@/components/notebooks/MoveNotebookDialog";
@@ -15,21 +22,32 @@ import {
 import { TagListItem } from "@/components/tags/TagListItem";
 import { countNotebookContents, findNotebookById, notebookContentsLabel } from "@/lib/notebooks";
 import { Notebook, Tag } from "@/lib/types";
+import { noteDisplayTitle } from "@/lib/format";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import {
   BookOpen,
+  Bookmark,
+  Bot,
+  CheckSquare,
   ChevronRight,
+  Clock,
+  FileText,
   Files,
+  Folder,
+  FolderTree,
   GitCompareArrows,
+  Globe,
   Hash,
+  Home,
+  Plus,
+  ScanSearch,
   Search,
   Sparkles,
+  Star,
   Trash2,
   X,
-  FolderTree,
-  Plus,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -57,11 +75,23 @@ function saveTagsExpanded(expanded: boolean) {
   tagsExpandedListeners.forEach((cb) => cb());
 }
 
+export type SidebarView =
+  | "home"
+  | "notes"
+  | "recent"
+  | "tasks"
+  | "conflicts"
+  | "trash"
+  | "organize"
+  | "hygiene"
+  | "clip";
+
 interface SidebarProps {
   selectedNotebookId?: string | null;
   /** Notebook containing the currently open note, so its ancestors stay expanded */
   openNoteNotebookId?: string | null;
   selectedTagId?: string | null;
+  activeView?: SidebarView;
   isAllNotesSelected?: boolean;
   isTrashSelected?: boolean;
   isConflictsSelected?: boolean;
@@ -70,12 +100,16 @@ interface SidebarProps {
   conflictCount?: number;
   organizeJobCount?: number;
   runningOrganizeJob?: boolean;
+  aiEnabled?: boolean;
   onSelectAllNotes: () => void;
   onSelectTrash: () => void;
   onSelectConflicts?: () => void;
   onSelectOrganize?: () => void;
   onSelectNotebook: (id: string) => void;
   onSelectTag: (id: string) => void;
+  onOpenNote?: (noteId: string) => void;
+  onApplySavedSearch?: (query: string) => void;
+  onOpenAskAi?: () => void;
   searchQuery: string;
   onSearchChange: (query: string) => void;
   onCloseMobile?: () => void;
@@ -88,6 +122,7 @@ export function Sidebar({
   selectedNotebookId,
   openNoteNotebookId,
   selectedTagId,
+  activeView,
   isAllNotesSelected,
   isTrashSelected,
   isConflictsSelected,
@@ -95,28 +130,41 @@ export function Sidebar({
   conflictCount = 0,
   organizeJobCount = 0,
   runningOrganizeJob = false,
+  aiEnabled = false,
   onSelectAllNotes,
   onSelectTrash,
   onSelectConflicts,
   onSelectOrganize,
   onSelectNotebook,
   onSelectTag,
+  onOpenNote,
+  onApplySavedSearch,
+  onOpenAskAi,
   searchQuery,
   onSearchChange,
   onCloseMobile,
   className,
   readOnly = false,
 }: SidebarProps) {
+  const navigate = useNavigate();
+  const location = useLocation();
   const notebooksQuery = useNotebooks();
   const tagsQuery = useTags();
+  const preferencesQuery = usePreferences();
   const { data: notebooks, isLoading: isLoadingNotebooks } = notebooksQuery;
   const { data: tags, isLoading: isLoadingTags } = tagsQuery;
+  const preferences = preferencesQuery.data;
   const createNotebook = useCreateNotebook();
   const updateNotebook = useUpdateNotebook();
   const deleteNotebook = useDeleteNotebook();
   const renameTag = useRenameTag();
   const deleteTag = useDeleteTag();
+  const toggleFavoriteNote = useToggleFavoriteNote();
+  const toggleFavoriteNotebook = useToggleFavoriteNotebook();
+  const deleteSavedSearch = useDeleteSavedSearch();
   const tagsContentId = useId();
+  const shortcutsContentId = useId();
+  const [shortcutsExpanded, setShortcutsExpanded] = useState(true);
   const [persistedTagsExpanded, setPersistedTagsExpanded] = useState<boolean>(loadTagsExpanded);
   const [prevSelectedTagId, setPrevSelectedTagId] = useState<string | null | undefined>(selectedTagId);
   const [tagCollapsedInSession, setTagCollapsedInSession] = useState(false);
@@ -137,6 +185,37 @@ export function Sidebar({
       window.removeEventListener("storage", onStorage);
     };
   }, []);
+
+  const favoriteNoteList = preferences?.favoriteNotes ?? [];
+  const favoriteNotebookList = preferences?.favoriteNotebooks ?? [];
+  const savedSearches = preferences?.savedSearches ?? [];
+  const hasShortcuts = favoriteNoteList.length > 0 || favoriteNotebookList.length > 0 || savedSearches.length > 0;
+  const favoriteNotebookIds = useMemo(
+    () => new Set(preferences?.favoriteNotebookIds ?? []),
+    [preferences?.favoriteNotebookIds]
+  );
+
+  const handleToggleFavoriteNotebook = (notebook: Notebook) => {
+    const favorited = favoriteNotebookIds.has(notebook.id);
+    toggleFavoriteNotebook.mutate(
+      { id: notebook.id, favorited },
+      {
+        onSuccess: () =>
+          toast.success(
+            favorited
+              ? `Removed "${notebook.title}" from shortcuts`
+              : `Pinned "${notebook.title}" to shortcuts`
+          ),
+        onError: (err) => toast.error("Could not update shortcuts", { description: err.message }),
+      }
+    );
+  };
+
+  const isHomeSelected = activeView === "home" || location.pathname === "/home";
+  const isRecentSelected = activeView === "recent" || location.pathname.startsWith("/recent");
+  const isTasksSelected = activeView === "tasks" || location.pathname.startsWith("/tasks");
+  const isHygieneSelected = activeView === "hygiene" || location.pathname.startsWith("/hygiene");
+  const isClipSelected = activeView === "clip" || location.pathname.startsWith("/clip");
 
   const isTagsExpanded = persistedTagsExpanded || (Boolean(selectedTagId) && !tagCollapsedInSession);
 
@@ -338,6 +417,26 @@ export function Sidebar({
           <div className="space-y-1">
             <button
               type="button"
+              onClick={() => {
+                navigate("/home");
+                onCloseMobile?.();
+              }}
+              aria-current={isHomeSelected ? "page" : undefined}
+              className={cn(
+                "w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm transition-all duration-150 font-medium",
+                isHomeSelected
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                  : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <Home className="h-4 w-4" />
+                <span>Home</span>
+              </div>
+            </button>
+
+            <button
+              type="button"
               onClick={onSelectAllNotes}
               aria-current={isAllNotesSelected ? "page" : undefined}
               className={cn(
@@ -350,6 +449,46 @@ export function Sidebar({
               <div className="flex items-center gap-2">
                 <Files className="h-4 w-4" />
                 <span>All Notes</span>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                navigate("/recent");
+                onCloseMobile?.();
+              }}
+              aria-current={isRecentSelected ? "page" : undefined}
+              className={cn(
+                "w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm transition-all duration-150 font-medium",
+                isRecentSelected
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                  : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <Clock className="h-4 w-4" />
+                <span>Recent</span>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                navigate("/tasks");
+                onCloseMobile?.();
+              }}
+              aria-current={isTasksSelected ? "page" : undefined}
+              className={cn(
+                "w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm transition-all duration-150 font-medium",
+                isTasksSelected
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                  : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <CheckSquare className="h-4 w-4" />
+                <span>Tasks</span>
               </div>
             </button>
 
@@ -427,7 +566,180 @@ export function Sidebar({
                 )}
               </button>
             )}
+
+            <button
+              type="button"
+              onClick={() => {
+                navigate("/hygiene");
+                onCloseMobile?.();
+              }}
+              aria-current={isHygieneSelected ? "page" : undefined}
+              className={cn(
+                "w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm transition-all duration-150 font-medium",
+                isHygieneSelected
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                  : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <ScanSearch className="h-4 w-4" />
+                <span>Hygiene</span>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                navigate("/clip");
+                onCloseMobile?.();
+              }}
+              aria-current={isClipSelected ? "page" : undefined}
+              className={cn(
+                "w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm transition-all duration-150 font-medium",
+                isClipSelected
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                  : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <Globe className="h-4 w-4" />
+                <span>Clip &amp; Import</span>
+              </div>
+            </button>
+
+            {aiEnabled && onOpenAskAi && (
+              <button
+                type="button"
+                onClick={() => {
+                  onOpenAskAi();
+                  onCloseMobile?.();
+                }}
+                className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm transition-all duration-150 font-medium text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
+              >
+                <div className="flex items-center gap-2">
+                  <Bot className="h-4 w-4 text-primary" />
+                  <span>Ask AI</span>
+                </div>
+              </button>
+            )}
           </div>
+
+          {/* Shortcuts Section (hidden when empty) */}
+          {hasShortcuts && (
+            <div className="space-y-1.5">
+              <button
+                type="button"
+                onClick={() => setShortcutsExpanded((prev) => !prev)}
+                aria-expanded={shortcutsExpanded}
+                aria-controls={shortcutsContentId}
+                className="w-full flex items-center justify-between pl-2 pr-2.5 py-0.5 rounded-md text-[11px] font-semibold text-muted-foreground uppercase tracking-wider hover:text-foreground hover:bg-sidebar-accent/60 transition-colors outline-hidden focus-visible:ring-1 focus-visible:ring-sidebar-ring"
+              >
+                <span className="flex items-center gap-1.5">
+                  <ChevronRight
+                    className={cn(
+                      "h-3 w-3 shrink-0 transition-transform duration-200",
+                      shortcutsExpanded && "rotate-90"
+                    )}
+                    aria-hidden="true"
+                  />
+                  <Star className="h-3 w-3 shrink-0 text-amber-500" aria-hidden="true" />
+                  <span>Shortcuts</span>
+                </span>
+              </button>
+
+              {shortcutsExpanded && (
+                <div id={shortcutsContentId} className="space-y-0.5">
+                  {favoriteNoteList.map((note) => {
+                    const label = noteDisplayTitle(note);
+                    return (
+                      <div key={`fav-note-${note.id}`} className="group flex items-center gap-1 rounded-lg px-2 py-1 text-sm text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (onOpenNote) onOpenNote(note.id);
+                            else navigate(`/notes/${note.id}`);
+                            onCloseMobile?.();
+                          }}
+                          className="flex flex-1 items-center gap-2 min-w-0 text-left"
+                        >
+                          <FileText className="h-3.5 w-3.5 shrink-0 text-amber-500" aria-hidden="true" />
+                          <span className="truncate">{label}</span>
+                        </button>
+                        {!readOnly && (
+                          <button
+                            type="button"
+                            onClick={() => toggleFavoriteNote.mutate({ id: note.id, favorited: true })}
+                            aria-label={`Remove shortcut for ${label}`}
+                            className="p-0.5 rounded text-muted-foreground hover:text-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  {favoriteNotebookList.map((nb) => (
+                    <div key={`fav-nb-${nb.id}`} className="group flex items-center gap-1 rounded-lg px-2 py-1 text-sm text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onSelectNotebook(nb.id);
+                          onCloseMobile?.();
+                        }}
+                        className="flex flex-1 items-center gap-2 min-w-0 text-left"
+                      >
+                        <Folder className="h-3.5 w-3.5 shrink-0 text-amber-500" aria-hidden="true" />
+                        <span className="truncate">{nb.title || "Untitled Folder"}</span>
+                      </button>
+                      {!readOnly && (
+                        <button
+                          type="button"
+                          onClick={() => toggleFavoriteNotebook.mutate({ id: nb.id, favorited: true })}
+                          aria-label={`Remove shortcut for notebook ${nb.title}`}
+                          className="p-0.5 rounded text-muted-foreground hover:text-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+
+                  {savedSearches.map((saved) => (
+                    <div key={`saved-${saved.id}`} className="group flex items-center gap-1 rounded-lg px-2 py-1 text-sm text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (onApplySavedSearch) {
+                            onApplySavedSearch(saved.query);
+                          } else {
+                            navigate(`/notes?q=${encodeURIComponent(saved.query)}`);
+                            onSearchChange(saved.query);
+                          }
+                          onCloseMobile?.();
+                        }}
+                        title={saved.query}
+                        className="flex flex-1 items-center gap-2 min-w-0 text-left"
+                      >
+                        <Bookmark className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
+                        <span className="truncate">{saved.name}</span>
+                      </button>
+                      {!readOnly && (
+                        <button
+                          type="button"
+                          onClick={() => deleteSavedSearch.mutate(saved.id)}
+                          aria-label={`Remove saved search ${saved.name}`}
+                          className="p-0.5 rounded text-muted-foreground hover:text-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Notebooks Section */}
           <div className="space-y-1.5">
@@ -467,8 +779,10 @@ export function Sidebar({
                 notebooks={notebooks || []}
                 selectedNotebookId={selectedNotebookId}
                 openNoteNotebookId={openNoteNotebookId}
+                favoriteNotebookIds={favoriteNotebookIds}
                 onSelectNotebook={onSelectNotebook}
                 onNotebookAction={readOnly ? undefined : handleNotebookAction}
+                onToggleFavoriteNotebook={readOnly ? undefined : handleToggleFavoriteNotebook}
               />
             )}
           </div>

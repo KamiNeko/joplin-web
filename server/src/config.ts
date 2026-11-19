@@ -46,6 +46,12 @@ export interface AppConfig {
   aiFakeDelayMs: number;
   /** Whether every login must pass a second factor (REQUIRE_2FA, default false) */
   require2fa: boolean;
+  /** Optional webhook shared secret for POST /api/webhooks/email (EMAIL_INGEST_WEBHOOK_SECRET) */
+  emailIngestWebhookSecret: string | null;
+  /** Service Joplin credentials used by EMAIL_INGEST webhook when enabled */
+  emailIngestJoplinEmail: string | null;
+  emailIngestJoplinPassword: string | null;
+  emailIngestNotebookId: string | null;
 }
 
 /**
@@ -296,6 +302,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     aiFake: parseBoolean('AI_FAKE', env.AI_FAKE, false),
     aiFakeDelayMs: parseNonNegativeInt('AI_FAKE_DELAY_MS', env.AI_FAKE_DELAY_MS, 0),
     require2fa,
+    emailIngestWebhookSecret: env.EMAIL_INGEST_WEBHOOK_SECRET?.trim() || null,
+    emailIngestJoplinEmail: env.EMAIL_INGEST_JOPLIN_EMAIL?.trim() || null,
+    emailIngestJoplinPassword: env.EMAIL_INGEST_JOPLIN_PASSWORD || null,
+    emailIngestNotebookId: env.EMAIL_INGEST_NOTEBOOK_ID?.trim() || null,
   };
 }
 

@@ -9,9 +9,18 @@
  *   (several `notebook:` filters match any of them)
  * - `type:todo` / `type:note`, `iscompleted:1` / `iscompleted:0` (to-dos only)
  * - `-tag:`/`-notebook:` exclude; `*` in a tag or notebook name is a wildcard
+ * - `has:attachment` / `-has:attachment`, `has:ocr` / `-has:ocr`, `tag:none` / `-tag:none`
+ * - `sourceurl:<pattern>` / `-sourceurl:<pattern>`
+ * - `created:<spec>` / `-created:<spec>`, `updated:<spec>` / `-updated:<spec>` (e.g. `today`, `7d`, `week`, `month`, `2026-05`, `>=2026-01-01`)
  *
  * Unknown filters (`foo:bar`) and invalid values (`type:x`) are searched as plain words.
  */
+
+export interface DateFilterClause {
+  negated: boolean;
+  start: number;
+  end: number;
+}
 
 /** A parsed search query; all text values are lower-cased */
 export interface ParsedSearchQuery {
@@ -23,6 +32,8 @@ export interface ParsedSearchQuery {
   tags: string[];
   /** Tag title patterns that must not be present */
   excludedTags: string[];
+  /** Set by `tag:none` (true = untagged only) or `-tag:none` (false = must have at least one tag) */
+  tagNone?: boolean;
   /** Notebook title patterns; the note must be inside one of them */
   notebooks: string[];
   /** Notebook title patterns the note must not be inside */
@@ -30,6 +41,18 @@ export interface ParsedSearchQuery {
   type?: 'todo' | 'note';
   /** Set by `iscompleted:`; implies to-dos */
   completed?: boolean;
+  /** Set by `has:attachment` / `-has:attachment` */
+  hasAttachment?: boolean;
+  /** Set by `has:ocr` / `-has:ocr` */
+  hasOcr?: boolean;
+  /** `source_url` patterns that must match (wildcard or substring) */
+  sourceUrls: string[];
+  /** `source_url` patterns that must not match */
+  excludedSourceUrls: string[];
+  /** `createdTime` constraints */
+  createdFilters: DateFilterClause[];
+  /** `updatedTime` constraints */
+  updatedFilters: DateFilterClause[];
 }
 
 interface Token {
@@ -41,7 +64,116 @@ interface Token {
   quoted: boolean;
 }
 
-const FILTERS = new Set(['tag', 'notebook', 'type', 'iscompleted']);
+const FILTERS = new Set([
+  'tag',
+  'notebook',
+  'type',
+  'iscompleted',
+  'has',
+  'sourceurl',
+  'created',
+  'updated',
+]);
+
+function parseDayBounds(yyyyMmDd: string): { start: number; end: number } | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(yyyyMmDd);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  if (dt.getUTCFullYear() !== year || dt.getUTCMonth() !== month - 1 || dt.getUTCDate() !== day) {
+    return null;
+  }
+  return {
+    start: Date.UTC(year, month - 1, day, 0, 0, 0, 0),
+    end: Date.UTC(year, month - 1, day, 23, 59, 59, 999),
+  };
+}
+
+function parseMonthBounds(yyyyMm: string): { start: number; end: number } | null {
+  const m = /^(\d{4})-(\d{2})$/.exec(yyyyMm);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  if (month < 1 || month > 12) return null;
+  return {
+    start: Date.UTC(year, month - 1, 1, 0, 0, 0, 0),
+    end: Date.UTC(year, month, 0, 23, 59, 59, 999),
+  };
+}
+
+function parseYearBounds(yyyy: string): { start: number; end: number } | null {
+  if (!/^\d{4}$/.test(yyyy)) return null;
+  const year = Number(yyyy);
+  if (year < 1970 || year > 2999) return null;
+  return {
+    start: Date.UTC(year, 0, 1, 0, 0, 0, 0),
+    end: Date.UTC(year, 11, 31, 23, 59, 59, 999),
+  };
+}
+
+function parseDateSpecBounds(rawValue: string, now: number): { start: number; end: number } | null {
+  const val = rawValue.trim().toLowerCase();
+  if (!val) return null;
+
+  if (val === 'today') {
+    const dt = new Date(now);
+    const start = Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate(), 0, 0, 0, 0);
+    return { start, end: Number.POSITIVE_INFINITY };
+  }
+  if (val === 'week') {
+    return { start: now - 7 * 86_400_000, end: Number.POSITIVE_INFINITY };
+  }
+  if (val === 'month') {
+    return { start: now - 30 * 86_400_000, end: Number.POSITIVE_INFINITY };
+  }
+  const relMatch = /^(\d+)([dh])$/.exec(val);
+  if (relMatch) {
+    const amount = Number(relMatch[1]);
+    if (amount >= 1 && amount <= 87_600) {
+      const unitMs = relMatch[2] === 'h' ? 3_600_000 : 86_400_000;
+      return { start: now - amount * unitMs, end: Number.POSITIVE_INFINITY };
+    }
+    return null;
+  }
+  const unitOffsetMatch = /^(day|week|month|year)-(\d+)$/.exec(val);
+  if (unitOffsetMatch) {
+    const unit = unitOffsetMatch[1];
+    const count = Number(unitOffsetMatch[2]);
+    if (count >= 0 && count <= 500) {
+      const unitDays = unit === 'day' ? 1 : unit === 'week' ? 7 : unit === 'month' ? 30 : 365;
+      return { start: now - count * unitDays * 86_400_000, end: Number.POSITIVE_INFINITY };
+    }
+    return null;
+  }
+
+  const cmpMatch = /^(>=|<=|>|<)(.+)$/.exec(val);
+  if (cmpMatch) {
+    const op = cmpMatch[1];
+    const target = cmpMatch[2];
+    const bounds = parseDayBounds(target) ?? parseMonthBounds(target) ?? parseYearBounds(target);
+    if (!bounds) return null;
+    if (op === '>=') return { start: bounds.start, end: Number.POSITIVE_INFINITY };
+    if (op === '>') return { start: bounds.end + 1, end: Number.POSITIVE_INFINITY };
+    if (op === '<=') return { start: 0, end: bounds.end };
+    return { start: 0, end: bounds.start - 1 };
+  }
+
+  return parseDayBounds(val) ?? parseMonthBounds(val) ?? parseYearBounds(val);
+}
+
+/** Tests whether a timestamp matches all parsed date filter clauses. */
+export function matchesDateFilters(timestamp: number, clauses: DateFilterClause[]): boolean {
+  if (clauses.length === 0) return true;
+  if (!Number.isFinite(timestamp) || timestamp <= 0) {
+    return clauses.every((c) => c.negated);
+  }
+  return clauses.every((clause) => {
+    const inRange = timestamp >= clause.start && timestamp <= clause.end;
+    return clause.negated ? !inRange : inRange;
+  });
+}
 
 /** Splits a query into tokens, honouring double quotes (an unclosed quote runs to the end) */
 function tokenize(query: string): Token[] {
@@ -96,7 +228,7 @@ function tokenize(query: string): Token[] {
  * @param query Raw query as typed by the user
  * @returns The parsed query; `isEmptySearchQuery` tells whether it has nothing to search for
  */
-export function parseSearchQuery(query: string): ParsedSearchQuery {
+export function parseSearchQuery(query: string, now = Date.now()): ParsedSearchQuery {
   const parsed: ParsedSearchQuery = {
     terms: [],
     excludedTerms: [],
@@ -104,6 +236,10 @@ export function parseSearchQuery(query: string): ParsedSearchQuery {
     excludedTags: [],
     notebooks: [],
     excludedNotebooks: [],
+    sourceUrls: [],
+    excludedSourceUrls: [],
+    createdFilters: [],
+    updatedFilters: [],
   };
 
   const addTerm = (token: Token, text: string) => {
@@ -114,7 +250,8 @@ export function parseSearchQuery(query: string): ParsedSearchQuery {
     const value = token.text.toLowerCase();
     switch (token.filter) {
       case 'tag':
-        (token.negated ? parsed.excludedTags : parsed.tags).push(value);
+        if (value === 'none') parsed.tagNone = !token.negated;
+        else (token.negated ? parsed.excludedTags : parsed.tags).push(value);
         break;
       case 'notebook':
         (token.negated ? parsed.excludedNotebooks : parsed.notebooks).push(value);
@@ -127,6 +264,34 @@ export function parseSearchQuery(query: string): ParsedSearchQuery {
         if (!token.negated && (value === '1' || value === '0')) parsed.completed = value === '1';
         else addTerm(token, `iscompleted:${value}`);
         break;
+      case 'has':
+        if (value === 'attachment' || value === 'attachments') {
+          parsed.hasAttachment = !token.negated;
+        } else if (value === 'ocr') {
+          parsed.hasOcr = !token.negated;
+        } else {
+          addTerm(token, `has:${value}`);
+        }
+        break;
+      case 'sourceurl':
+        if (value) {
+          (token.negated ? parsed.excludedSourceUrls : parsed.sourceUrls).push(value);
+        } else {
+          addTerm(token, 'sourceurl:');
+        }
+        break;
+      case 'created': {
+        const bounds = parseDateSpecBounds(value, now);
+        if (bounds) parsed.createdFilters.push({ negated: token.negated, ...bounds });
+        else addTerm(token, `created:${value}`);
+        break;
+      }
+      case 'updated': {
+        const bounds = parseDateSpecBounds(value, now);
+        if (bounds) parsed.updatedFilters.push({ negated: token.negated, ...bounds });
+        else addTerm(token, `updated:${value}`);
+        break;
+      }
       default:
         addTerm(token, value);
     }
@@ -142,10 +307,17 @@ export function isEmptySearchQuery(q: ParsedSearchQuery): boolean {
     q.excludedTerms.length === 0 &&
     q.tags.length === 0 &&
     q.excludedTags.length === 0 &&
+    q.tagNone === undefined &&
     q.notebooks.length === 0 &&
     q.excludedNotebooks.length === 0 &&
     q.type === undefined &&
-    q.completed === undefined
+    q.completed === undefined &&
+    q.hasAttachment === undefined &&
+    q.hasOcr === undefined &&
+    q.sourceUrls.length === 0 &&
+    q.excludedSourceUrls.length === 0 &&
+    q.createdFilters.length === 0 &&
+    q.updatedFilters.length === 0
   );
 }
 

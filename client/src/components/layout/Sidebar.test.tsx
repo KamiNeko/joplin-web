@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { EXPANDED_NOTEBOOKS_STORAGE_KEY, TAGS_EXPANDED_STORAGE_KEY } from "@/lib/ui-constants";
 import { Notebook, Tag } from "@/lib/types";
 import { FetchCall, jsonResponse, mockFetch } from "@/test/fetch-mock";
-import { renderWithProviders } from "@/test/render";
+import { LocationProbe, renderWithProviders } from "@/test/render";
 import { Sidebar } from "./Sidebar";
 
 vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
@@ -455,5 +455,132 @@ describe("Sidebar", () => {
 
     renderSidebar();
     expect(screen.queryByRole("searchbox")).toBeNull();
+  });
+
+  it("renders Shortcuts for favorited notes, pinned notebooks, and saved searches and supports removing & pinning", async () => {
+    const starredNoteId = id("c");
+    const prefs = {
+      favoriteNoteIds: [starredNoteId],
+      favoriteNotebookIds: [reading.id],
+      savedSearches: [{ id: "ss-1", name: "Unread invoices", query: "tag:invoice iscompleted:0", createdAt: 1000 }],
+      recentReads: [],
+      scratchpad: "",
+      favoriteNotes: [
+        {
+          id: starredNoteId,
+          title: "Pinned Spec",
+          preview: "Spec body",
+          createdTime: 1000,
+          updatedTime: 2000,
+          parentId: work.id,
+        },
+      ],
+      favoriteNotebooks: [
+        { id: reading.id, title: reading.title, parentId: "", noteCount: 2, encrypted: false },
+      ],
+    };
+    const calls = mockSidebarApi((call) => {
+      if (call.method === "GET" && call.path === "/api/preferences") return jsonResponse(prefs);
+      if (call.method === "DELETE" && call.path.startsWith("/api/preferences/")) {
+        return jsonResponse({
+          ...prefs,
+          favoriteNoteIds: [],
+          favoriteNotes: [],
+          favoriteNotebookIds: [],
+          favoriteNotebooks: [],
+          savedSearches: [],
+        });
+      }
+      if (call.method === "POST" && call.path === `/api/preferences/favorites/notebooks/${work.id}`) {
+        return jsonResponse({ ...prefs, favoriteNotebookIds: [...prefs.favoriteNotebookIds, work.id] });
+      }
+      return undefined;
+    });
+
+    const onOpenNote = vi.fn();
+    const onSelectNotebook = vi.fn();
+    const onApplySavedSearch = vi.fn();
+    renderWithProviders(
+      <>
+        <Sidebar
+          searchQuery=""
+          onSelectAllNotes={vi.fn()}
+          onSelectTrash={vi.fn()}
+          onSelectNotebook={onSelectNotebook}
+          onSelectTag={vi.fn()}
+          onSearchChange={vi.fn()}
+          onOpenNote={onOpenNote}
+          onApplySavedSearch={onApplySavedSearch}
+        />
+        <LocationProbe />
+      </>
+    );
+
+    const shortcutsHeader = await screen.findByRole("button", { name: /^Shortcuts/ });
+    expect(shortcutsHeader.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Pinned Spec" }));
+    expect(onOpenNote).toHaveBeenCalledWith(starredNoteId);
+
+    fireEvent.click(screen.getByRole("button", { name: "Unread invoices" }));
+    expect(onApplySavedSearch).toHaveBeenCalledWith("tag:invoice iscompleted:0");
+
+    // Collapsing hides the shortcut list
+    fireEvent.click(shortcutsHeader);
+    expect(screen.queryByRole("button", { name: "Pinned Spec" })).toBeNull();
+    fireEvent.click(shortcutsHeader);
+    expect(screen.getByRole("button", { name: "Pinned Spec" })).toBeTruthy();
+
+    // Remove note shortcut
+    fireEvent.click(screen.getByRole("button", { name: "Remove shortcut for Pinned Spec" }));
+    await waitFor(() =>
+      expect(calls.some((c) => c.method === "DELETE" && c.path === `/api/preferences/favorites/notes/${starredNoteId}`)).toBe(true)
+    );
+
+    // Pin another notebook via menu
+    fireEvent.click(within(await openMenu("Actions for Work")).getByRole("menuitem", { name: "Pin to shortcuts" }));
+    await waitFor(() =>
+      expect(calls.some((c) => c.method === "POST" && c.path === `/api/preferences/favorites/notebooks/${work.id}`)).toBe(true)
+    );
+  });
+
+  it("navigates to Home, Recent, Tasks, Hygiene, Clip & Import and opens Ask AI", async () => {
+    mockSidebarApi();
+    const onOpenAskAi = vi.fn();
+    renderWithProviders(
+      <>
+        <Sidebar
+          searchQuery=""
+          aiEnabled
+          onOpenAskAi={onOpenAskAi}
+          onSelectAllNotes={vi.fn()}
+          onSelectTrash={vi.fn()}
+          onSelectNotebook={vi.fn()}
+          onSelectTag={vi.fn()}
+          onSearchChange={vi.fn()}
+        />
+        <LocationProbe />
+      </>,
+      { route: "/notes" }
+    );
+
+    await screen.findByRole("button", { name: "Home" });
+    fireEvent.click(screen.getByRole("button", { name: "Home" }));
+    expect(screen.getByTestId("location").textContent).toBe("/home");
+
+    fireEvent.click(screen.getByRole("button", { name: "Recent" }));
+    expect(screen.getByTestId("location").textContent).toBe("/recent");
+
+    fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
+    expect(screen.getByTestId("location").textContent).toBe("/tasks");
+
+    fireEvent.click(screen.getByRole("button", { name: "Hygiene" }));
+    expect(screen.getByTestId("location").textContent).toBe("/hygiene");
+
+    fireEvent.click(screen.getByRole("button", { name: "Clip & Import" }));
+    expect(screen.getByTestId("location").textContent).toBe("/clip");
+
+    fireEvent.click(screen.getByRole("button", { name: "Ask AI" }));
+    expect(onOpenAskAi).toHaveBeenCalledTimes(1);
   });
 });

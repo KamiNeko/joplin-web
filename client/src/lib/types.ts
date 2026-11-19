@@ -53,6 +53,19 @@ export interface NoteListItem {
   thumbnail?: { resourceId: string; kind: "image" | "pdf" };
 }
 
+export interface NotebookBreadcrumb {
+  id: string;
+  title: string;
+}
+
+export interface NoteBacklink {
+  id: string;
+  title: string;
+  parentId: string;
+  updatedTime: number;
+  snippet: string;
+}
+
 /**
  * Full Joplin note model including Markdown body and metadata.
  */
@@ -68,6 +81,8 @@ export interface Note {
   parentId: string;
   notebookId: string;
   notebookTitle: string;
+  notebookPath?: NotebookBreadcrumb[];
+  backlinks?: NoteBacklink[];
   tags: Tag[];
   isTodo: boolean;
   todoCompleted: boolean;
@@ -81,6 +96,8 @@ export interface Note {
   encrypted?: boolean;
   /** To-do due date in Unix ms; 0 or missing when none is set */
   todoDue?: number;
+  /** Raw Joplin note properties (source_url, author, location, etc.) */
+  properties?: Record<string, string>;
 }
 
 /** `markupLanguage` of HTML notes, e.g. pages saved with the Joplin Web Clipper */
@@ -335,4 +352,150 @@ export interface OrganizeUndoResponse {
   conflictCount: number;
   errorCount: number;
   canUndo: boolean;
+}
+
+export interface SavedSearch {
+  id: string;
+  name: string;
+  query: string;
+  createdAt: number;
+}
+
+export interface RecentReadEntry {
+  noteId: string;
+  readAt: number;
+}
+
+export interface FavoriteNotebookSummary {
+  id: string;
+  title: string;
+  parentId: string;
+  noteCount: number;
+  encrypted: boolean;
+}
+
+export interface UserPreferences {
+  favoriteNoteIds: string[];
+  favoriteNotebookIds: string[];
+  savedSearches: SavedSearch[];
+  recentReads: RecentReadEntry[];
+  scratchpad: string;
+  favoriteNotes: NoteListItem[];
+  favoriteNotebooks: FavoriteNotebookSummary[];
+}
+
+export interface RecentReadNote extends NoteListItem {
+  readAt: number;
+}
+
+export interface RecentNotesResponse {
+  recentRead: RecentReadNote[];
+  recentCreated: NoteListItem[];
+}
+
+export type NoteAttachmentKind = "image" | "pdf" | "audio" | "video" | "file";
+
+export interface NoteAttachment {
+  id: string;
+  title: string;
+  mime: string;
+  filename: string;
+  fileExtension: string;
+  size: number;
+  updatedTime: number;
+  ocrText: string;
+  kind: NoteAttachmentKind;
+}
+
+export interface NoteRevisionMeta {
+  id: string;
+  itemId: string;
+  titleUpdatedTime: number;
+  updatedTime: number;
+  createdTime: number;
+}
+
+export interface NoteRevisionDetail {
+  id: string;
+  itemId: string;
+  title: string;
+  body: string;
+  updatedTime: number;
+  createdTime: number;
+}
+
+export interface TodoTaskItem extends NoteListItem {
+  notebookTitle: string;
+}
+
+export interface InlineTaskItem {
+  noteId: string;
+  noteTitle: string;
+  parentId: string;
+  notebookTitle: string;
+  line: number;
+  column: number;
+  text: string;
+  checked: boolean;
+  updatedTime: number;
+}
+
+export interface TasksResponse {
+  todoNotes: TodoTaskItem[];
+  inlineTasks: InlineTaskItem[];
+}
+
+export interface HygieneNoteItem extends NoteListItem {
+  notebookTitle: string;
+  previewLength?: number;
+}
+
+export interface DuplicateCluster {
+  id: string;
+  reason: "exact-title" | "similar-content";
+  score: number;
+  notes: HygieneNoteItem[];
+}
+
+export interface HygieneReport {
+  duplicateClusters: DuplicateCluster[];
+  emptyNotes: HygieneNoteItem[];
+  untaggedNotes: HygieneNoteItem[];
+}
+
+export interface AiFeatureStatus {
+  enabled: boolean;
+  model?: string;
+}
+
+export interface AskNotesCitation {
+  id: string;
+  title: string;
+  notebookTitle: string;
+  updatedTime: number;
+  excerpt: string;
+}
+
+export interface AskNotesResponse {
+  answer: string;
+  citations: AskNotesCitation[];
+  usage?: OrganizeUsage;
+}
+
+export type NoteAssistAction = "summarize" | "action-items" | "suggest-tags" | "cleanup";
+
+export interface NoteAssistResponse {
+  result: string;
+  tags?: string[];
+  usage?: OrganizeUsage;
+}
+
+export interface ClipResponse {
+  note: Note;
+  extractedTitle: string;
+  siteName?: string;
+}
+
+export interface EmailIngestResponse {
+  note: Note;
 }

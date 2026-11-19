@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import { formatRelativeTime, noteDisplayTitle } from "@/lib/format";
 import { dueTime, formatDueDate, isOverdue } from "@/lib/due";
 import type { SelectionModifiers } from "@/hooks/use-note-selection";
-import { AlarmClock, Check, CheckSquare, Square, FileText, Lock } from "lucide-react";
+import { AlarmClock, Check, CheckSquare, FileText, Lock, Square, Star } from "lucide-react";
 
 interface NoteListItemProps {
   note: NoteListItemType & {
@@ -17,6 +17,7 @@ interface NoteListItemProps {
     todoDue?: number;
   };
   isActive?: boolean;
+  isFavorite?: boolean;
   selectionMode?: boolean;
   isSelected?: boolean;
   onClick?: () => void;
@@ -95,6 +96,7 @@ function NoteThumbnail({ resourceId, kind }: NonNullable<NoteListItemType["thumb
 export const NoteListItem = memo(function NoteListItem({
   note,
   isActive,
+  isFavorite = false,
   selectionMode = false,
   isSelected = false,
   onClick,
@@ -219,6 +221,9 @@ export const NoteListItem = memo(function NoteListItem({
           >
             {title}
           </h3>
+          {isFavorite && (
+            <Star className="h-3.5 w-3.5 shrink-0 fill-amber-500 text-amber-500" aria-hidden="true" />
+          )}
         </div>
 
         {relativeTime && (

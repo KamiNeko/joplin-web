@@ -3,7 +3,10 @@ export const MOBILE_SEARCH_INPUT_ID = "mobile-sidebar-search";
 
 /** Short summary of the search syntax, shown as the search fields' tooltip and with empty results */
 export const SEARCH_SYNTAX_HINT =
-  'Searches titles, bodies, and attachment OCR. All words must match; use "exact phrase", -word to exclude, and filters tag:name, notebook:name, type:todo, iscompleted:0.';
+  'Searches titles, bodies, and attachment OCR. Use "exact phrase", -word to exclude, tag:name, notebook:name, tag:none, type:todo, iscompleted:0, has:attachment, has:ocr, sourceurl:domain, created:week, updated:today.';
+
+/** localStorage key holding the NoteList view layout ("list" | "gallery" | "table" | "board") */
+export const NOTE_LIST_VIEW_STORAGE_KEY = "joplin-note-list-view";
 
 /**
  * Classes for sidebar row action buttons: shown on hover/focus on wide screens with a mouse,

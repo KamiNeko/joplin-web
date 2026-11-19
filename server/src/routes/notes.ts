@@ -36,6 +36,23 @@ router.get('/', async (req, res) => {
 });
 
 /**
+ * GET /api/notes/recent
+ * Returns recently read notes (tracked by PreferencesStore) and recently created notes.
+ * Must be registered before /:id so "recent" is not treated as a note ID.
+ */
+router.get('/recent', async (req, res) => {
+  const rawLimit = req.query.limit;
+  const limit =
+    typeof rawLimit === 'string' && /^\d+$/.test(rawLimit.trim())
+      ? Math.min(Math.max(1, parseInt(rawLimit.trim(), 10)), 100)
+      : 50;
+  const store = req.preferencesStore;
+  const recentReads = store ? store.get(noteCache.getOwnerKey(req.sessionId!)).recentReads : [];
+  const data = await noteCache.getRecentNotes(req.sessionId!, recentReads, limit);
+  res.status(200).json(data);
+});
+
+/**
  * POST /api/notes/batch
  * Applies bulk edits across up to 1000 notes:
  * { items: [{ id, baseUpdatedTime?, parentId?, title?, addTags?, removeTags? }], parentId?, addTags?, removeTags?, trash?, restore? }
@@ -172,6 +189,58 @@ router.delete('/:id/tags/:tagId', async (req, res) => {
  */
 router.post('/:id/restore', async (req, res) => {
   const note = await noteWriter.restoreNote(req.sessionId!, req.params.id);
+  res.status(200).json(note);
+});
+
+/**
+ * GET /api/notes/:id/attachments
+ * Lists linked attachments and their cached OCR text for a note
+ */
+router.get('/:id/attachments', async (req, res) => {
+  const attachments = await noteCache.getNoteAttachments(req.sessionId!, req.params.id);
+  if (!attachments) {
+    res.status(404).json({ error: `Note not found with id: ${req.params.id}` });
+    return;
+  }
+  res.status(200).json(attachments);
+});
+
+/**
+ * GET /api/notes/:id/revisions
+ * Lists revision metadata for a note (newest first)
+ */
+router.get('/:id/revisions', async (req, res) => {
+  const revisions = await noteCache.getNoteRevisions(req.sessionId!, req.params.id);
+  if (!revisions) {
+    res.status(404).json({ error: `Note not found with id: ${req.params.id}` });
+    return;
+  }
+  res.status(200).json(revisions);
+});
+
+/**
+ * GET /api/notes/:id/revisions/:revId
+ * Reconstructs title and body for a specific revision
+ */
+router.get('/:id/revisions/:revId', async (req, res) => {
+  const detail = await noteCache.getNoteRevisionDetail(req.sessionId!, req.params.id, req.params.revId);
+  if (!detail) {
+    res.status(404).json({ error: `Revision not found: ${req.params.revId}` });
+    return;
+  }
+  res.status(200).json(detail);
+});
+
+/**
+ * POST /api/notes/:id/revisions/:revId/restore
+ * Restores a note's title and body from a saved revision
+ */
+router.post('/:id/revisions/:revId/restore', async (req, res) => {
+  const { baseUpdatedTime, force } = (req.body ?? {}) as { baseUpdatedTime?: unknown; force?: unknown };
+  const note = await noteWriter.restoreNoteRevision(req.sessionId!, req.params.id, req.params.revId, {
+    baseUpdatedTime: typeof baseUpdatedTime === 'number' ? baseUpdatedTime : undefined,
+    force: force === true,
+  });
   res.status(200).json(note);
 });
 
