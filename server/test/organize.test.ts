@@ -1801,3 +1801,271 @@ describe('multi-job storage, v1 migration, lazy loading, 409 exclusivity, and re
     }
   });
 });
+
+describe('whole-job filtering, apply targets, useSuggestion/undoMode, and chunked undo', () => {
+  test('filters whole job server-side, returns unapplied targets, resolves useSuggestion with recurringTagFilter, appends undo across chunks, and undoes in chunks', { timeout: TEST_TIMEOUT_MS }, async () => {
+    const chunkDir = mkdtempSync(join(tmpdir(), 'joplin-organize-chunks-'));
+    let server: Server | undefined;
+    const createdNoteIds: string[] = [];
+
+    try {
+      const makeNote = async (title: string, body: string, parentId = demoId('nb-work')) => {
+        const res = await app.api('/api/notes', {
+          method: 'POST',
+          body: JSON.stringify({ parentId, title, body }),
+        });
+        assert.equal(res.status, 201);
+        createdNoteIds.push(res.data.id);
+        return res.data.id as string;
+      };
+
+      const nVeryHighApplied = await makeNote('vh_applied.pdf', 'Already applied note.');
+      const nVeryHighPending = await makeNote('vh_pending.pdf', 'Pending very high note.');
+      const nHighPending = await makeNote('high_pending.pdf', 'Pending high note.');
+      const nLowPending = await makeNote('low_pending.pdf', 'Low confidence note.', demoId('nb-projects'));
+      const nFailed = await makeNote('failed_note.pdf', 'Failing note.');
+
+      const suggestionsByTitle: Record<
+        string,
+        { title: string; notebookId: string; tags: string[]; confidence: number }
+      > = {
+        'vh_applied.pdf': {
+          title: '2025-01-01 Very High Applied',
+          notebookId: demoId('nb-projects'),
+          tags: ['invoice', 'rare-one-off'],
+          confidence: 0.94,
+        },
+        'vh_pending.pdf': {
+          title: '2025-01-02 Very High Pending',
+          notebookId: demoId('nb-projects'),
+          tags: ['invoice', 'rare-one-off'],
+          confidence: 0.89,
+        },
+        'high_pending.pdf': {
+          title: '2025-01-03 High Pending',
+          notebookId: demoId('nb-reading'),
+          tags: ['report', 'rare-one-off-2'],
+          confidence: 0.76,
+        },
+        'low_pending.pdf': {
+          title: '2025-01-04 Low Stays Put',
+          notebookId: demoId('nb-projects'), // same notebook (not a move)
+          tags: ['other'],
+          confidence: 0.51,
+        },
+      };
+
+      const svc = trackService(
+        new OrganizerService({
+          aiBaseUrl: 'http://127.0.0.1:18317/v1',
+          aiModel: 'deepseek-flash',
+          aiConcurrency: 1,
+          aiFake: false,
+          cacheDir: chunkDir,
+          completionFn: async (messages) => {
+            const usr = messages.find((m) => m.role === 'user')?.content ?? '';
+            const m = /^Current title:\s*(.+)$/m.exec(usr);
+            const curTitle = m?.[1]?.trim() ?? '';
+            const cfg = suggestionsByTitle[curTitle];
+            if (!cfg) {
+              throw new Error('AI provider returned HTTP 500');
+            }
+            return {
+              content: JSON.stringify({
+                ...cfg,
+                documentDate: '2025-01-01',
+                reason: `Classified ${curTitle}`,
+              }),
+              usage: { promptTokens: 50, completionTokens: 20, totalTokens: 70 },
+            };
+          },
+        })
+      );
+
+      const testExpress = express();
+      testExpress.use(express.json());
+      testExpress.use('/api/organize', createOrganizeRouter(svc));
+      testExpress.use(errorHandler);
+      server = testExpress.listen(0, '127.0.0.1');
+      await new Promise<void>((resolve) => server!.once('listening', resolve));
+      const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+      const req = async (path: string, init: RequestInit = {}): Promise<{ status: number; data: any }> => {
+        const res = await fetch(`${baseUrl}${path}`, {
+          ...init,
+          headers: {
+            Authorization: `Bearer ${session}`,
+            ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+            ...(init.headers as Record<string, string> | undefined),
+          },
+        });
+        return { status: res.status, data: await res.json() };
+      };
+
+      const created = await req('/api/organize/jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          noteIds: [nVeryHighApplied, nVeryHighPending, nHighPending, nLowPending, nFailed],
+          excludeNotebookIds: [demoId('nb-work')],
+        }),
+      });
+      assert.equal(created.status, 201);
+      const jobId = created.data.jobId as string;
+      await svc.waitForIdle(session);
+
+      // Apply nVeryHighApplied upfront (page 1 already applied scenario)
+      const preApply = await req(`/api/organize/jobs/${jobId}/apply`, {
+        method: 'POST',
+        body: JSON.stringify({ items: [{ noteId: nVeryHighApplied, useSuggestion: true }] }),
+      });
+      assert.equal(preApply.status, 200);
+      assert.equal(preApply.data.appliedCount, 1);
+
+      // Default GET reports full filterCounts across all 5 notes
+      const fullJob = await req(`/api/organize/jobs/${jobId}`);
+      assert.equal(fullJob.status, 200);
+      assert.equal(fullJob.data.filter, 'all');
+      assert.equal(fullJob.data.totalItems, 5);
+      assert.equal(fullJob.data.progress.total, 5);
+      assert.deepEqual(fullJob.data.filterCounts, {
+        all: 5,
+        veryHigh: 2,
+        veryHighUnapplied: 1,
+        high: 3,
+        highUnapplied: 2,
+        moves: 2,
+        movesUnapplied: 2,
+      });
+
+      // Server-side ?filter=very-high&offset=1&limit=1 slices within filtered subset while keeping progress.total == 5
+      const vhPage2 = await req(`/api/organize/jobs/${jobId}?filter=very-high&offset=1&limit=1`);
+      assert.equal(vhPage2.status, 200);
+      assert.equal(vhPage2.data.filter, 'very-high');
+      assert.equal(vhPage2.data.totalItems, 2);
+      assert.equal(vhPage2.data.progress.total, 5);
+      assert.equal(vhPage2.data.items.length, 1);
+      assert.equal(vhPage2.data.items[0].noteId, nVeryHighPending);
+
+      const movesOnly = await req(`/api/organize/jobs/${jobId}?filter=moves`);
+      assert.equal(movesOnly.status, 200);
+      assert.equal(movesOnly.data.totalItems, 2);
+
+      const badFilter = await req(`/api/organize/jobs/${jobId}?filter=unknown`);
+      assert.equal(badFilter.status, 400);
+
+      // GET /targets returns only unapplied done items >= threshold
+      const badTargets = await req(`/api/organize/jobs/${jobId}/targets?mode=low`);
+      assert.equal(badTargets.status, 400);
+
+      const vhTargets = await req(`/api/organize/jobs/${jobId}/targets?mode=very-high`);
+      assert.equal(vhTargets.status, 200);
+      assert.deepEqual(vhTargets.data, { noteIds: [nVeryHighPending] });
+
+      const highTargets = await req(`/api/organize/jobs/${jobId}/targets?mode=high`);
+      assert.equal(highTargets.status, 200);
+      assert.deepEqual(highTargets.data, { noteIds: [nVeryHighPending, nHighPending] });
+
+      // Invalid undoMode -> 400
+      const badUndoMode = await req(`/api/organize/jobs/${jobId}/apply`, {
+        method: 'POST',
+        body: JSON.stringify({ items: [{ noteId: nVeryHighPending, useSuggestion: true }], undoMode: 'merge' }),
+      });
+      assert.equal(badUndoMode.status, 400);
+
+      // Chunk 1: apply nVeryHighPending with useSuggestion + undoMode='replace'
+      // Verifies rare-one-off (< 3 occurrences, not existing tag) is dropped by recurringTagFilter while 'invoice' applies
+      const applyChunk1 = await req(`/api/organize/jobs/${jobId}/apply`, {
+        method: 'POST',
+        body: JSON.stringify({
+          items: [{ noteId: nVeryHighPending, useSuggestion: true }],
+          undoMode: 'replace',
+        }),
+      });
+      assert.equal(applyChunk1.status, 200);
+      assert.equal(applyChunk1.data.appliedCount, 1);
+      assert.equal(applyChunk1.data.canUndo, true);
+
+      const noteVhpAfter = (await app.api(`/api/notes/${nVeryHighPending}`)).data;
+      assert.equal(noteVhpAfter.title, '2025-01-02 Very High Pending');
+      assert.equal(noteVhpAfter.parentId, demoId('nb-projects'));
+      assert.deepEqual(
+        noteVhpAfter.tags.map((t: any) => t.title),
+        ['invoice']
+      );
+
+      // Chunk 2: apply nHighPending with useSuggestion + undoMode='append'
+      const applyChunk2 = await req(`/api/organize/jobs/${jobId}/apply`, {
+        method: 'POST',
+        body: JSON.stringify({
+          items: [{ noteId: nHighPending, useSuggestion: true }],
+          undoMode: 'append',
+        }),
+      });
+      assert.equal(applyChunk2.status, 200);
+      assert.equal(applyChunk2.data.appliedCount, 1);
+      assert.equal(applyChunk2.data.canUndo, true);
+
+      const afterBoth = await req(`/api/organize/jobs/${jobId}`);
+      assert.equal(afterBoth.data.filterCounts.veryHighUnapplied, 0);
+      assert.equal(afterBoth.data.filterCounts.highUnapplied, 0);
+
+      // Invalid limit on /undo -> 400
+      const badUndoLimit = await req(`/api/organize/jobs/${jobId}/undo`, {
+        method: 'POST',
+        body: JSON.stringify({ limit: 0 }),
+      });
+      assert.equal(badUndoLimit.status, 400);
+
+      // Chunked undo: limit=1 reverts first item and leaves remainingCount=1 + canUndo=true
+      const undoChunk1 = await req(`/api/organize/jobs/${jobId}/undo`, {
+        method: 'POST',
+        body: JSON.stringify({ limit: 1 }),
+      });
+      assert.equal(undoChunk1.status, 200);
+      assert.equal(undoChunk1.data.revertedCount, 1);
+      assert.equal(undoChunk1.data.canUndo, true);
+      assert.equal(undoChunk1.data.remainingCount, 1);
+
+      // First note reverted, second note still applied
+      const reverted1 = (await app.api(`/api/notes/${nVeryHighPending}`)).data;
+      const stillApplied2 = (await app.api(`/api/notes/${nHighPending}`)).data;
+      assert.equal(reverted1.title, 'vh_pending.pdf');
+      assert.equal(stillApplied2.title, '2025-01-03 High Pending');
+
+      // Undo chunk 2 reverts second note and clears undo
+      const undoChunk2 = await req(`/api/organize/jobs/${jobId}/undo`, {
+        method: 'POST',
+        body: JSON.stringify({ limit: 1 }),
+      });
+      assert.equal(undoChunk2.status, 200);
+      assert.equal(undoChunk2.data.revertedCount, 1);
+      assert.equal(undoChunk2.data.canUndo, false);
+      assert.equal(undoChunk2.data.remainingCount, 0);
+
+      const reverted2 = (await app.api(`/api/notes/${nHighPending}`)).data;
+      assert.equal(reverted2.title, 'high_pending.pdf');
+      assert.equal(reverted2.parentId, demoId('nb-work'));
+
+      // Also verify main Express router mounts GET /targets cleanly
+      const mainStart = await app.api('/api/organize/jobs', {
+        method: 'POST',
+        body: JSON.stringify({ noteIds: [demoId('note-scanned-invoice')] }),
+      });
+      assert.equal(mainStart.status, 201);
+      await pollUntilDone(mainStart.data.jobId);
+      const mainTargets = await app.api(`/api/organize/jobs/${mainStart.data.jobId}/targets?mode=very-high`);
+      assert.equal(mainTargets.status, 200);
+      assert.deepEqual(mainTargets.data, { noteIds: [demoId('note-scanned-invoice')] });
+    } finally {
+      if (server) {
+        server.closeAllConnections();
+        await new Promise((resolve) => server!.close(resolve));
+      }
+      for (const nid of createdNoteIds) {
+        app.mock.items.delete(`${nid}.md`);
+      }
+      await app.api('/api/notebooks/refresh', { method: 'POST' });
+      rmSync(chunkDir, { recursive: true, force: true });
+    }
+  });
+});

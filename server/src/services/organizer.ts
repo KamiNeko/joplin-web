@@ -7,13 +7,17 @@ import type {
   OrganizeApplyItemInput,
   OrganizeApplyResponse,
   OrganizeDeleteResponse,
+  OrganizeFilter,
+  OrganizeFilterCounts,
   OrganizeJobItem,
   OrganizeJobResponse,
   OrganizeJobStatus,
   OrganizeJobSummary,
   OrganizeRetryResponse,
+  OrganizeSelectionMode,
   OrganizeStatus,
   OrganizeSuggestion,
+  OrganizeTargetsResponse,
   OrganizeUndoRecord,
   OrganizeUndoResponse,
   OrganizeUsage,
@@ -83,6 +87,8 @@ const MAX_REASON_CHARS = 240;
 const REQUEST_TIMEOUT_MS = 60_000;
 const PERSIST_DEBOUNCE_MS = 300;
 export const MAX_RETAINED_JOBS = 20;
+export const VERY_HIGH_CONFIDENCE_THRESHOLD = 0.85;
+export const HIGH_CONFIDENCE_THRESHOLD = 0.7;
 const ORGANIZE_INDEX_FILE = 'index.json';
 const OWNER_KEY_RE = /^[A-Za-z0-9_-]+$/;
 const SAFE_JOB_ID_RE = /^[0-9a-f]{32}$|^[0-9a-f-]{16,64}$/i;
@@ -2182,13 +2188,15 @@ export class OrganizerService {
   public async getJob(
     sessionId: string,
     jobId: string,
-    query: { offset?: number; limit?: number } = {}
+    query: { offset?: number; limit?: number; filter?: OrganizeFilter } = {}
   ): Promise<OrganizeJobResponse> {
     const { ownerKey, job } = this.assertOwnerJob(sessionId, jobId);
 
     const offset = Number.isFinite(query.offset) && (query.offset ?? 0) >= 0 ? Math.floor(query.offset!) : 0;
     const rawLimit = Number.isFinite(query.limit) ? Math.floor(query.limit!) : 100;
     const limit = Math.max(1, Math.min(500, rawLimit || 100));
+    const filter: OrganizeFilter =
+      query.filter === 'very-high' || query.filter === 'high' || query.filter === 'moves' ? query.filter : 'all';
 
     const entry = noteCache.peekEntry(sessionId) ?? noteCache.loadSavedEntryByOwnerKey(ownerKey);
     const pathById = entry ? buildNotebookPaths(entry).pathById : null;
@@ -2203,6 +2211,17 @@ export class OrganizerService {
     let failed = 0;
     let appliedCount = 0;
     let retryableFailedCount = 0;
+    const filterCounts: OrganizeFilterCounts = {
+      all: job.items.length,
+      veryHigh: 0,
+      veryHighUnapplied: 0,
+      high: 0,
+      highUnapplied: 0,
+      moves: 0,
+      movesUnapplied: 0,
+    };
+    const matchingItems: InternalJobItem[] = [];
+
     for (const item of job.items) {
       if (item.status === 'done') done++;
       else if (item.status === 'failed') {
@@ -2212,9 +2231,40 @@ export class OrganizerService {
         }
       }
       if (item.applied) appliedCount++;
+
+      let matchesFilter = filter === 'all';
+      if (item.status === 'done' && item.suggestion) {
+        const conf = item.suggestion.confidence;
+        const liveNote = entry?.notes.get(item.noteId);
+        const currentNotebookId = liveNote ? liveNote.parentId || '' : item.currentNotebookId;
+        const isVeryHigh = conf >= VERY_HIGH_CONFIDENCE_THRESHOLD;
+        const isHigh = conf >= HIGH_CONFIDENCE_THRESHOLD;
+        const isMove = Boolean(item.suggestion.notebookId && item.suggestion.notebookId !== currentNotebookId);
+
+        if (isVeryHigh) {
+          filterCounts.veryHigh++;
+          if (!item.applied) filterCounts.veryHighUnapplied++;
+        }
+        if (isHigh) {
+          filterCounts.high++;
+          if (!item.applied) filterCounts.highUnapplied++;
+        }
+        if (isMove) {
+          filterCounts.moves++;
+          if (!item.applied) filterCounts.movesUnapplied++;
+        }
+
+        if (filter === 'very-high') matchesFilter = isVeryHigh;
+        else if (filter === 'high') matchesFilter = isHigh;
+        else if (filter === 'moves') matchesFilter = isMove;
+      }
+
+      if (matchesFilter) {
+        matchingItems.push(item);
+      }
     }
 
-    const slice = job.items.slice(offset, offset + limit).map((item): OrganizeJobItem => {
+    const slice = matchingItems.slice(offset, offset + limit).map((item): OrganizeJobItem => {
       const liveNote = entry?.notes.get(item.noteId);
       const currentTitle = liveNote ? liveNote.title : item.currentTitle;
       const currentNotebookId = liveNote ? liveNote.parentId || '' : item.currentNotebookId;
@@ -2245,15 +2295,37 @@ export class OrganizerService {
       },
       appliedCount,
       retryableFailedCount,
+      filter,
+      filterCounts,
       usage: { ...job.usage },
       offset,
       limit,
-      totalItems: job.items.length,
+      totalItems: matchingItems.length,
       canUndo: Boolean(job.lastUndo && job.lastUndo.items.length > 0),
       createdAt: job.createdAt,
       updatedAt: job.updatedAt,
       items: slice,
     };
+  }
+
+  /**
+   * Lists all unapplied completed `noteId`s across the whole job that satisfy the requested
+   * confidence threshold (`very-high` >= 0.85, `high` >= 0.7).
+   */
+  public async getApplyTargets(
+    sessionId: string,
+    jobId: string,
+    mode: OrganizeSelectionMode
+  ): Promise<OrganizeTargetsResponse> {
+    const { job } = this.assertOwnerJob(sessionId, jobId);
+    const threshold = mode === 'very-high' ? VERY_HIGH_CONFIDENCE_THRESHOLD : HIGH_CONFIDENCE_THRESHOLD;
+    const noteIds: string[] = [];
+    for (const item of job.items) {
+      if (item.status === 'done' && !item.applied && item.suggestion && item.suggestion.confidence >= threshold) {
+        noteIds.push(item.noteId);
+      }
+    }
+    return { noteIds };
   }
 
   public async cancelJob(sessionId: string, jobId: string): Promise<{ id: string; status: OrganizeJobStatus }> {
@@ -2406,11 +2478,18 @@ export class OrganizerService {
   public async applyJob(
     sessionId: string,
     jobId: string,
-    body: { items?: unknown }
+    body: { items?: unknown; undoMode?: unknown }
   ): Promise<OrganizeApplyResponse> {
     const { ownerKey, job } = this.assertOwnerJob(sessionId, jobId);
     if (!body || !Array.isArray(body.items) || body.items.length === 0) {
       throw new OrganizeValidationError('items must be a non-empty array');
+    }
+    let undoMode: 'replace' | 'append' = 'replace';
+    if (body.undoMode !== undefined) {
+      if (body.undoMode !== 'replace' && body.undoMode !== 'append') {
+        throw new OrganizeValidationError('undoMode must be replace or append');
+      }
+      undoMode = body.undoMode;
     }
 
     const parsedInputs: OrganizeApplyItemInput[] = [];
@@ -2434,6 +2513,9 @@ export class OrganizerService {
       if (item.baseUpdatedTime !== undefined && (typeof item.baseUpdatedTime !== 'number' || !Number.isFinite(item.baseUpdatedTime))) {
         throw new OrganizeValidationError('Invalid baseUpdatedTime');
       }
+      if (item.useSuggestion !== undefined && typeof item.useSuggestion !== 'boolean') {
+        throw new OrganizeValidationError('useSuggestion must be a boolean');
+      }
       let addTags: string[] | undefined;
       if (item.addTags !== undefined) {
         if (!Array.isArray(item.addTags) || !item.addTags.every((t) => typeof t === 'string')) {
@@ -2449,17 +2531,39 @@ export class OrganizerService {
         ...(item.notebookId !== undefined ? { notebookId: item.notebookId } : {}),
         ...(addTags !== undefined ? { addTags } : {}),
         ...(item.baseUpdatedTime !== undefined ? { baseUpdatedTime: item.baseUpdatedTime } : {}),
+        ...(item.useSuggestion ? { useSuggestion: true } : {}),
       });
     }
 
     // Snapshot pre-apply titles and parent notebooks before sending batch updates
     const entry = await noteCache.getEntry(sessionId);
     const jobItemMap = new Map(job.items.map((it) => [it.noteId, it]));
+    const needsSuggestionTags = parsedInputs.some((inp) => inp.useSuggestion && inp.addTags === undefined);
+    const keepTag = needsSuggestionTags
+      ? recurringTagFilter(
+          job.items,
+          new Set([...entry.tags.values()].filter((t) => !(t.deletedTime > 0)).map((t) => t.title.trim().toLowerCase()))
+        )
+      : null;
     const prevSnapshot = new Map<string, { title: string; parentId: string; updatedTime: number }>();
 
     const batchItems: BatchNoteItem[] = parsedInputs.map((inp) => {
       const liveNote = entry.notes.get(inp.noteId);
       const jobItem = jobItemMap.get(inp.noteId);
+      if (inp.useSuggestion && (!jobItem || jobItem.status !== 'done' || !jobItem.suggestion)) {
+        throw new OrganizeValidationError(`No completed suggestion available for note ${inp.noteId}`);
+      }
+      const suggestion = inp.useSuggestion ? jobItem!.suggestion! : undefined;
+      const effectiveTitle = inp.title !== undefined ? inp.title : suggestion?.title;
+      const effectiveNotebookId =
+        inp.notebookId !== undefined
+          ? inp.notebookId
+          : suggestion?.notebookId
+          ? suggestion.notebookId
+          : undefined;
+      const effectiveAddTags =
+        inp.addTags !== undefined ? inp.addTags : suggestion ? suggestion.tags.filter(keepTag!) : undefined;
+
       const prevTitle = liveNote?.title ?? jobItem?.currentTitle ?? '';
       const prevParentId = liveNote?.parentId ?? jobItem?.currentNotebookId ?? '';
       const baseUpdated = inp.baseUpdatedTime ?? liveNote?.updatedTime ?? jobItem?.updatedTime;
@@ -2472,18 +2576,20 @@ export class OrganizerService {
       const batchItem: BatchNoteItem = {
         id: inp.noteId,
         ...(baseUpdated !== undefined ? { baseUpdatedTime: baseUpdated } : {}),
-        ...(inp.title !== undefined ? { title: inp.title } : {}),
-        ...(inp.notebookId !== undefined && inp.notebookId !== prevParentId ? { parentId: inp.notebookId } : {}),
-        ...(inp.addTags && inp.addTags.length > 0 ? { addTags: inp.addTags } : {}),
+        ...(effectiveTitle !== undefined ? { title: effectiveTitle } : {}),
+        ...(effectiveNotebookId !== undefined && effectiveNotebookId !== prevParentId
+          ? { parentId: effectiveNotebookId }
+          : {}),
+        ...(effectiveAddTags && effectiveAddTags.length > 0 ? { addTags: effectiveAddTags } : {}),
       };
       // If caller sent unchanged notebookId, ensure batch call still has an explicit change if title/tags weren't sent
       if (
         batchItem.title === undefined &&
         batchItem.parentId === undefined &&
         batchItem.addTags === undefined &&
-        inp.notebookId !== undefined
+        effectiveNotebookId !== undefined
       ) {
-        batchItem.parentId = inp.notebookId;
+        batchItem.parentId = effectiveNotebookId;
       }
       return batchItem;
     });
@@ -2536,10 +2642,21 @@ export class OrganizerService {
     }
 
     if (undoItems.length > 0) {
-      job.lastUndo = {
-        appliedAt: Date.now(),
-        items: undoItems,
-      };
+      if (undoMode === 'append' && job.lastUndo) {
+        const seenUndoIds = new Set(job.lastUndo.items.map((u) => u.noteId));
+        for (const u of undoItems) {
+          if (!seenUndoIds.has(u.noteId)) {
+            job.lastUndo.items.push(u);
+            seenUndoIds.add(u.noteId);
+          }
+        }
+        job.lastUndo.appliedAt = Date.now();
+      } else {
+        job.lastUndo = {
+          appliedAt: Date.now(),
+          items: undoItems,
+        };
+      }
     }
     job.updatedAt = Date.now();
     this.saveJobNow(ownerKey, job.id);
@@ -2553,14 +2670,27 @@ export class OrganizerService {
     };
   }
 
-  public async undoJob(sessionId: string, jobId: string): Promise<OrganizeUndoResponse> {
+  public async undoJob(
+    sessionId: string,
+    jobId: string,
+    body?: { limit?: unknown }
+  ): Promise<OrganizeUndoResponse> {
     const { ownerKey, job } = this.assertOwnerJob(sessionId, jobId);
     const record = job.lastUndo;
     if (!record || record.items.length === 0) {
       throw new OrganizeValidationError('Nothing to undo for this job', 409);
     }
 
-    const batchItems: BatchNoteItem[] = record.items.map((item) => ({
+    let limit = record.items.length;
+    if (body && body.limit !== undefined) {
+      if (typeof body.limit !== 'number' || !Number.isFinite(body.limit) || Math.floor(body.limit) < 1) {
+        throw new OrganizeValidationError('limit must be a positive integer');
+      }
+      limit = Math.floor(body.limit);
+    }
+
+    const targetItems = record.items.slice(0, limit);
+    const batchItems: BatchNoteItem[] = targetItems.map((item) => ({
       id: item.noteId,
       baseUpdatedTime: item.baseUpdatedTime,
       title: item.previousTitle,
@@ -2605,7 +2735,8 @@ export class OrganizerService {
       }
     }
 
-    job.lastUndo = null;
+    const remainingItems = record.items.slice(targetItems.length);
+    job.lastUndo = remainingItems.length > 0 ? { appliedAt: record.appliedAt, items: remainingItems } : null;
     job.updatedAt = Date.now();
     this.saveJobNow(ownerKey, job.id);
 
@@ -2614,7 +2745,8 @@ export class OrganizerService {
       revertedCount,
       conflictCount,
       errorCount,
-      canUndo: false,
+      canUndo: Boolean(job.lastUndo && job.lastUndo.items.length > 0),
+      remainingCount: remainingItems.length,
     };
   }
 
