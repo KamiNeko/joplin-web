@@ -12,12 +12,12 @@ function headerValue(value: string | string[] | undefined): string {
  * CSRF protection for state-changing requests, on top of the SameSite=Strict session cookie.
  *
  * Browsers always send an Origin header on POST/PUT/DELETE. It must name this instance: the host the
- * request was sent to (Host or X-Forwarded-Host, which a cross-site page can't set), PUBLIC_URL or
- * one of the CORS_ORIGIN entries. Requests without Origin come from non-browser clients and are only
- * accepted when they don't rely on the session cookie. "Origin: null" (sandboxed frames, data: URLs)
- * is always rejected.
+ * request was sent to (Host — or X-Forwarded-Host only when TRUST_PROXY trusts the peer),
+ * PUBLIC_URL or one of the CORS_ORIGIN entries. Requests without Origin come from non-browser
+ * clients and are only accepted when they don't rely on the session cookie. "Origin: null"
+ * (sandboxed frames, data: URLs) is always rejected.
  */
-export function createOriginCheck(config: Pick<AppConfig, 'corsOrigin' | 'publicUrl'>) {
+export function createOriginCheck(config: Pick<AppConfig, 'corsOrigin' | 'publicUrl' | 'trustProxy'>) {
   const configured = new Set<string>();
   for (const origin of [config.corsOrigin, config.publicUrl].flat()) {
     if (!origin || origin === '*') continue;
@@ -27,6 +27,15 @@ export function createOriginCheck(config: Pick<AppConfig, 'corsOrigin' | 'public
       // not a valid origin, can never match
     }
   }
+
+  const trustsForwardedHost = (req: Request): boolean => {
+    if (config.trustProxy === false) return false;
+    const trustProxyFn = req.app?.get('trust proxy fn') as
+      | ((addr: string, hop: number) => boolean)
+      | undefined;
+    if (typeof trustProxyFn !== 'function') return Boolean(config.trustProxy);
+    return Boolean(req.socket?.remoteAddress && trustProxyFn(req.socket.remoteAddress, 0));
+  };
 
   const isAllowed = (origin: string, req: Request): boolean => {
     let url: URL;
@@ -38,7 +47,8 @@ export function createOriginCheck(config: Pick<AppConfig, 'corsOrigin' | 'public
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
     if (configured.has(url.origin)) return true;
     const host = url.host.toLowerCase();
-    return host === headerValue(req.headers.host) || host === headerValue(req.headers['x-forwarded-host']);
+    if (host === headerValue(req.headers.host)) return true;
+    return trustsForwardedHost(req) && host === headerValue(req.headers['x-forwarded-host']);
   };
 
   return (req: Request, res: Response, next: NextFunction): void => {

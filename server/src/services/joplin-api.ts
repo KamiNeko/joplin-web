@@ -61,6 +61,8 @@ export class JoplinApiService {
     this.client = axios.create({
       baseURL,
       timeout: 15000,
+      // Never follow redirects automatically so upstream credentials/session headers cannot leak
+      maxRedirects: 0,
       headers: {
         'Accept': 'application/json, text/plain, */*',
       },

@@ -200,13 +200,39 @@ describe('CSRF protection', () => {
     assert.equal(res.status, 403);
   });
 
-  test('accepts the origin from X-Forwarded-Host, PUBLIC_URL and CORS_ORIGIN', async () => {
-    const baseUrl = await startApp({ publicUrl: 'https://notes-web.example.com' });
-    const { cookie } = await browserLogin(baseUrl);
-    const viaProxy = { Cookie: cookie, Origin: 'https://proxy.example.com', 'X-Forwarded-Host': 'proxy.example.com' };
-    assert.equal((await newNotebook(baseUrl, viaProxy)).status, 201);
-    assert.equal((await newNotebook(baseUrl, { Cookie: cookie, Origin: 'https://notes-web.example.com' })).status, 201);
-    assert.equal((await newNotebook(baseUrl, { Cookie: cookie, Origin: 'http://localhost:5173' })).status, 201);
+  test('accepts the origin from PUBLIC_URL, CORS_ORIGIN, and X-Forwarded-Host only from a trusted proxy', async () => {
+    const directUrl = await startApp({ publicUrl: 'https://notes-web.example.com' });
+    const directLogin = await browserLogin(directUrl);
+    const spoofedProxy = {
+      Cookie: directLogin.cookie,
+      Origin: 'https://proxy.example.com',
+      'X-Forwarded-Host': 'proxy.example.com',
+    };
+    assert.equal((await newNotebook(directUrl, spoofedProxy)).status, 403);
+    assert.equal((await newNotebook(directUrl, { Cookie: directLogin.cookie, Origin: 'https://notes-web.example.com' })).status, 201);
+    assert.equal((await newNotebook(directUrl, { Cookie: directLogin.cookie, Origin: 'http://localhost:5173' })).status, 201);
+
+    const untrustedPeerUrl = await startApp({ trustProxy: ['10.0.0.1/32'] });
+    const untrustedPeerLogin = await browserLogin(untrustedPeerUrl);
+    assert.equal(
+      (await newNotebook(untrustedPeerUrl, {
+        Cookie: untrustedPeerLogin.cookie,
+        Origin: 'https://proxy.example.com',
+        'X-Forwarded-Host': 'proxy.example.com',
+      })).status,
+      403
+    );
+
+    const proxiedUrl = await startApp({ publicUrl: 'https://notes-web.example.com', trustProxy: ['loopback'] });
+    const proxiedLogin = await browserLogin(proxiedUrl);
+    assert.equal(
+      (await newNotebook(proxiedUrl, {
+        Cookie: proxiedLogin.cookie,
+        Origin: 'https://proxy.example.com',
+        'X-Forwarded-Host': 'proxy.example.com',
+      })).status,
+      201
+    );
   });
 
   test('header-authenticated API clients need no origin', async () => {
@@ -285,6 +311,35 @@ describe('logout', () => {
     reply = (res) => res.status(403).send('<html>Forbidden</html>');
     await assert.rejects(api.deleteSession('token'));
   });
+
+  test('refuses to follow upstream redirects from Joplin Server', async () => {
+    const { JoplinApiService } = await import('../src/services/joplin-api.js');
+    const express = (await import('express')).default;
+    let targetHit = false;
+    const target = express();
+    target.all('/*splat', (_req, res) => {
+      targetHit = true;
+      res.status(200).json({ id: 'stolen', user_id: 'u1' });
+    });
+    const targetServer: Server = await new Promise((resolve) => {
+      const s = target.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    servers.push(targetServer);
+    const targetUrl = `http://127.0.0.1:${(targetServer.address() as AddressInfo).port}`;
+
+    const redirector = express();
+    redirector.get('/api/ping', (_req, res) => res.redirect(302, `${targetUrl}/api/ping`));
+    redirector.post('/api/sessions', (_req, res) => res.redirect(307, `${targetUrl}/api/sessions`));
+    const redirectServer: Server = await new Promise((resolve) => {
+      const s = redirector.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    servers.push(redirectServer);
+    const api = new JoplinApiService(`http://127.0.0.1:${(redirectServer.address() as AddressInfo).port}`);
+
+    await assert.rejects(api.ping());
+    await assert.rejects(api.createSession('a@example.com', 'secret'));
+    assert.equal(targetHit, false);
+  });
 });
 
 describe('reverse proxy', () => {
@@ -336,11 +391,22 @@ describe('content security policy', () => {
   };
 
   test('defaults work over plain HTTP and block remote images', async () => {
-    const policy = await csp({});
+    const res = await call(await startApp({ corsOrigin: false }), '/api/health');
+    const policy = res.headers.get('content-security-policy') ?? '';
     assert.doesNotMatch(policy, /upgrade-insecure-requests/);
-    assert.match(policy, /img-src 'self' data: blob:;/);
-    assert.match(policy, /script-src 'self';/);
+    assert.match(policy, /img-src 'self' data: blob:(;|$)/);
+    assert.match(policy, /script-src 'self'(;|$)/);
+    assert.match(policy, /style-src 'self' 'unsafe-inline'(;|$)/);
+    assert.match(policy, /font-src 'self' data:(;|$)/);
+    assert.match(policy, /object-src 'none'(;|$)/);
+    assert.match(policy, /frame-src 'self' blob:(;|$)/);
+    assert.match(policy, /base-uri 'self'(;|$)/);
+    assert.match(policy, /form-action 'self'(;|$)/);
     assert.doesNotMatch(policy, /unsafe-inline'[^;]*;?\s*script-src|script-src[^;]*unsafe-inline/);
+    assert.equal(res.headers.get('cross-origin-resource-policy'), 'same-origin');
+
+    const withCors = await call(await startApp({ corsOrigin: 'http://localhost:5173' }), '/api/health');
+    assert.equal(withCors.headers.get('cross-origin-resource-policy'), 'cross-origin');
   });
 
   test('upgrades insecure requests when PUBLIC_URL is https', async () => {

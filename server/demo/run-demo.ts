@@ -16,6 +16,8 @@ const mock = await startMockJoplinServer({ email: DEMO_EMAIL, password: DEMO_PAS
 
 // Must be set before the backend's config module is loaded
 process.env.JOPLIN_SERVER_URL = mock.url;
+// Vite's dev proxy adds X-Forwarded-Host from loopback (dev + e2e smoke tests)
+process.env.TRUST_PROXY ??= 'loopback';
 await import('../src/index.js');
 
 console.log(`[Demo] Mock Joplin Server running at ${mock.url}`);
