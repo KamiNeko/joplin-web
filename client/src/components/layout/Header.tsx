@@ -1,8 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/use-auth";
 import { SEARCH_SYNTAX_HINT } from "@/lib/ui-constants";
+import { NotebookBreadcrumb } from "@/lib/types";
 import { ThemeToggle } from "@/components/common/ThemeToggle";
 import { AboutDialog } from "@/components/common/Dialogs";
+import { SecurityDialog } from "@/components/auth/SecurityDialog";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -14,22 +17,30 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
+  Bot,
   ChevronRight,
+  Command,
   Folder,
   Info,
   LogOut,
   Menu,
   Search,
+  ShieldCheck,
   User,
   X,
 } from "lucide-react";
 
 interface HeaderProps {
   notebookTitle?: string;
+  notebookPath?: NotebookBreadcrumb[];
   noteTitle?: string;
   /** Shows "Search" in the breadcrumb while search results replace the list */
   isSearchActive?: boolean;
   onToggleSidebar?: () => void;
+  onSelectNotebook?: (notebookId: string) => void;
+  onOpenCommandPalette?: () => void;
+  onOpenAskAi?: () => void;
+  aiEnabled?: boolean;
   searchQuery: string;
   onSearchChange: (query: string) => void;
   /** Ctrl+K on small screens, where the header search field is hidden */
@@ -38,16 +49,23 @@ interface HeaderProps {
 
 export function Header({
   notebookTitle,
+  notebookPath,
   noteTitle,
   isSearchActive = false,
   onToggleSidebar,
+  onSelectNotebook,
+  onOpenCommandPalette,
+  onOpenAskAi,
+  aiEnabled = false,
   searchQuery,
   onSearchChange,
   onOpenMobileSearch,
 }: HeaderProps) {
+  const navigate = useNavigate();
   const { logout, email } = useAuth();
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [securityOpen, setSecurityOpen] = useState(false);
 
   // Ctrl+K / Cmd+K focuses the search field (or opens the mobile menu that holds it). In the note
   // editor it inserts a link instead; the editor marks the event as handled then.
@@ -95,6 +113,25 @@ export function Header({
             <div className="flex items-center gap-1.5 shrink-0 text-foreground/80 font-medium">
               <Search className="h-3.5 w-3.5 text-primary" />
               <span>Search</span>
+            </div>
+          ) : notebookPath && notebookPath.length > 0 ? (
+            <div className="flex items-center gap-1 min-w-0 text-foreground/80 font-medium">
+              <Folder className="h-3.5 w-3.5 text-primary shrink-0 mr-0.5" />
+              {notebookPath.map((crumb, index) => (
+                <Fragment key={crumb.id}>
+                  {index > 0 && <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/60 shrink-0" />}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (onSelectNotebook) onSelectNotebook(crumb.id);
+                      else navigate(`/notebooks/${crumb.id}`);
+                    }}
+                    className="truncate max-w-[110px] sm:max-w-[150px] hover:text-foreground hover:underline rounded px-0.5"
+                  >
+                    {crumb.title || "Untitled Folder"}
+                  </button>
+                </Fragment>
+              ))}
             </div>
           ) : notebookTitle ? (
             <div className="flex items-center gap-1.5 shrink-0 text-foreground/80 font-medium">
@@ -159,6 +196,36 @@ export function Header({
           )}
         </div>
 
+        {/* Quick Jump Command Palette */}
+        {onOpenCommandPalette && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={onOpenCommandPalette}
+            className="h-8 w-8 text-muted-foreground hover:text-foreground"
+            aria-label="Open command palette"
+            title="Quick jump (Ctrl+P)"
+          >
+            <Command className="h-4 w-4" />
+          </Button>
+        )}
+
+        {/* Ask AI Drawer */}
+        {aiEnabled && onOpenAskAi && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={onOpenAskAi}
+            className="hidden sm:inline-flex h-8 gap-1.5 px-2.5 text-xs"
+            aria-label="Ask my notes"
+          >
+            <Bot className="h-3.5 w-3.5 text-primary" />
+            <span>Ask AI</span>
+          </Button>
+        )}
+
         {/* Theme toggle */}
         <ThemeToggle />
 
@@ -193,6 +260,10 @@ export function Header({
               </div>
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => setSecurityOpen(true)} className="cursor-pointer flex items-center gap-2">
+              <ShieldCheck className="h-3.5 w-3.5" />
+              <span>Security</span>
+            </DropdownMenuItem>
             <DropdownMenuItem onClick={() => setAboutOpen(true)} className="cursor-pointer flex items-center gap-2">
               <Info className="h-3.5 w-3.5" />
               <span>About Joplin Web</span>
@@ -206,6 +277,7 @@ export function Header({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        {securityOpen && <SecurityDialog open={securityOpen} onOpenChange={setSecurityOpen} />}
         <AboutDialog open={aboutOpen} onOpenChange={setAboutOpen} />
       </div>
     </header>

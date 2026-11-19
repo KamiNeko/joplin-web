@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { toast } from "sonner";
+import { EXPANDED_NOTEBOOKS_STORAGE_KEY, TAGS_EXPANDED_STORAGE_KEY } from "@/lib/ui-constants";
 import { Notebook, Tag } from "@/lib/types";
 import { FetchCall, jsonResponse, mockFetch } from "@/test/fetch-mock";
-import { renderWithProviders } from "@/test/render";
+import { LocationProbe, renderWithProviders } from "@/test/render";
 import { Sidebar } from "./Sidebar";
 
 vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
@@ -59,17 +60,34 @@ function openMenu(label: string) {
 
 const writes = (calls: FetchCall[]) => calls.filter((c) => c.method !== "GET");
 
+beforeEach(() => {
+  localStorage.clear();
+});
+
 afterEach(cleanup);
 
 describe("Sidebar", () => {
-  it("lists the notebook tree with note counts and the tags", async () => {
+  it("starts with nested notebooks and tags collapsed, showing tag count badge until expanded", async () => {
     mockSidebarApi();
     renderSidebar();
 
     expect(await screen.findByRole("button", { name: "Work" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Reading List, 2 notes" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Expand Work" }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("button", { name: "Projects, 3 notes" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Meeting Notes, 1 note" })).toBeNull();
+
+    const tagsHeader = screen.getByRole("button", { name: /^Tags\b/i });
+    expect(tagsHeader.getAttribute("aria-expanded")).toBe("false");
+    expect(within(tagsHeader).getByText("2")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "planning, 2 notes" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "ideas, 1 note" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand Work" }));
+    fireEvent.click(tagsHeader);
+
     expect(screen.getByRole("button", { name: "Projects, 3 notes" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Meeting Notes, 1 note" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Reading List, 2 notes" })).toBeTruthy();
     expect(await screen.findByRole("button", { name: "planning, 2 notes" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "ideas, 1 note" })).toBeTruthy();
   });
@@ -78,6 +96,7 @@ describe("Sidebar", () => {
     mockSidebarApi();
     const handlers = renderSidebar({ selectedNotebookId: projects.id });
 
+    // Selecting a nested notebook auto-expands its ancestor
     const selected = await screen.findByRole("button", { name: "Projects, 3 notes" });
     expect(selected.getAttribute("aria-current")).toBe("page");
     expect(screen.getByRole("button", { name: "All Notes" }).getAttribute("aria-current")).toBeNull();
@@ -85,6 +104,7 @@ describe("Sidebar", () => {
     fireEvent.click(screen.getByRole("button", { name: "Reading List, 2 notes" }));
     fireEvent.click(screen.getByRole("button", { name: "All Notes" }));
     fireEvent.click(screen.getByRole("button", { name: "Trash" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Tags\b/i }));
     fireEvent.click(await screen.findByRole("button", { name: "planning, 2 notes" }));
 
     expect(handlers.onSelectNotebook).toHaveBeenCalledWith(reading.id);
@@ -93,18 +113,182 @@ describe("Sidebar", () => {
     expect(handlers.onSelectTag).toHaveBeenCalledWith(tags[0].id);
   });
 
-  it("collapses and expands a notebook with sub-notebooks", async () => {
+  it("expands and collapses notebooks and persists explicit choices in localStorage", async () => {
     mockSidebarApi();
-    renderSidebar();
-    const toggle = await screen.findByRole("button", { name: "Collapse Work" });
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    const view = renderWithProviders(
+      <Sidebar
+        searchQuery=""
+        onSelectAllNotes={vi.fn()}
+        onSelectTrash={vi.fn()}
+        onSelectNotebook={vi.fn()}
+        onSelectTag={vi.fn()}
+        onSearchChange={vi.fn()}
+      />
+    );
+    const expand = await screen.findByRole("button", { name: "Expand Work" });
+    expect(expand.getAttribute("aria-expanded")).toBe("false");
 
-    fireEvent.click(toggle);
+    fireEvent.click(expand);
+    expect(screen.getByRole("button", { name: "Projects, 3 notes" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Collapse Work" }).getAttribute("aria-expanded")).toBe("true");
+    expect(JSON.parse(localStorage.getItem(EXPANDED_NOTEBOOKS_STORAGE_KEY) ?? "[]")).toEqual([work.id]);
+
+    // Persisted expand survives remounting (e.g. reload or mobile drawer reopen)
+    view.unmount();
+    renderSidebar();
+    expect(await screen.findByRole("button", { name: "Projects, 3 notes" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse Work" }));
     expect(screen.queryByRole("button", { name: "Projects, 3 notes" })).toBeNull();
     expect(screen.getByRole("button", { name: "Expand Work" }).getAttribute("aria-expanded")).toBe("false");
+    expect(JSON.parse(localStorage.getItem(EXPANDED_NOTEBOOKS_STORAGE_KEY) ?? "[]")).toEqual([]);
+  });
 
-    fireEvent.click(screen.getByRole("button", { name: "Expand Work" }));
-    expect(screen.getByRole("button", { name: "Projects, 3 notes" })).toBeTruthy();
+  it("ignores and prunes stale notebook IDs stored in localStorage", async () => {
+    const staleId = id("f");
+    localStorage.setItem(EXPANDED_NOTEBOOKS_STORAGE_KEY, JSON.stringify([staleId, work.id]));
+    mockSidebarApi();
+    renderSidebar();
+
+    expect(await screen.findByRole("button", { name: "Projects, 3 notes" })).toBeTruthy();
+    await waitFor(() => {
+      expect(JSON.parse(localStorage.getItem(EXPANDED_NOTEBOOKS_STORAGE_KEY) ?? "[]")).toEqual([work.id]);
+    });
+  });
+
+  it("auto-expands ancestors of selectedNotebookId and openNoteNotebookId", async () => {
+    const deep = notebook("6", "Sprint 1", [], 1, id("5"));
+    const nestedProjects = notebook("5", "Backend", [deep], 0, id("1"));
+    const nestedWork = notebook("1", "Work", [nestedProjects], 0);
+    mockSidebarApi((call) =>
+      call.path === "/api/notebooks" ? jsonResponse([nestedWork, reading]) : undefined
+    );
+
+    const view = renderWithProviders(
+      <Sidebar
+        selectedNotebookId={null}
+        openNoteNotebookId={deep.id}
+        searchQuery=""
+        onSelectAllNotes={vi.fn()}
+        onSelectTrash={vi.fn()}
+        onSelectNotebook={vi.fn()}
+        onSelectTag={vi.fn()}
+        onSearchChange={vi.fn()}
+      />
+    );
+
+    // Ancestors of the open note's notebook expand automatically even on All Notes
+    expect(await screen.findByRole("button", { name: "Sprint 1, 1 note" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Collapse Work" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("button", { name: "Collapse Backend" }).getAttribute("aria-expanded")).toBe("true");
+
+    // In-session collapse still works, and switching active path re-applies auto-expansion
+    fireEvent.click(screen.getByRole("button", { name: "Collapse Backend" }));
+    expect(screen.queryByRole("button", { name: "Sprint 1, 1 note" })).toBeNull();
+
+    view.rerender(
+      <Sidebar
+        selectedNotebookId={reading.id}
+        openNoteNotebookId={null}
+        searchQuery=""
+        onSelectAllNotes={vi.fn()}
+        onSelectTrash={vi.fn()}
+        onSelectNotebook={vi.fn()}
+        onSelectTag={vi.fn()}
+        onSearchChange={vi.fn()}
+      />
+    );
+    expect(screen.queryByRole("button", { name: "Backend" })).toBeNull();
+
+    view.rerender(
+      <Sidebar
+        selectedNotebookId={deep.id}
+        openNoteNotebookId={null}
+        searchQuery=""
+        onSelectAllNotes={vi.fn()}
+        onSelectTrash={vi.fn()}
+        onSelectNotebook={vi.fn()}
+        onSelectTag={vi.fn()}
+        onSearchChange={vi.fn()}
+      />
+    );
+    expect(await screen.findByRole("button", { name: "Sprint 1, 1 note" })).toBeTruthy();
+  });
+
+  it("persists Tags collapse/expand toggle and auto-expands when selectedTagId is active", async () => {
+    mockSidebarApi();
+    const view = renderWithProviders(
+      <Sidebar
+        searchQuery=""
+        onSelectAllNotes={vi.fn()}
+        onSelectTrash={vi.fn()}
+        onSelectNotebook={vi.fn()}
+        onSelectTag={vi.fn()}
+        onSearchChange={vi.fn()}
+      />
+    );
+
+    const tagsHeader = await screen.findByRole("button", { name: /^Tags\b/i });
+    expect(tagsHeader.getAttribute("aria-expanded")).toBe("false");
+    await waitFor(() => expect(within(tagsHeader).getByText("2")).toBeTruthy());
+    expect(screen.queryByRole("button", { name: "planning, 2 notes" })).toBeNull();
+
+    fireEvent.click(tagsHeader);
+    expect(tagsHeader.getAttribute("aria-expanded")).toBe("true");
+    expect(localStorage.getItem(TAGS_EXPANDED_STORAGE_KEY)).toBe("true");
+    expect(await screen.findByRole("button", { name: "planning, 2 notes" })).toBeTruthy();
+
+    view.unmount();
+    renderSidebar();
+    expect(await screen.findByRole("button", { name: "planning, 2 notes" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Tags\b/i }));
+    expect(localStorage.getItem(TAGS_EXPANDED_STORAGE_KEY)).toBe("false");
+    expect(screen.queryByRole("button", { name: "planning, 2 notes" })).toBeNull();
+    cleanup();
+
+    // Even when collapsed in localStorage, selecting a tag (via URL) expands Tags
+    const tagView = renderWithProviders(
+      <Sidebar
+        selectedTagId={tags[0].id}
+        searchQuery=""
+        onSelectAllNotes={vi.fn()}
+        onSelectTrash={vi.fn()}
+        onSelectNotebook={vi.fn()}
+        onSelectTag={vi.fn()}
+        onSearchChange={vi.fn()}
+      />
+    );
+    expect(screen.getByRole("button", { name: /^Tags\b/i }).getAttribute("aria-expanded")).toBe("true");
+    const selectedTag = await screen.findByRole("button", { name: "planning, 2 notes" });
+    expect(selectedTag.getAttribute("aria-current")).toBe("page");
+
+    // In-session collapse works, and returning to the tag later auto-expands again
+    fireEvent.click(screen.getByRole("button", { name: /^Tags\b/i }));
+    expect(screen.queryByRole("button", { name: "planning, 2 notes" })).toBeNull();
+    tagView.rerender(
+      <Sidebar
+        selectedTagId={null}
+        searchQuery=""
+        onSelectAllNotes={vi.fn()}
+        onSelectTrash={vi.fn()}
+        onSelectNotebook={vi.fn()}
+        onSelectTag={vi.fn()}
+        onSearchChange={vi.fn()}
+      />
+    );
+    tagView.rerender(
+      <Sidebar
+        selectedTagId={tags[0].id}
+        searchQuery=""
+        onSelectAllNotes={vi.fn()}
+        onSelectTrash={vi.fn()}
+        onSelectNotebook={vi.fn()}
+        onSelectTag={vi.fn()}
+        onSearchChange={vi.fn()}
+      />
+    );
+    expect(await screen.findByRole("button", { name: "planning, 2 notes" })).toBeTruthy();
   });
 
   it("creates a top-level notebook and opens it", async () => {
@@ -163,7 +347,7 @@ describe("Sidebar", () => {
       call.method === "PUT" ? jsonResponse({ ...projects, parentId: reading.id }) : undefined
     );
     renderSidebar();
-    await screen.findByRole("button", { name: "Work" });
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Work" }));
 
     fireEvent.click(within(await openMenu("Actions for Projects")).getByRole("menuitem", { name: "Move to…" }));
     const dialog = await screen.findByRole("dialog", { name: "Move notebook" });
@@ -247,6 +431,7 @@ describe("Sidebar", () => {
     renderSidebar();
 
     expect(await screen.findByText("Couldn't load notebooks")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /^Tags\b/i }));
     expect(await screen.findByText("No tags")).toBeTruthy();
 
     failNotebooks = false;
@@ -270,5 +455,132 @@ describe("Sidebar", () => {
 
     renderSidebar();
     expect(screen.queryByRole("searchbox")).toBeNull();
+  });
+
+  it("renders Shortcuts for favorited notes, pinned notebooks, and saved searches and supports removing & pinning", async () => {
+    const starredNoteId = id("c");
+    const prefs = {
+      favoriteNoteIds: [starredNoteId],
+      favoriteNotebookIds: [reading.id],
+      savedSearches: [{ id: "ss-1", name: "Unread invoices", query: "tag:invoice iscompleted:0", createdAt: 1000 }],
+      recentReads: [],
+      scratchpad: "",
+      favoriteNotes: [
+        {
+          id: starredNoteId,
+          title: "Pinned Spec",
+          preview: "Spec body",
+          createdTime: 1000,
+          updatedTime: 2000,
+          parentId: work.id,
+        },
+      ],
+      favoriteNotebooks: [
+        { id: reading.id, title: reading.title, parentId: "", noteCount: 2, encrypted: false },
+      ],
+    };
+    const calls = mockSidebarApi((call) => {
+      if (call.method === "GET" && call.path === "/api/preferences") return jsonResponse(prefs);
+      if (call.method === "DELETE" && call.path.startsWith("/api/preferences/")) {
+        return jsonResponse({
+          ...prefs,
+          favoriteNoteIds: [],
+          favoriteNotes: [],
+          favoriteNotebookIds: [],
+          favoriteNotebooks: [],
+          savedSearches: [],
+        });
+      }
+      if (call.method === "POST" && call.path === `/api/preferences/favorites/notebooks/${work.id}`) {
+        return jsonResponse({ ...prefs, favoriteNotebookIds: [...prefs.favoriteNotebookIds, work.id] });
+      }
+      return undefined;
+    });
+
+    const onOpenNote = vi.fn();
+    const onSelectNotebook = vi.fn();
+    const onApplySavedSearch = vi.fn();
+    renderWithProviders(
+      <>
+        <Sidebar
+          searchQuery=""
+          onSelectAllNotes={vi.fn()}
+          onSelectTrash={vi.fn()}
+          onSelectNotebook={onSelectNotebook}
+          onSelectTag={vi.fn()}
+          onSearchChange={vi.fn()}
+          onOpenNote={onOpenNote}
+          onApplySavedSearch={onApplySavedSearch}
+        />
+        <LocationProbe />
+      </>
+    );
+
+    const shortcutsHeader = await screen.findByRole("button", { name: /^Shortcuts/ });
+    expect(shortcutsHeader.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Pinned Spec" }));
+    expect(onOpenNote).toHaveBeenCalledWith(starredNoteId);
+
+    fireEvent.click(screen.getByRole("button", { name: "Unread invoices" }));
+    expect(onApplySavedSearch).toHaveBeenCalledWith("tag:invoice iscompleted:0");
+
+    // Collapsing hides the shortcut list
+    fireEvent.click(shortcutsHeader);
+    expect(screen.queryByRole("button", { name: "Pinned Spec" })).toBeNull();
+    fireEvent.click(shortcutsHeader);
+    expect(screen.getByRole("button", { name: "Pinned Spec" })).toBeTruthy();
+
+    // Remove note shortcut
+    fireEvent.click(screen.getByRole("button", { name: "Remove shortcut for Pinned Spec" }));
+    await waitFor(() =>
+      expect(calls.some((c) => c.method === "DELETE" && c.path === `/api/preferences/favorites/notes/${starredNoteId}`)).toBe(true)
+    );
+
+    // Pin another notebook via menu
+    fireEvent.click(within(await openMenu("Actions for Work")).getByRole("menuitem", { name: "Pin to shortcuts" }));
+    await waitFor(() =>
+      expect(calls.some((c) => c.method === "POST" && c.path === `/api/preferences/favorites/notebooks/${work.id}`)).toBe(true)
+    );
+  });
+
+  it("navigates to Home, Recent, Tasks, Hygiene, Clip & Import and opens Ask AI", async () => {
+    mockSidebarApi();
+    const onOpenAskAi = vi.fn();
+    renderWithProviders(
+      <>
+        <Sidebar
+          searchQuery=""
+          aiEnabled
+          onOpenAskAi={onOpenAskAi}
+          onSelectAllNotes={vi.fn()}
+          onSelectTrash={vi.fn()}
+          onSelectNotebook={vi.fn()}
+          onSelectTag={vi.fn()}
+          onSearchChange={vi.fn()}
+        />
+        <LocationProbe />
+      </>,
+      { route: "/notes" }
+    );
+
+    await screen.findByRole("button", { name: "Home" });
+    fireEvent.click(screen.getByRole("button", { name: "Home" }));
+    expect(screen.getByTestId("location").textContent).toBe("/home");
+
+    fireEvent.click(screen.getByRole("button", { name: "Recent" }));
+    expect(screen.getByTestId("location").textContent).toBe("/recent");
+
+    fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
+    expect(screen.getByTestId("location").textContent).toBe("/tasks");
+
+    fireEvent.click(screen.getByRole("button", { name: "Hygiene" }));
+    expect(screen.getByTestId("location").textContent).toBe("/hygiene");
+
+    fireEvent.click(screen.getByRole("button", { name: "Clip & Import" }));
+    expect(screen.getByTestId("location").textContent).toBe("/clip");
+
+    fireEvent.click(screen.getByRole("button", { name: "Ask AI" }));
+    expect(onOpenAskAi).toHaveBeenCalledTimes(1);
   });
 });

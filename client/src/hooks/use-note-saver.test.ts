@@ -121,14 +121,24 @@ describe("list updates after a save", () => {
   const NOTES_KEY = ["notes", { notebookId: "f".repeat(32) }];
   const OTHER_LIST_KEY = ["notes", { notebookId: "e".repeat(32) }];
   const SEARCH_KEY = ["search", "title"];
+  const OTHER_NOTE_KEY = ["note", OTHER_ID];
+  const RECENT_KEY = ["recent-notes"];
+  const TASKS_KEY = ["tasks"];
+  const HYGIENE_KEY = ["hygiene"];
+  const PREFS_KEY = ["preferences"];
 
-  /** Seeds a notebook list (this note is older than the other one), an unrelated list and a search */
+  /** Seeds a notebook list (this note is older than the other one), an unrelated list, search, and cached workspace queries */
   function seedLists() {
     queryClient.setQueryData<NoteListItem[]>(NOTES_KEY, [item(OTHER_ID, 1500, "Other"), item(NOTE_ID, 1000, "Title")]);
     queryClient.setQueryData<NoteListItem[]>(OTHER_LIST_KEY, [item(OTHER_ID, 1500, "Other")]);
     queryClient.setQueryData<SearchResult[]>(SEARCH_KEY, [
       { ...item(NOTE_ID, 1000, "Title"), matches: { inTitle: true, inBody: false } },
     ]);
+    queryClient.setQueryData(OTHER_NOTE_KEY, { ...note(1500, "Target"), id: OTHER_ID, title: "Target" });
+    queryClient.setQueryData(RECENT_KEY, { recentRead: [], recentCreated: [] });
+    queryClient.setQueryData(TASKS_KEY, { todoNotes: [], inlineTasks: [] });
+    queryClient.setQueryData(HYGIENE_KEY, { duplicateClusters: [], emptyNotes: [], untaggedNotes: [] });
+    queryClient.setQueryData(PREFS_KEY, { favoriteNotes: [] });
   }
   const saved = (changes: Partial<Note> = {}): Note => ({
     ...note(2000, "# New **text**"),
@@ -137,7 +147,7 @@ describe("list updates after a save", () => {
     ...changes,
   });
 
-  it("patches title, preview and time in place and keeps the newest first, without refetching", async () => {
+  it("patches title, preview and time in place and marks derived caches stale without refetching", async () => {
     seedLists();
     const otherList = queryClient.getQueryData(OTHER_LIST_KEY);
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
@@ -156,10 +166,15 @@ describe("list updates after a save", () => {
       updatedTime: 2000,
       matches: { inTitle: true, inBody: false },
     });
-    // Notes, notebooks and tags are not refetched; searches only become stale (their matches may differ)
-    expect(invalidate).toHaveBeenCalledTimes(1);
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["search"], refetchType: "none" });
+    // Notes, notebooks and tags are not invalidated; search, workspace hubs and other notes' backlinks become stale with refetchType: "none"
+    expect(invalidate.mock.calls.every(([filters]) => filters?.refetchType === "none")).toBe(true);
     expect(queryClient.getQueryState(SEARCH_KEY)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(OTHER_NOTE_KEY)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(RECENT_KEY)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(TASKS_KEY)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(HYGIENE_KEY)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(PREFS_KEY)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(["note", NOTE_ID])?.isInvalidated).toBe(false);
     expect(queryClient.getQueryState(NOTES_KEY)?.isInvalidated).toBe(false);
   });
 

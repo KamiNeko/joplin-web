@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import { noteCache } from '../services/note-cache.js';
 import { noteWriter } from '../services/note-writer.js';
+import { ocrBridgeService } from '../services/ocr-bridge.js';
 import { isTrueFlag } from './query.js';
 
 const router = Router();
@@ -33,6 +34,38 @@ router.get('/', async (req, res) => {
   });
 
   res.status(200).json(notes);
+});
+
+/**
+ * GET /api/notes/recent
+ * Returns recently read notes (tracked by PreferencesStore) and recently created notes.
+ * Must be registered before /:id so "recent" is not treated as a note ID.
+ */
+router.get('/recent', async (req, res) => {
+  const rawLimit = req.query.limit;
+  const limit =
+    typeof rawLimit === 'string' && /^\d+$/.test(rawLimit.trim())
+      ? Math.min(Math.max(1, parseInt(rawLimit.trim(), 10)), 100)
+      : 50;
+  const store = req.preferencesStore;
+  const recentReads = store ? store.get(noteCache.getOwnerKey(req.sessionId!)).recentReads : [];
+  const data = await noteCache.getRecentNotes(req.sessionId!, recentReads, limit);
+  res.status(200).json(data);
+});
+
+/**
+ * POST /api/notes/batch
+ * Applies bulk edits across up to 1000 notes:
+ * { items: [{ id, baseUpdatedTime?, parentId?, title?, addTags?, removeTags? }], parentId?, addTags?, removeTags?, trash?, restore? }
+ * Responds with per-item results [{ id, status: "ok" | "conflict" | "error", updatedTime?, error?, addedTags? }].
+ */
+router.post('/batch', async (req, res) => {
+  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+    res.status(400).json({ error: 'Request body must be a JSON object' });
+    return;
+  }
+  const results = await noteWriter.batchUpdateNotes(req.sessionId!, req.body);
+  res.status(200).json(results);
 });
 
 /**
@@ -157,6 +190,66 @@ router.delete('/:id/tags/:tagId', async (req, res) => {
  */
 router.post('/:id/restore', async (req, res) => {
   const note = await noteWriter.restoreNote(req.sessionId!, req.params.id);
+  res.status(200).json(note);
+});
+
+/**
+ * GET /api/notes/:id/attachments
+ * Lists linked attachments and their cached OCR text for a note
+ */
+router.get('/:id/attachments', async (req, res) => {
+  const attachments = await noteCache.getNoteAttachments(req.sessionId!, req.params.id);
+  if (!attachments) {
+    res.status(404).json({ error: `Note not found with id: ${req.params.id}` });
+    return;
+  }
+  const hydrated = attachments.map((att) => {
+    const live = ocrBridgeService.getStatus(att.id);
+    if (live === 'pending') {
+      return { ...att, ocrStatus: 'pending' as const };
+    }
+    const status = att.ocrStatus ?? live;
+    return status ? { ...att, ocrStatus: status } : att;
+  });
+  res.status(200).json(hydrated);
+});
+
+/**
+ * GET /api/notes/:id/revisions
+ * Lists revision metadata for a note (newest first)
+ */
+router.get('/:id/revisions', async (req, res) => {
+  const revisions = await noteCache.getNoteRevisions(req.sessionId!, req.params.id);
+  if (!revisions) {
+    res.status(404).json({ error: `Note not found with id: ${req.params.id}` });
+    return;
+  }
+  res.status(200).json(revisions);
+});
+
+/**
+ * GET /api/notes/:id/revisions/:revId
+ * Reconstructs title and body for a specific revision
+ */
+router.get('/:id/revisions/:revId', async (req, res) => {
+  const detail = await noteCache.getNoteRevisionDetail(req.sessionId!, req.params.id, req.params.revId);
+  if (!detail) {
+    res.status(404).json({ error: `Revision not found: ${req.params.revId}` });
+    return;
+  }
+  res.status(200).json(detail);
+});
+
+/**
+ * POST /api/notes/:id/revisions/:revId/restore
+ * Restores a note's title and body from a saved revision
+ */
+router.post('/:id/revisions/:revId/restore', async (req, res) => {
+  const { baseUpdatedTime, force } = (req.body ?? {}) as { baseUpdatedTime?: unknown; force?: unknown };
+  const note = await noteWriter.restoreNoteRevision(req.sessionId!, req.params.id, req.params.revId, {
+    baseUpdatedTime: typeof baseUpdatedTime === 'number' ? baseUpdatedTime : undefined,
+    force: force === true,
+  });
   res.status(200).json(note);
 });
 

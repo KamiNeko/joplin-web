@@ -1,10 +1,10 @@
 import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Loader2, Plus, Tag as TagIcon, X } from "lucide-react";
+import { Plus, Tag as TagIcon, X } from "lucide-react";
 import { Tag } from "@/lib/types";
-import { useTags } from "@/hooks/use-tags";
 import { useAddTag, useRemoveTag } from "@/hooks/use-mutations";
 import { cn } from "@/lib/utils";
+import { TagAutocompleteInput } from "./TagAutocompleteInput";
 
 interface TagEditorProps {
   noteId: string;
@@ -14,34 +14,21 @@ interface TagEditorProps {
   onTagClick?: (tagId: string) => void;
 }
 
-const MAX_SUGGESTIONS = 8;
-
 /**
  * Tag chips for a note with inline add (autocomplete from existing tags) and remove.
  */
 export function TagEditor({ noteId, tags, readOnly = false, onTagClick }: TagEditorProps) {
-  const { data: allTags } = useTags();
   const addTag = useAddTag();
   const removeTag = useRemoveTag();
   const [isAdding, setIsAdding] = useState(false);
   const [value, setValue] = useState("");
-  // -1 = no suggestion picked; Enter then adds exactly what was typed
-  const [highlighted, setHighlighted] = useState(-1);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const suggestions = useMemo(() => {
-    const onNote = new Set(tags.map((t) => t.id));
-    const q = value.trim().toLowerCase();
-    return (allTags ?? [])
-      // An encrypted tag has no readable title to add it by, and the server refuses links to it
-      .filter((t) => !onNote.has(t.id) && !t.encrypted && (!q || t.title.toLowerCase().includes(q)))
-      .slice(0, MAX_SUGGESTIONS);
-  }, [allTags, tags, value]);
+  const excludeTagIds = useMemo(() => new Set(tags.map((t) => t.id)), [tags]);
 
   const close = () => {
     setIsAdding(false);
     setValue("");
-    setHighlighted(-1);
   };
 
   const submit = (title: string) => {
@@ -56,7 +43,6 @@ export function TagEditor({ noteId, tags, readOnly = false, onTagClick }: TagEdi
       {
         onSuccess: () => {
           setValue("");
-          setHighlighted(-1);
           inputRef.current?.focus();
         },
         onError: (err) => toast.error("Could not add tag", { description: err.message }),
@@ -104,69 +90,16 @@ export function TagEditor({ noteId, tags, readOnly = false, onTagClick }: TagEdi
 
       {!readOnly &&
         (isAdding ? (
-          <div className="relative">
-            <input
-              ref={inputRef}
-              autoFocus
-              value={value}
-              onChange={(e) => {
-                setValue(e.target.value);
-                setHighlighted(-1);
-              }}
-              onBlur={() => {
-                // Let a click on a suggestion land before closing
-                window.setTimeout(() => {
-                  if (document.activeElement !== inputRef.current && !addTag.isPending) close();
-                }, 150);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") {
-                  e.preventDefault();
-                  close();
-                } else if (e.key === "ArrowDown") {
-                  e.preventDefault();
-                  setHighlighted((i) => Math.min(i + 1, Math.max(suggestions.length - 1, 0)));
-                } else if (e.key === "ArrowUp") {
-                  e.preventDefault();
-                  setHighlighted((i) => Math.max(i - 1, -1));
-                } else if (e.key === "Enter") {
-                  e.preventDefault();
-                  const pick = highlighted >= 0 ? suggestions[highlighted] : undefined;
-                  submit(pick ? pick.title : value);
-                }
-              }}
-              placeholder="Add tag…"
-              aria-label="Add tag"
-              className="h-6 w-36 rounded-full border border-primary/50 bg-background px-2.5 text-[11px] text-foreground outline-hidden focus:ring-1 focus:ring-primary/40"
-            />
-            {addTag.isPending && (
-              <Loader2 className="absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 animate-spin text-muted-foreground" />
-            )}
-            {suggestions.length > 0 && (
-              <ul
-                role="listbox"
-                className="absolute left-0 top-7 z-30 w-48 overflow-hidden rounded-lg border bg-popover py-1 text-xs text-popover-foreground shadow-md"
-              >
-                {suggestions.map((tag, i) => (
-                  <li key={tag.id} role="option" aria-selected={i === highlighted}>
-                    <button
-                      type="button"
-                      onMouseDown={(e) => e.preventDefault()}
-                      onMouseEnter={() => setHighlighted(i)}
-                      onClick={() => submit(tag.title)}
-                      className={cn(
-                        "flex w-full items-center justify-between px-2.5 py-1.5 text-left",
-                        i === highlighted && "bg-accent text-accent-foreground"
-                      )}
-                    >
-                      <span className="truncate">#{tag.title}</span>
-                      <span className="ml-2 font-mono text-[10px] text-muted-foreground">{tag.noteCount}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+          <TagAutocompleteInput
+            excludeTagIds={excludeTagIds}
+            value={value}
+            onValueChange={setValue}
+            onSubmit={submit}
+            onCancel={close}
+            isPending={addTag.isPending}
+            closeOnBlur
+            inputRef={inputRef}
+          />
         ) : (
           <button
             type="button"

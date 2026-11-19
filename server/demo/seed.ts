@@ -350,7 +350,39 @@ Ship the new marketing site before the **end of Q4** with a faster, simpler stac
     deleted: true,
     body: 'Replaced by the new content plan.',
   },
+  {
+    key: 'scanned-invoice',
+    notebook: 'work',
+    title: '2024_03_11.pdf',
+    hoursAgo: 12,
+    body: `[2024_03_11.pdf](:/${demoId('res-invoice')})`,
+  },
 ];
+
+function minimalPdf(text: string): Buffer {
+  const safe = text.replace(/[()\\]/g, '\\$&');
+  const stream = `BT /F1 14 Tf 72 720 Td (${safe}) Tj ET\n`;
+  const objects = [
+    '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n',
+    '2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n',
+    '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n',
+    `4 0 obj\n<< /Length ${Buffer.byteLength(stream, 'utf8')} >>\nstream\n${stream}endstream\nendobj\n`,
+    '5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n',
+  ];
+  let pdf = '%PDF-1.4\n';
+  const offsets: number[] = [];
+  for (const obj of objects) {
+    offsets.push(Buffer.byteLength(pdf, 'utf8'));
+    pdf += obj;
+  }
+  const xrefPos = Buffer.byteLength(pdf, 'utf8');
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (const offset of offsets) {
+    pdf += `${String(offset).padStart(10, '0')} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF\n`;
+  return Buffer.from(pdf, 'utf8');
+}
 
 function toItem(content: string | Buffer, updatedTime: number, contentType = 'text/plain; charset=utf-8'): MockItem {
   return { content: Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8'), contentType, updatedTime };
@@ -450,6 +482,39 @@ export function buildDemoItems(now = Date.now()): Map<string, MockItem> {
     now - 5 * HOUR
   );
   items.set(`.resource/${resId}`, toItem(svg, now - 5 * HOUR, 'image/svg+xml'));
+
+  const invoiceId = demoId('res-invoice');
+  const invoicePdf = minimalPdf('ACME CLOUD SERVICES INC. INVOICE #INV-2024-0311');
+  const invoiceOcrText = [
+    'ACME CLOUD SERVICES INC.',
+    'INVOICE #INV-2024-0311',
+    'Date: March 11, 2024',
+    'Bill To: Studio North Design',
+    'Description: Dedicated Backup Storage (2 TB) - Yearly Renewal',
+    'Subtotal: $420.00',
+    'Total Paid: $420.00',
+  ].join('\n');
+  put(
+    invoiceId,
+    serialize({
+      type_: JoplinItemType.Resource,
+      id: invoiceId,
+      title: '2024_03_11.pdf',
+      createdTime: now - 12 * HOUR,
+      updatedTime: now - 12 * HOUR,
+      properties: {
+        mime: 'application/pdf',
+        filename: '2024_03_11.pdf',
+        file_extension: 'pdf',
+        size: String(invoicePdf.length),
+        encryption_applied: '0',
+        ocr_status: '2',
+        ocr_text: invoiceOcrText,
+      },
+    }),
+    now - 12 * HOUR
+  );
+  items.set(`.resource/${invoiceId}`, toItem(invoicePdf, now - 12 * HOUR, 'application/pdf'));
 
   // Every sync target written by Joplin 2.x/3.x has an info.json (sync version 3), here without E2EE
   items.set('info.json', syncTargetInfoItem(false, now - 400 * HOUR));

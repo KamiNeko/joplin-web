@@ -30,7 +30,7 @@ You already run Joplin Server to sync your notes. Joplin's desktop and mobile ap
 
 - 🏠 **Self-hosted, all the way.** One small Docker container next to your Joplin Server. No database, no third-party services.
 - 🔄 **Stays in sync.** Changes are written in Joplin's own sync format, so they show up in your desktop and mobile apps.
-- 🔐 **Uses your Joplin account.** Sign in with your Joplin Server email and password. Nothing is stored on the web server.
+- 🔐 **Uses your Joplin account.** Sign in with your Joplin Server email and password. Notes stay on your Joplin Server (when `CACHE_DIR` is configured, only derived caches, optional 2FA settings, workspace shortcuts/recent reads/scratchpad, and Auto-organize jobs are stored locally).
 
 Edits made in Joplin Web have been checked to show up correctly in the Joplin apps for Windows and Android.
 
@@ -53,18 +53,26 @@ In short: choose Joplin Web if you want quick, install-free access to your notes
 
 | | |
 | :--- | :--- |
-| 📚 **Notebooks** | Browse nested notebooks; create, rename, move (into another notebook or to the top level) and delete them. |
-| 📝 **Markdown editor** | CodeMirror editor with *Edit*, *Split* and *Preview* modes, autosave and `Ctrl+S`. Formatting toolbar (also on phones) and shortcuts: `Ctrl+B` bold, `Ctrl+I` italic, `Ctrl+E` code, `Ctrl+K` link. Links to other notes via a search picker or *Copy Markdown link*. |
-| ✨ **Rich rendering** | GitHub-flavored Markdown: tables, task lists, syntax-highlighted code blocks, plus Joplin's extensions: math (KaTeX), Mermaid diagrams, `==highlight==`, `++insert++`, `~sub~` and `^sup^`. HTML notes (e.g. from the Web Clipper) are shown as sanitized HTML. |
-| 🖼️ **Images & attachments** | Shows Joplin resources inline. Drop, paste or attach files to upload them. |
-| ✅ **To-dos** | Create to-dos and tick them off, right from the note list. Set, change or clear due dates (synced with Joplin's alarms); overdue to-dos are highlighted. |
+| 🏠 **Home, Shortcuts & Recent** | Workspace dashboard (`/home`) with persistent Scratchpad (*Promote to Note*) and Quick Capture to Inbox; pin favorite notes, notebooks, and saved searches in the sidebar; browse *Recently Read* and *Recently Created* notes (`/recent`). |
+| ⌨️ **Command Palette** | Instant `Ctrl+P` palette to jump to shortcuts, recent notes, search hits, notebooks, tags, workspace views, or *Ask My Notes*. |
+| 📚 **Notebooks** | Browse nested notebooks with clickable ancestor breadcrumbs; create, rename, move (into another notebook or to the top level), pin as shortcuts, and delete them. |
+| 🗂️ **Collection Views & Bulk Actions** | Switch note lists between *List*, *Gallery* (card thumbnails), *Table* (sortable metadata), and *Board* (grouped by *Status*: *Open To-dos* / *Completed* / *Notes*, or grouped by *Tags*). Multi-select notes (`Shift`-range, `Ctrl/Cmd`-click, or *Select all*) to bulk move, tag, or trash with one-click *Undo*. |
+| 🧹 **Hygiene Triage** | Local inspector (`/hygiene`) identifying exact-title & near-duplicate note clusters, empty/untitled notes, and untagged notes for bulk cleanup or *Auto-organize* without calling an LLM. |
+| ✨ **AI Workspace (Auto-organize, Ask My Notes & Note Assist)** | Optional OpenAI-compatible AI (`AI_BASE_URL` + `AI_MODEL`) powering: **Auto-organize** (`/organize`, OCR + TF-IDF classification into titles, notebooks, and tags with retry & undo), **Ask My Notes** (notebook/tag-scoped Q&A returning grounded answers with clickable `:/noteId` citations), and **Note Assist** (one-click *Summarize*, *Action items*, *Suggest tags*, and *Clean up* on any open note). |
+| 📝 **Markdown & Rich WYSIWYG Editor** | Switch Markdown and HTML notes between *Edit*, *Split*, *Preview*, and TipTap-powered **Rich** WYSIWYG mode (`joplin-editor-mode`), with click-to-edit prose entry, autosave, `Ctrl+S`, formatting toolbar (`Ctrl+B/I/E/K`), `/` slash commands, `[[` wiki-links, `NoteLinkPicker`, and *Copy Markdown link*. |
+| ✨ **Rich Rendering, Outline, Backlinks & Properties** | GFM tables & interactive task lists, KaTeX math, Mermaid diagrams, `==highlight==`, `++insert++`, `~sub~`, `^sup^`, GitHub-style `> [!NOTE]`/`[!TIP]`/`[!WARNING]`/`[!CAUTION]` callouts, and `<details>` toggles. Inspect any note's *Document outline*, automatic *Backlinks*, and collapsible *Properties* drawer (word/reading stats, `source_url`, `author`). |
+| 🖼️ **Images, Lightbox, Media, Voice & OCR** | Inline images with click-to-zoom lightbox, inline `<audio>`/`<video>` players, embedded PDFs with page-1 thumbnails, *Voice Note* microphone recording modal (with optional `AI_TRANSCRIBE_MODEL` transcription), and the *Attachments & OCR Inspector* drawer showing metadata and extracted OCR text (with optional instant upload OCR via `OCR_SERVICE_URL`). Note lists show thumbnails for the first image or PDF. |
+| ✅ **To-dos & Global Tasks Hub** | Manage to-dos with due dates/alarms, plus browse a unified **Tasks Hub** (`/tasks`) across all to-do notes and inline GFM `- [ ]` checklists with conflict-safe one-click toggling. |
+| 🌐 **Web Clipper & Email Ingest** | Convert article URLs to clean Markdown (`/clip` via Readability + Turndown, SSRF-guarded), use the one-click browser bookmarklet or installable PWA share target, import `.eml` / RFC-822 emails manually, or enable the headless webhook `POST /api/webhooks/email`. |
 | 🏷️ **Tags** | Tag notes, browse by tag, rename and delete tags. |
-| 🔎 **Search** | Instant search across titles and content (`Ctrl+K`): all words must match, `"exact phrases"`, `-word` to exclude, and Joplin-style filters `tag:`, `notebook:`, `type:todo`, `iscompleted:0`. |
+| 🔎 **Search** | Instant search across titles, bodies, and attachment OCR text (`Ctrl+K`): `"exact phrases"`, `-word`, `tag:`, `-tag:`, `tag:none`, `notebook:`, `-notebook:`, `type:todo\|note`, `iscompleted:0\|1`, `has:attachment`, `has:ocr`, `sourceurl:`, `created:`, and `updated:` (`today`, `7d`, `week`, `month`, `YYYY-MM`, `>=YYYY-MM-DD`). |
+| 📜 **Version History & Diffs** | Browse Joplin's revision history (`type_: 13`) in the *Version History* drawer, inspect line diffs against the current note, and restore previous versions safely. |
 | 🗑️ **Trash** | Deleted notes and notebooks go to Joplin's trash, where you can restore them or delete them permanently. |
 | ⚔️ **Conflict detection** | If a note was changed elsewhere while you edited it, you choose which version to keep. |
 | 🔀 **Sync conflicts** | Conflict copies that Joplin desktop or mobile keep after a sync conflict are listed under *Conflicts* (only when there are any), not as duplicates in your notebooks, tags or search. Compare a copy with the original, then trash it or move it to a notebook to keep it. |
 | 🔄 **Refresh & connection status** | Changes from other devices load when you return to the tab or click *Refresh*. The sidebar shows whether the server is reachable and when data was last updated. |
 | 🛟 **No lost typing** | Unsaved text is kept on the device while offline or after the session expires, saves retry when the connection returns, and you can restore a draft later. |
+| 🔐 **Two-factor authentication** | Optional WebAuthn passkeys and authenticator apps (TOTP), single-use recovery codes, and 30-day trusted devices (with optional `REQUIRE_2FA` enforcement). |
 | 🌗 **Light & dark mode** | Switch themes with one click. |
 | 📱 **Responsive** | Works on phones and tablets as well as on the desktop. |
 
@@ -164,8 +172,38 @@ Set these as environment variables of the container. The repository's `docker-co
 | `CORS_ORIGIN` | *(none)* | Allowed origins for API calls (comma-separated). Only needed when the UI is served from another origin than the API; the single-container setup doesn't need it. Without Docker in development mode the default is `http://localhost:5173`. |
 | `RATE_LIMIT_MAX` | `1000` | Requests per client address and 15 minutes to the API. Behind a reverse proxy without `TRUST_PROXY` all users count as one address; set `TRUST_PROXY` (or raise this) if several people use the instance. |
 | `CACHE_TTL_MS` | `30000` | How long the note cache is used before it is re-synced with Joplin Server, in milliseconds. After that, reads still get the cached data (up to 10 × this value old) while the re-sync runs in the background. `0` re-syncs before every read. |
+| `CACHE_DIR` | *(not set)* | Persistent directory for server state: the per-user note caches (a restart or a new login doesn't re-read every note), workspace preferences (shortcuts, recent reads, scratchpad) under `<CACHE_DIR>/prefs/`, Auto-organize job history under `<CACHE_DIR>/organize/`, and two-factor authentication data under `<CACHE_DIR>/auth/`. Required for 2FA and for `REQUIRE_2FA`. |
 | `AUTH_CACHE_TTL_MS` | `300000` | How long a validated session is trusted before it is checked again, in milliseconds. |
+| `AI_BASE_URL` | *(not set)* | Optional OpenAI-compatible Chat Completions base URL (e.g. `http://127.0.0.1:18317/v1`) for *Auto-organize*, *Ask My Notes*, and *Note Assist*. Must be set together with `AI_MODEL`; leave unset to keep AI features off. |
+| `AI_API_KEY` | *(not set)* | Optional Bearer API key sent only to `AI_BASE_URL` (never returned to the browser or logged). |
+| `AI_MODEL` | *(not set)* | Chat model name sent to `AI_BASE_URL` (e.g. `deepseek-flash`). |
+| `AI_TRANSCRIBE_MODEL` | *(falls back to `AI_MODEL`)* | Optional multimodal audio-capable model name for *Voice Note* transcription via `AI_BASE_URL`. |
+| `AI_CONCURRENCY` | `4` | Maximum concurrent classification requests per Auto-organize job. |
+| `OCR_SERVICE_URL` | *(not set)* | Optional instant attachment OCR bridge URL (companion script [`deploy/joplin-ocr-bridge.py`](deploy/joplin-ocr-bridge.py)); requires `OCR_SERVICE_SECRET`. |
+| `OCR_SERVICE_SECRET` | *(not set)* | Shared secret sent in `X-Ocr-Secret` to `OCR_SERVICE_URL`. |
+| `OCR_INLINE_WAIT_MS` | `4000` | How long attachment uploads wait inline for `OCR_SERVICE_URL` before finishing OCR asynchronously in the background. |
+| `REQUIRE_2FA` | `false` | Require every login to pass a second factor (users without one must enroll during login). Refuses to start when `true` and `CACHE_DIR` is unset. |
+| `EMAIL_INGEST_WEBHOOK_SECRET` | *(not set)* | Optional shared secret enabling headless `POST /api/webhooks/email` ingestion (`X-Webhook-Secret` or `Authorization: Bearer`). |
+| `EMAIL_INGEST_JOPLIN_EMAIL` | *(not set)* | Service Joplin Server account email used by `/api/webhooks/email` when webhook ingest is enabled. |
+| `EMAIL_INGEST_JOPLIN_PASSWORD` | *(not set)* | Service Joplin Server account password used by `/api/webhooks/email`. |
+| `EMAIL_INGEST_NOTEBOOK_ID` | *(not set)* | Optional target Joplin notebook ID for incoming webhook emails (defaults to the `Inbox` notebook or first writable notebook). |
 | `PORT` | `3001` | Port the server listens on when run without Docker. Leave it unset for the container; use `HOST_PORT` or the `-p` mapping instead. |
+
+> [!NOTE]
+> **AI privacy:** No note data leaves your server unless you both configure `AI_BASE_URL` + `AI_MODEL` and explicitly invoke an AI action (*Auto-organize*, *Ask My Notes*, or *Note Assist*). Depending on the action, only the relevant note title(s), plain-text excerpt/body, attachment filenames/OCR text, and notebook/tag names for that scope are sent to `AI_BASE_URL`. Encrypted notes and end-to-end encrypted (read-only) accounts are always excluded. Review suggestions before applying.
+
+### Two-factor authentication
+
+When `CACHE_DIR` is set, signed-in users can open **Security** in the user account menu to enroll a **passkey** (WebAuthn), an **authenticator app** (6-digit RFC 6238 TOTP), or both, view/regenerate 10 one-time **recovery codes**, and revoke 30-day **trusted devices**. Set `REQUIRE_2FA=true` to require every account to enroll and verify a second factor on sign-in.
+
+- **HTTPS and `PUBLIC_URL` for passkeys:** Browsers require a secure context for WebAuthn, and Joplin Web derives the WebAuthn Relying Party ID (`PUBLIC_URL` hostname) and expected origin from `PUBLIC_URL`. Set `PUBLIC_URL=https://...` in production to enable passkeys; only `http://localhost` works without `PUBLIC_URL` (for local development and demo mode). Authenticator apps (TOTP) work with or without `PUBLIC_URL`.
+- **Passkeys (`userVerification: 'preferred'`):** WebAuthn registration and authentication request `userVerification: 'preferred'` (without hard-requiring UV), so passkeys count as a **possession factor** paired with the account password when an authenticator or platform omits PIN/biometric verification.
+- **First-enroller-wins with `REQUIRE_2FA`:** When `REQUIRE_2FA=true` is turned on for an unenrolled account, whoever first completes enrollment with the account password owns the second factor; sign in and enroll right after enabling `REQUIRE_2FA`. Enrolling a user's first factor revokes all earlier sessions and clears trusted devices.
+- **Scope (Joplin Web only):** Joplin Web's 2FA protects access through Joplin Web only. Joplin Server's own login (desktop/mobile sync and Joplin Server's admin/web endpoints) is not covered by Joplin Web's 2FA.
+- **Pending logins & lockout:** Pending 2FA login states live in memory (5-minute TTL, 5 attempts); a server restart drops any unfinished pending logins, and their temporary upstream Joplin sessions expire on Joplin Server's schedule. Across logins, 5 consecutive failed second-factor checks lock second-factor verification for that user with exponential backoff (1 minute up to 60 minutes) until a valid check succeeds. Repeated wrong authenticator or recovery codes lock those two methods with growing waits (up to 60 minutes); **passkeys are never locked**, so you can always sign in with yours.
+- **Docker persistence:** The container runs as `node` (uid `1000`) with a read-only app filesystem. Mount a persistent volume at e.g. `/data/cache` owned by uid `1000` and set `CACHE_DIR=/data/cache`.
+- **API clients:** Non-browser clients (requests without an `Origin` header) can authenticate in a single request by including `totpCode` or `recoveryCode` in `POST /api/auth/login`.
+- **Resetting a locked-out user (admin):** If a user loses both their second factors and recovery codes, delete `<CACHE_DIR>/auth/<ownerKey>.json` on the host (where `<ownerKey>` is the Joplin Server `user_id` when it matches `^[A-Za-z0-9_-]{1,128}$`, or the lowercase SHA-256 hex digest of `user_id` otherwise). On next sign-in they can access the account (or re-enroll immediately when `REQUIRE_2FA=true`).
 
 ### Updating and versions
 
@@ -193,7 +231,7 @@ Open `http://localhost:5173` and sign in with `demo@joplin-web.test` / `demo`. E
 
 - **End-to-end encryption (E2EE) is not supported.** An account with E2EE enabled opens read-only, with a banner saying so: editing, new notes and notebooks, tags and uploads are not offered. Encrypted notes, notebooks and tags are listed as "Encrypted" but can't be read. To try it, start the demo with `DEMO_E2EE=1 npm --prefix server run demo`.
 - Joplin Web is built and tested against self-hosted Joplin Server. Joplin Cloud is untested.
-- Note history (revisions) and plugins are not available.
+- Joplin plugins are not available.
 
 ## How it works
 
@@ -215,7 +253,7 @@ The production build is a single container: the backend serves the compiled Reac
 
 Contributions are welcome: bug reports, ideas and pull requests.
 
-**Tech stack:** React 19, TypeScript, Vite, Tailwind CSS, shadcn/ui, TanStack Query and CodeMirror 6 on the frontend; Node.js 24, Express and TypeScript on the backend.
+**Tech stack:** React 19, TypeScript, Vite, Tailwind CSS, shadcn/ui, TanStack Query, CodeMirror 6 and TipTap 3 on the frontend; Node.js 24, Express, TypeScript and Readability/Turndown on the backend.
 
 ```text
 client/   React single-page app (Vite)

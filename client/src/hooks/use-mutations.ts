@@ -1,5 +1,7 @@
 import { useMutation, useQueryClient, QueryClient } from "@tanstack/react-query";
 import {
+  BATCH_CHUNK_SIZE,
+  batchUpdateNotes,
   createNote,
   updateNote,
   deleteNote,
@@ -15,19 +17,37 @@ import {
   deleteTag,
   NoteUpdate,
 } from "@/lib/api";
-import { Note, NoteListItem, SearchResult } from "@/lib/types";
+import { BatchNoteRequest, BatchNoteResult, Note, NoteListItem, SearchResult } from "@/lib/types";
 import { NOTES_QUERY_KEY } from "./use-notes";
 import { NOTEBOOKS_QUERY_KEY } from "./use-notebooks";
 import { TAGS_QUERY_KEY } from "./use-tags";
+import { announceWrite } from "@/lib/cross-tab";
 
 /**
- * Refreshes every list that can change after a write.
+ * Refreshes every list that can change after a write and alerts other tabs.
  */
 export function invalidateLists(queryClient: QueryClient) {
   queryClient.invalidateQueries({ queryKey: NOTES_QUERY_KEY });
   queryClient.invalidateQueries({ queryKey: NOTEBOOKS_QUERY_KEY });
   queryClient.invalidateQueries({ queryKey: TAGS_QUERY_KEY });
   queryClient.invalidateQueries({ queryKey: ["search"] });
+  queryClient.invalidateQueries({ queryKey: ["preferences"] });
+  queryClient.invalidateQueries({ queryKey: ["recent-notes"] });
+  queryClient.invalidateQueries({ queryKey: ["tasks"] });
+  queryClient.invalidateQueries({ queryKey: ["hygiene"] });
+  announceWrite();
+}
+
+/**
+ * Marks every cached single-note query except `excludeNoteId` stale without triggering immediate
+ * background refetches, so derived fields like `backlinks` reload when the user opens another note.
+ */
+export function invalidateOtherNotes(queryClient: QueryClient, excludeNoteId?: string) {
+  queryClient.invalidateQueries({
+    queryKey: ["note"],
+    predicate: (query) => query.queryKey[1] !== excludeNoteId,
+    refetchType: "none",
+  });
 }
 
 /**
@@ -63,6 +83,7 @@ export function useCreateNote() {
     mutationFn: createNote,
     onSuccess: (note) => {
       queryClient.setQueryData(["note", note.id], note);
+      invalidateOtherNotes(queryClient, note.id);
       invalidateLists(queryClient);
     },
   });
@@ -78,6 +99,7 @@ export function useUpdateNote() {
     mutationFn: ({ id, changes }: { id: string; changes: NoteUpdate }) => updateNote(id, changes),
     onSuccess: (note) => {
       queryClient.setQueryData<Note>(["note", note.id], note);
+      invalidateOtherNotes(queryClient, note.id);
       invalidateLists(queryClient);
     },
   });
@@ -93,6 +115,7 @@ export function useDeleteNote() {
       } else {
         queryClient.invalidateQueries({ queryKey: ["note", id] });
       }
+      invalidateOtherNotes(queryClient, id);
       invalidateLists(queryClient);
     },
   });
@@ -104,6 +127,7 @@ export function useRestoreNote() {
     mutationFn: (id: string) => restoreNote(id),
     onSuccess: (note) => {
       queryClient.setQueryData(["note", note.id], note);
+      invalidateOtherNotes(queryClient, note.id);
       invalidateLists(queryClient);
     },
   });
@@ -204,6 +228,46 @@ export function useDeleteTag() {
     onSuccess: () => {
       invalidateLists(queryClient);
       queryClient.invalidateQueries({ queryKey: ["note"] });
+    },
+  });
+}
+
+export interface BulkUpdateProgress {
+  completed: number;
+  total: number;
+}
+
+export interface BulkUpdateVariables extends BatchNoteRequest {
+  onProgress?: (progress: BulkUpdateProgress) => void;
+}
+
+/**
+ * Applies a bulk note operation in chunks of up to 1000 items, reporting progress and
+ * invalidating affected lists and open notes once per batch.
+ */
+export function useBulkUpdateNotes() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ onProgress, ...request }: BulkUpdateVariables): Promise<BatchNoteResult[]> => {
+      const total = request.items.length;
+      const results: BatchNoteResult[] = [];
+      let completedChunks = 0;
+      onProgress?.({ completed: 0, total });
+      try {
+        for (let offset = 0; offset < total; offset += BATCH_CHUNK_SIZE) {
+          const chunk = request.items.slice(offset, offset + BATCH_CHUNK_SIZE);
+          const chunkResults = await batchUpdateNotes({ ...request, items: chunk });
+          completedChunks++;
+          results.push(...chunkResults);
+          onProgress?.({ completed: results.length, total });
+        }
+        return results;
+      } finally {
+        if (completedChunks > 0) {
+          invalidateLists(queryClient);
+          queryClient.invalidateQueries({ queryKey: ["note"] });
+        }
+      }
     },
   });
 }

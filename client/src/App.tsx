@@ -5,12 +5,19 @@ import {
   Route,
   Navigate,
   useLocation,
+  useParams,
 } from "react-router-dom";
 import { MutationCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider, useAuth } from "@/hooks/use-auth";
 import { ThemeProvider } from "@/components/common/ThemeProvider";
 import { LoginPage } from "@/pages/LoginPage";
 import { NotesPage } from "@/pages/NotesPage";
+import { OrganizePage } from "@/pages/OrganizePage";
+import { HomePage } from "@/pages/HomePage";
+import { RecentPage } from "@/pages/RecentPage";
+import { TasksPage } from "@/pages/TasksPage";
+import { HygienePage } from "@/pages/HygienePage";
+import { ClipPage } from "@/pages/ClipPage";
 import { Toaster } from "@/components/ui/sonner";
 import { Loader2 } from "lucide-react";
 import { ApiError } from "@/lib/api";
@@ -75,6 +82,11 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+function TagRedirect() {
+  const { id } = useParams();
+  return <Navigate to={id ? `/notes?tag=${encodeURIComponent(id)}` : "/notes"} replace />;
+}
+
 export function App() {
   return (
     <QueryClientProvider client={queryClient}>
@@ -120,6 +132,14 @@ export function App() {
                   }
                 />
                 <Route
+                  path="/tags/:id"
+                  element={
+                    <ProtectedRoute>
+                      <TagRedirect />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
                   path="/conflicts"
                   element={
                     <ProtectedRoute>
@@ -148,6 +168,70 @@ export function App() {
                   element={
                     <ProtectedRoute>
                       <NotesPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/organize"
+                  element={
+                    <ProtectedRoute>
+                      <OrganizePage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/organize/:jobId"
+                  element={
+                    <ProtectedRoute>
+                      <OrganizePage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/home"
+                  element={
+                    <ProtectedRoute>
+                      <HomePage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/recent"
+                  element={
+                    <ProtectedRoute>
+                      <RecentPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/recent/:id"
+                  element={
+                    <ProtectedRoute>
+                      <RecentPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/tasks"
+                  element={
+                    <ProtectedRoute>
+                      <TasksPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/hygiene"
+                  element={
+                    <ProtectedRoute>
+                      <HygienePage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/clip"
+                  element={
+                    <ProtectedRoute>
+                      <ClipPage />
                     </ProtectedRoute>
                   }
                 />

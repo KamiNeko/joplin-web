@@ -6,12 +6,16 @@ import { fileURLToPath } from 'url';
 dotenv.config();
 
 export interface AppConfig {
+  /** Interface/IP to bind (undefined listens on Node's default) */
+  host?: string;
   port: number;
   joplinServerUrl: string;
   /** Allowed cross-origin callers; false means same-origin only (no CORS headers) */
   corsOrigin: string | string[] | false;
   nodeEnv: string;
   cacheTtlMs: number;
+  /** Directory the note caches are kept in across restarts (CACHE_DIR), null keeps them in memory only */
+  cacheDir: string | null;
   authCacheTtlMs: number;
   clientDistPath: string;
   /** Value for Express' "trust proxy" setting; false means X-Forwarded-* headers are ignored */
@@ -28,6 +32,34 @@ export interface AppConfig {
   gitSha: string | null;
   /** Requests per client address and 15 minutes allowed on /api/ (RATE_LIMIT_MAX) */
   rateLimitMax: number;
+  /** Base URL of an OpenAI-compatible Chat Completions endpoint (AI_BASE_URL), null when unset */
+  aiBaseUrl: string | null;
+  /** Optional API key sent as Bearer token to AI_BASE_URL (AI_API_KEY) */
+  aiApiKey: string | null;
+  /** Model name sent to AI_BASE_URL (AI_MODEL), null when unset */
+  aiModel: string | null;
+  /** Maximum concurrent LLM classification calls per organize job (AI_CONCURRENCY, default 4) */
+  aiConcurrency: number;
+  /** Built-in deterministic fake organizer flag for demo/tests (AI_FAKE) */
+  aiFake: boolean;
+  /** Optional artificial per-note delay in ms when using the fake organizer (AI_FAKE_DELAY_MS) */
+  aiFakeDelayMs: number;
+  /** Whether every login must pass a second factor (REQUIRE_2FA, default false) */
+  require2fa: boolean;
+  /** Optional webhook shared secret for POST /api/webhooks/email (EMAIL_INGEST_WEBHOOK_SECRET) */
+  emailIngestWebhookSecret: string | null;
+  /** Service Joplin credentials used by EMAIL_INGEST webhook when enabled */
+  emailIngestJoplinEmail: string | null;
+  emailIngestJoplinPassword: string | null;
+  emailIngestNotebookId: string | null;
+  /** Optional local OCR bridge service URL (OCR_SERVICE_URL), null when unset */
+  ocrServiceUrl: string | null;
+  /** Shared secret header X-Ocr-Secret sent to OCR_SERVICE_URL (OCR_SERVICE_SECRET) */
+  ocrServiceSecret: string | null;
+  /** How long POST /api/resources waits for inline OCR before returning pending (OCR_INLINE_WAIT_MS) */
+  ocrInlineWaitMs: number;
+  /** Transcription model name used via AI_BASE_URL (AI_TRANSCRIBE_MODEL; 'off'/'none'/'false' disables) */
+  aiTranscribeModel: string | null;
 }
 
 /**
@@ -148,16 +180,117 @@ function parseGitSha(raw: string | undefined): string | null {
 }
 
 /**
+ * Parses a positive whole number config setting.
+ */
+function parsePositiveInt(name: string, raw: string | undefined, fallback: number): number {
+  const value = raw?.trim();
+  if (!value) return fallback;
+  if (!/^\d+$/.test(value) || parseInt(value, 10) < 1) {
+    throw new ConfigError(`${name} must be a positive whole number, got: ${raw}`);
+  }
+  return parseInt(value, 10);
+}
+
+function parseNonNegativeInt(name: string, raw: string | undefined, fallback: number): number {
+  const value = raw?.trim();
+  if (!value) return fallback;
+  if (!/^\d+$/.test(value)) {
+    throw new ConfigError(`${name} must be a non-negative whole number, got: ${raw}`);
+  }
+  return parseInt(value, 10);
+}
+
+/**
+ * Validates an optional HTTP/HTTPS service URL without embedded credentials.
+ */
+function parseOptionalHttpUrl(name: string, raw: string | undefined): string | null {
+  const value = raw?.trim();
+  if (!value) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ConfigError(`${name} is not a valid URL: ${value}`);
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new ConfigError(`${name} must start with http:// or https://, got: ${value}`);
+  }
+  if (url.username || url.password) {
+    throw new ConfigError(`${name} must not contain credentials`);
+  }
+  return value.replace(/\/+$/, '');
+}
+
+/**
+ * Validates AI_BASE_URL (when set) as http/https without embedded credentials.
+ */
+function parseAiBaseUrl(raw: string | undefined): string | null {
+  return parseOptionalHttpUrl('AI_BASE_URL', raw);
+}
+
+/**
+ * Resolves AI_TRANSCRIBE_MODEL: defaults to 'gemini-3.8-flash' whenever AI_BASE_URL & AI_MODEL
+ * are set; setting 'off'/'none'/'false'/'0' disables audio transcription.
+ */
+function parseAiTranscribeModel(
+  raw: string | undefined,
+  aiBaseUrl: string | null,
+  aiModel: string | null
+): string | null {
+  const trimmed = raw?.trim();
+  if (trimmed) {
+    if (['off', 'none', 'false', '0'].includes(trimmed.toLowerCase())) return null;
+    return trimmed;
+  }
+  return aiBaseUrl && aiModel ? 'gemini-3.8-flash' : null;
+}
+
+/**
  * Parses RATE_LIMIT_MAX, the general request limit per client address and 15 minutes. Unset means
  * 1000; anything but a positive whole number is rejected.
  */
 export function parseRateLimitMax(raw: string | undefined): number {
+  return parsePositiveInt('RATE_LIMIT_MAX', raw, 1000);
+}
+
+function parseCacheDir(raw: string | undefined): string | null {
   const value = raw?.trim();
-  if (!value) return 1000;
-  if (!/^\d+$/.test(value) || parseInt(value, 10) < 1) {
-    throw new ConfigError(`RATE_LIMIT_MAX must be a positive whole number, got: ${raw}`);
+  return value ? path.resolve(value) : null;
+}
+
+/**
+ * Whether WebAuthn passkeys are configured on the server. Requires PUBLIC_URL in production; in
+ * development/demo http://localhost origins are allowed.
+ */
+export function isWebAuthnConfigured(config: Pick<AppConfig, 'publicUrl' | 'nodeEnv'>): boolean {
+  return Boolean(config.publicUrl) || config.nodeEnv !== 'production';
+}
+
+/**
+ * Resolves the WebAuthn Relying Party ID and expected origin for the request.
+ * Uses PUBLIC_URL when configured; in non-production environments without PUBLIC_URL, allows only
+ * http://localhost origins (any port). Returns null when WebAuthn is not allowed for this request.
+ */
+export function resolveWebAuthnRp(
+  config: Pick<AppConfig, 'publicUrl' | 'nodeEnv'>,
+  requestOrigin: string | undefined
+): { rpId: string; expectedOrigin: string } | null {
+  if (config.publicUrl) {
+    const url = new URL(config.publicUrl);
+    return { rpId: url.hostname, expectedOrigin: url.origin };
   }
-  return parseInt(value, 10);
+  if (config.nodeEnv !== 'production' && requestOrigin) {
+    let url: URL;
+    try {
+      url = new URL(requestOrigin);
+    } catch {
+      return null;
+    }
+    if (url.protocol === 'http:' && url.hostname === 'localhost' && !url.username && !url.password) {
+      return { rpId: 'localhost', expectedOrigin: url.origin };
+    }
+  }
+  return null;
 }
 
 // Resolved from this module, not process.cwd(): src/config.ts (tsx) and dist/config.js (compiled)
@@ -166,16 +299,28 @@ const defaultClientDistPath = fileURLToPath(new URL('../../client/dist', import.
 
 /**
  * Builds the application config from environment variables. Throws ConfigError when
- * JOPLIN_SERVER_URL is missing or invalid.
+ * JOPLIN_SERVER_URL is missing or invalid, or when REQUIRE_2FA is enabled without CACHE_DIR.
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const nodeEnv = env.NODE_ENV || 'development';
+  const cacheDir = parseCacheDir(env.CACHE_DIR);
+  const require2fa = parseBoolean('REQUIRE_2FA', env.REQUIRE_2FA, false);
+  if (require2fa && !cacheDir) {
+    throw new ConfigError(
+      'REQUIRE_2FA is true, which requires CACHE_DIR to be set so two-factor authentication state persists across restarts.'
+    );
+  }
+  const aiBaseUrl = parseAiBaseUrl(env.AI_BASE_URL);
+  const aiApiKey = env.AI_API_KEY?.trim() || null;
+  const aiModel = env.AI_MODEL?.trim() || null;
   return {
+    host: env.HOST?.trim() || undefined,
     port: parseInt(env.PORT || '3001', 10),
     joplinServerUrl: parseJoplinServerUrl(env.JOPLIN_SERVER_URL),
     corsOrigin: parseCorsOrigin(env.CORS_ORIGIN, nodeEnv),
     nodeEnv,
     cacheTtlMs: parseInt(env.CACHE_TTL_MS || '30000', 10),
+    cacheDir,
     authCacheTtlMs: parseInt(env.AUTH_CACHE_TTL_MS || '300000', 10),
     clientDistPath: defaultClientDistPath,
     trustProxy: parseTrustProxy(env.TRUST_PROXY),
@@ -185,6 +330,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     appVersion: parseAppVersion(env.APP_VERSION),
     gitSha: parseGitSha(env.GIT_SHA),
     rateLimitMax: parseRateLimitMax(env.RATE_LIMIT_MAX),
+    aiBaseUrl,
+    aiApiKey,
+    aiModel,
+    aiConcurrency: parsePositiveInt('AI_CONCURRENCY', env.AI_CONCURRENCY, 4),
+    aiFake: parseBoolean('AI_FAKE', env.AI_FAKE, false),
+    aiFakeDelayMs: parseNonNegativeInt('AI_FAKE_DELAY_MS', env.AI_FAKE_DELAY_MS, 0),
+    require2fa,
+    emailIngestWebhookSecret: env.EMAIL_INGEST_WEBHOOK_SECRET?.trim() || null,
+    emailIngestJoplinEmail: env.EMAIL_INGEST_JOPLIN_EMAIL?.trim() || null,
+    emailIngestJoplinPassword: env.EMAIL_INGEST_JOPLIN_PASSWORD || null,
+    emailIngestNotebookId: env.EMAIL_INGEST_NOTEBOOK_ID?.trim() || null,
+    ocrServiceUrl: parseOptionalHttpUrl('OCR_SERVICE_URL', env.OCR_SERVICE_URL),
+    ocrServiceSecret: env.OCR_SERVICE_SECRET?.trim() || null,
+    ocrInlineWaitMs: parseNonNegativeInt('OCR_INLINE_WAIT_MS', env.OCR_INLINE_WAIT_MS, 4000),
+    aiTranscribeModel: parseAiTranscribeModel(env.AI_TRANSCRIBE_MODEL, aiBaseUrl, aiModel),
   };
 }
 
