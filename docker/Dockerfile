@@ -2,14 +2,14 @@
 
 # Base image for the target-platform stages, pinned by digest for reproducible builds (Dependabot bumps the digest; keep build-client on the same one).
 # Keep the Node.js major in sync with .nvmrc, which CI reads.
-FROM node:24-alpine@sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f AS base
+FROM node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS base
 
 # ==============================================================================
 # Stage 1: Build client (React + Vite)
 # ==============================================================================
 # The bundle is plain JS/CSS, so build it natively on the build machine instead of under QEMU
 # for every target platform (arm64 `npm ci` crashed or hung under emulation).
-FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f AS build-client
+FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS build-client
 
 WORKDIR /build/client
 
