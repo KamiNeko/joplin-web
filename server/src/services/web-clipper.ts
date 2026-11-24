@@ -24,6 +24,18 @@ const defaultFetchRemote: FetchRemoteFn = (url, init) =>
 const MAX_CLIP_BYTES = 5 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
 const FETCH_TIMEOUT_MS = 15_000;
+export const MAX_CLIP_IMAGES = 50;
+const IMAGE_DOWNLOAD_CONCURRENCY = 4;
+
+export interface UploadedClipImage {
+  id: string;
+}
+
+export type UploadClipImageFn = (image: {
+  name: string;
+  mime: string;
+  data: Buffer;
+}) => Promise<UploadedClipImage>;
 
 const BLOCKED_HOSTNAMES = new Set(['localhost', 'ip6-localhost', 'ip6-loopback']);
 
@@ -118,16 +130,24 @@ export async function assertSafeRemoteUrl(
   return url;
 }
 
-async function readResponseWithLimit(response: Response, limitBytes: number): Promise<string> {
+async function readResponseBytesWithLimit(
+  response: Response,
+  limitBytes: number,
+  tooLargeMessage: string
+): Promise<Buffer> {
   const lenHeader = response.headers.get('content-length');
   if (lenHeader && Number(lenHeader) > limitBytes) {
-    throw new WriteValidationError('Target page exceeds maximum 5 MB clip size', 413);
+    throw new WriteValidationError(tooLargeMessage, 413);
   }
   if (!response.body) {
-    return response.text();
+    const buf = Buffer.from(await response.arrayBuffer());
+    if (buf.byteLength > limitBytes) {
+      throw new WriteValidationError(tooLargeMessage, 413);
+    }
+    return buf;
   }
   const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
+  const chunks: Buffer[] = [];
   let received = 0;
   while (true) {
     const { done, value } = await reader.read();
@@ -136,15 +156,153 @@ async function readResponseWithLimit(response: Response, limitBytes: number): Pr
       received += value.byteLength;
       if (received > limitBytes) {
         await reader.cancel().catch(() => undefined);
-        throw new WriteValidationError('Target page exceeds maximum 5 MB clip size', 413);
+        throw new WriteValidationError(tooLargeMessage, 413);
       }
-      chunks.push(value);
+      chunks.push(Buffer.from(value));
     }
   }
-  return Buffer.concat(chunks.map((c) => Buffer.from(c))).toString('utf8');
+  return Buffer.concat(chunks);
 }
 
-function createTurndown(): TurndownService {
+async function readResponseWithLimit(response: Response, limitBytes: number): Promise<string> {
+  const buf = await readResponseBytesWithLimit(
+    response,
+    limitBytes,
+    'Target page exceeds maximum 5 MB clip size'
+  );
+  return buf.toString('utf8');
+}
+
+const IMAGE_EXT_BY_MIME: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/bmp': 'bmp',
+  'image/avif': 'avif',
+  'image/svg+xml': 'svg',
+  'image/x-icon': 'ico',
+  'image/vnd.microsoft.icon': 'ico',
+};
+
+function detectImageMime(buffer: Buffer): string | null {
+  if (buffer.length >= 4) {
+    if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) return 'image/png';
+    if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) return 'image/gif';
+    if (buffer[0] === 0x00 && buffer[1] === 0x00 && buffer[2] === 0x01 && buffer[3] === 0x00) return 'image/x-icon';
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  if (buffer.length >= 2 && buffer[0] === 0x42 && buffer[1] === 0x4d) {
+    return 'image/bmp';
+  }
+  if (buffer.length >= 12) {
+    if (buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP') {
+      return 'image/webp';
+    }
+    if (buffer.toString('ascii', 4, 8) === 'ftyp') {
+      const brand = buffer.toString('ascii', 8, 12);
+      if (brand === 'avif' || brand === 'avis') return 'image/avif';
+    }
+  }
+  const snippet = buffer.toString('utf8', 0, Math.min(buffer.length, 256)).trim().toLowerCase();
+  if (snippet.startsWith('<svg') || (snippet.startsWith('<?xml') && snippet.includes('<svg'))) {
+    return 'image/svg+xml';
+  }
+  return null;
+}
+
+function imageFilenameFromUrl(url: URL, mime: string): string {
+  const ext = IMAGE_EXT_BY_MIME[mime] ?? 'bin';
+  const segments = url.pathname.split('/').filter(Boolean);
+  let base = segments.length > 0 ? segments[segments.length - 1] : '';
+  try {
+    base = decodeURIComponent(base);
+  } catch {
+    // keep raw segment
+  }
+  base = base.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^\.+/, '').slice(0, 120);
+  if (!base) return `image.${ext}`;
+  if (!/\.[a-z0-9]{2,5}$/i.test(base)) {
+    return `${base}.${ext}`;
+  }
+  return base;
+}
+
+/**
+ * Downloads a single remote image through SSRF checks (initial URL and every redirect hop),
+ * enforcing the same redirect, timeout, and size limits as page fetches.
+ */
+export async function fetchRemoteImage(
+  rawUrl: string,
+  deps: { dnsLookup?: DnsLookupFn; fetchFn?: FetchRemoteFn; maxBytes?: number } = {}
+): Promise<{ name: string; mime: string; data: Buffer }> {
+  const dnsLookup = deps.dnsLookup ?? defaultDnsLookup;
+  const fetchFn = deps.fetchFn ?? defaultFetchRemote;
+  const maxBytes = deps.maxBytes ?? MAX_CLIP_BYTES;
+
+  let currentUrl = await assertSafeRemoteUrl(rawUrl, dnsLookup);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+  try {
+    for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+      const response = await fetchFn(currentUrl.toString(), {
+        headers: {
+          'User-Agent': 'JoplinWebClipper/1.0 (+https://joplinapp.org)',
+          Accept: 'image/avif,image/webp,image/png,image/jpeg,image/gif,image/svg+xml,image/*;q=0.8,*/*;q=0.1',
+        },
+        signal: controller.signal,
+      });
+
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get('location');
+        if (!location || hop === MAX_REDIRECTS) {
+          throw new WriteValidationError('Too many or invalid redirects while fetching image', 400);
+        }
+        currentUrl = await assertSafeRemoteUrl(new URL(location, currentUrl).toString(), dnsLookup);
+        continue;
+      }
+
+      if (!response.ok) {
+        throw new WriteValidationError(`Image returned HTTP ${response.status}`, 502);
+      }
+
+      const rawType = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+      if (rawType && !rawType.startsWith('image/') && rawType !== 'application/octet-stream') {
+        throw new WriteValidationError(`Unsupported image content type: ${rawType}`, 415);
+      }
+
+      const data = await readResponseBytesWithLimit(
+        response,
+        maxBytes,
+        'Image exceeds maximum 5 MB clip size'
+      );
+      if (data.length === 0) {
+        throw new WriteValidationError('Image response was empty', 400);
+      }
+
+      const sniffed = detectImageMime(data);
+      const mime = rawType.startsWith('image/') ? rawType : sniffed;
+      if (!mime || !mime.startsWith('image/')) {
+        throw new WriteValidationError('Response is not a recognized image', 415);
+      }
+
+      return {
+        name: imageFilenameFromUrl(currentUrl, mime),
+        mime,
+        data,
+      };
+    }
+
+    throw new WriteValidationError('Image redirect limit exceeded', 400);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export function createTurndown(): TurndownService {
   const td = new TurndownService({
     headingStyle: 'atx',
     codeBlockStyle: 'fenced',
@@ -154,16 +312,149 @@ function createTurndown(): TurndownService {
   return td;
 }
 
+const JOPLIN_RESOURCE_REF = /^:\/[0-9a-f]{32}$/i;
+const SAFE_DATA_IMAGE_URI = /^data:image\/(?:png|jpeg|jpg|gif|webp|avif|bmp);/i;
+const URL_ATTRS = new Set(['href', 'src', 'xlink:href', 'action', 'formaction', 'poster', 'background', 'cite']);
+
+function normalizeProtocol(val: string): string {
+  return val.replace(/[\u0000-\u0020]+/g, '').toLowerCase();
+}
+
+function isDangerousUrl(val: string, attrName: string): boolean {
+  const normalized = normalizeProtocol(val);
+  if (JOPLIN_RESOURCE_REF.test(normalized)) return false;
+  if (/^(javascript|vbscript):/.test(normalized)) return true;
+  if (normalized.startsWith('data:')) {
+    return !(attrName === 'src' && SAFE_DATA_IMAGE_URI.test(normalized));
+  }
+  return false;
+}
+
+/** Escapes text for safe insertion into HTML content and attribute values. */
+export function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Converts already-extracted HTML into Markdown using the shared Turndown configuration.
+ * Preserves Joplin resource links (`:/<32-hex-id>`) and strips `javascript:` / `vbscript:` links.
+ */
+export function htmlToMarkdown(html: string): string {
+  if (!html || !html.trim()) return '';
+  const { document } = parseHTML(`<!doctype html><html><body>${html}</body></html>`);
+  for (const el of document.body.querySelectorAll('a[href], img[src]') as unknown as Iterable<{
+    hasAttribute(name: string): boolean;
+    getAttribute(name: string): string | null;
+    removeAttribute(name: string): void;
+  }>) {
+    const attr = el.hasAttribute('href') ? 'href' : 'src';
+    const val = el.getAttribute(attr);
+    if (val && isDangerousUrl(val, attr)) {
+      el.removeAttribute(attr);
+    }
+  }
+  return createTurndown().turndown(document.body.innerHTML).trim();
+}
+
+/**
+ * Sanitizes clipped HTML for storage as a Joplin HTML note (`markup_language: 2`).
+ * Strips active/embedded elements (`script`, `style`, `iframe`, `object`, `embed`, `form`, `noscript`,
+ * `base`, `meta`, `link`), all `on*` event handler attributes, `srcdoc`, and `javascript:` /
+ * `vbscript:` / unsafe `data:` URLs while keeping Joplin `:/<id>` attachment links intact.
+ */
+export function sanitizeClippedHtml(html: string): string {
+  if (!html || !html.trim()) return '';
+  const { document } = parseHTML(`<!doctype html><html><body>${html}</body></html>`);
+  for (const el of Array.from(
+    document.body.querySelectorAll('script, style, iframe, object, embed, form, noscript, base, meta, link') as unknown as Iterable<{
+      remove(): void;
+    }>
+  )) {
+    el.remove();
+  }
+
+  for (const el of Array.from(
+    document.body.querySelectorAll('*') as unknown as Iterable<{
+      attributes: Iterable<{ name: string; value: string }>;
+      removeAttribute(name: string): void;
+    }>
+  )) {
+    const attrs = Array.from(el.attributes);
+    for (const { name, value } of attrs) {
+      const lower = name.toLowerCase();
+      if (lower.startsWith('on') || lower === 'srcdoc') {
+        el.removeAttribute(name);
+        continue;
+      }
+      if (URL_ATTRS.has(lower) && isDangerousUrl(value, lower)) {
+        el.removeAttribute(name);
+      }
+    }
+  }
+
+  return document.body.innerHTML.trim();
+}
+
 export interface ClippedArticle {
   url: string;
   title: string;
   markdown: string;
+  contentHtml?: string;
   byline?: string;
   siteName?: string;
+  skippedImages?: number;
+}
+
+function pickLargestFromSrcset(srcset: string): string {
+  let bestUrl = '';
+  let bestScore = -1;
+  for (const part of srcset.split(',')) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const tokens = trimmed.split(/\s+/);
+    const candidate = tokens[0];
+    if (!candidate) continue;
+    const descriptor = tokens[1] || '';
+    let score = 0;
+    const wMatch = /^(\d+)w$/i.exec(descriptor);
+    const xMatch = /^(\d+(?:\.\d+)?)x$/i.exec(descriptor);
+    if (wMatch) score = Number(wMatch[1]);
+    else if (xMatch) score = Number(xMatch[1]) * 1000;
+    if (score >= bestScore) {
+      bestScore = score;
+      bestUrl = candidate;
+    }
+  }
+  return bestUrl;
 }
 
 export function extractArticleFromHtml(html: string, pageUrl: string): ClippedArticle {
   const { document } = parseHTML(html);
+
+  // Resolve lazy-load attributes and srcset on <img> before Readability & URL absolutization
+  for (const img of document.querySelectorAll('img') as unknown as Iterable<{
+    getAttribute(name: string): string | null;
+    setAttribute(name: string, value: string): void;
+  }>) {
+    const currentSrc = img.getAttribute('src')?.trim() || '';
+    const lazySrc =
+      img.getAttribute('data-src')?.trim() ||
+      img.getAttribute('data-original')?.trim() ||
+      img.getAttribute('data-lazy-src')?.trim() ||
+      '';
+    if (lazySrc && (!currentSrc || currentSrc.startsWith('data:'))) {
+      img.setAttribute('src', lazySrc);
+    } else if (!currentSrc) {
+      const srcset = img.getAttribute('srcset') || img.getAttribute('data-srcset') || '';
+      const best = pickLargestFromSrcset(srcset);
+      if (best) img.setAttribute('src', best);
+    }
+  }
 
   const elements = document.querySelectorAll('a[href], img[src]') as unknown as Iterable<{
     hasAttribute(name: string): boolean;
@@ -176,7 +467,8 @@ export function extractArticleFromHtml(html: string, pageUrl: string): ClippedAr
     const val = el.getAttribute(attr);
     if (!val) continue;
     const trimmed = val.trim();
-    if (/^(javascript|vbscript):/i.test(trimmed)) {
+    if (JOPLIN_RESOURCE_REF.test(trimmed)) continue;
+    if (/^(javascript|vbscript):/i.test(normalizeProtocol(trimmed))) {
       el.removeAttribute(attr);
       continue;
     }
@@ -205,14 +497,92 @@ export function extractArticleFromHtml(html: string, pageUrl: string): ClippedAr
     url: pageUrl,
     title,
     markdown: bodyMarkdown,
+    contentHtml,
     byline: article?.byline?.trim() || undefined,
     siteName: article?.siteName?.trim() || undefined,
   };
 }
 
+/**
+ * Downloads remote `http:`/`https:` images referenced in `contentHtml` through SSRF checks,
+ * uploads each via `uploadImage`, rewrites matching `<img src>` attributes to `:/<resourceId>`,
+ * and converts the resulting HTML to Markdown. Caps at `MAX_CLIP_IMAGES` (50) and skips failures.
+ */
+async function embedRemoteImagesAndConvert(
+  contentHtml: string,
+  uploadImage: UploadClipImageFn,
+  deps: { dnsLookup?: DnsLookupFn; fetchFn?: FetchRemoteFn }
+): Promise<{ markdown: string; skippedImages: number }> {
+  const { document } = parseHTML(`<!doctype html><html><body>${contentHtml}</body></html>`);
+  const imgs = Array.from(
+    document.body.querySelectorAll('img[src]') as unknown as Iterable<{
+      getAttribute(name: string): string | null;
+      setAttribute(name: string, value: string): void;
+    }>
+  );
+
+  const uniqueUrls: string[] = [];
+  const seen = new Set<string>();
+  for (const img of imgs) {
+    const src = img.getAttribute('src')?.trim();
+    if (!src || !/^https?:\/\//i.test(src)) continue;
+    if (!seen.has(src)) {
+      seen.add(src);
+      uniqueUrls.push(src);
+    }
+  }
+
+  if (uniqueUrls.length === 0) {
+    return { markdown: createTurndown().turndown(document.body.innerHTML).trim(), skippedImages: 0 };
+  }
+
+  const toFetch = uniqueUrls.slice(0, MAX_CLIP_IMAGES);
+  let skippedImages = Math.max(0, uniqueUrls.length - toFetch.length);
+  const urlToResourceId = new Map<string, string>();
+
+  let next = 0;
+  const worker = async () => {
+    while (next < toFetch.length) {
+      const imgUrl = toFetch[next++];
+      let downloaded: { name: string; mime: string; data: Buffer };
+      try {
+        downloaded = await fetchRemoteImage(imgUrl, deps);
+      } catch {
+        skippedImages++;
+        continue;
+      }
+      try {
+        const uploaded = await uploadImage(downloaded);
+        urlToResourceId.set(imgUrl, uploaded.id);
+      } catch (err) {
+        const status = (err as { status?: number })?.status;
+        if (status === 401 || status === 422) throw err;
+        skippedImages++;
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(IMAGE_DOWNLOAD_CONCURRENCY, toFetch.length) }, worker)
+  );
+
+  for (const img of imgs) {
+    const src = img.getAttribute('src')?.trim();
+    if (!src) continue;
+    const id = urlToResourceId.get(src);
+    if (id) {
+      img.setAttribute('src', `:/${id}`);
+    }
+  }
+
+  return {
+    markdown: createTurndown().turndown(document.body.innerHTML).trim(),
+    skippedImages,
+  };
+}
+
 export async function fetchAndClipUrl(
   rawUrl: string,
-  deps: { dnsLookup?: DnsLookupFn; fetchFn?: FetchRemoteFn } = {}
+  deps: { dnsLookup?: DnsLookupFn; fetchFn?: FetchRemoteFn; uploadImage?: UploadClipImageFn } = {}
 ): Promise<ClippedArticle> {
   const dnsLookup = deps.dnsLookup ?? defaultDnsLookup;
   const fetchFn = deps.fetchFn ?? defaultFetchRemote;
@@ -260,12 +630,28 @@ export async function fetchAndClipUrl(
         const host = currentUrl.hostname;
         return { url: currentUrl.toString(), title: host, markdown: text.trim() };
       }
-      return extractArticleFromHtml(text, currentUrl.toString());
+      const extracted = extractArticleFromHtml(text, currentUrl.toString());
+      if (deps.uploadImage && extracted.contentHtml) {
+        const { markdown, skippedImages } = await embedRemoteImagesAndConvert(
+          extracted.contentHtml,
+          deps.uploadImage,
+          { dnsLookup, fetchFn }
+        );
+        return {
+          ...extracted,
+          markdown,
+          skippedImages,
+        };
+      }
+      return extracted;
     }
 
     throw new WriteValidationError('Redirect limit exceeded', 400);
   } catch (err) {
     if (err instanceof WriteValidationError) throw err;
+    if ((err as { status?: number })?.status === 401 || (err as { status?: number })?.status === 422) {
+      throw err;
+    }
     if ((err as { name?: string })?.name === 'AbortError') {
       throw new WriteValidationError('Timed out while fetching target URL', 504);
     }

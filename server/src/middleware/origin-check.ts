@@ -17,7 +17,11 @@ function headerValue(value: string | string[] | undefined): string {
  * clients and are only accepted when they don't rely on the session cookie. "Origin: null"
  * (sandboxed frames, data: URLs) is always rejected.
  */
-export function createOriginCheck(config: Pick<AppConfig, 'corsOrigin' | 'publicUrl' | 'trustProxy'>) {
+export function createOriginCheck(
+  config: Pick<AppConfig, 'corsOrigin' | 'publicUrl' | 'trustProxy'> & {
+    clipperExtensionIds?: string[];
+  }
+) {
   const configured = new Set<string>();
   for (const origin of [config.corsOrigin, config.publicUrl].flat()) {
     if (!origin || origin === '*') continue;
@@ -27,6 +31,13 @@ export function createOriginCheck(config: Pick<AppConfig, 'corsOrigin' | 'public
       // not a valid origin, can never match
     }
   }
+
+  const allowedExtensions = new Set<string>(
+    (config.clipperExtensionIds ?? [])
+      .map((id) => id.trim().toLowerCase())
+      .filter(Boolean)
+      .map((id) => `chrome-extension://${id}`)
+  );
 
   const trustsForwardedHost = (req: Request): boolean => {
     if (config.trustProxy === false) return false;
@@ -38,6 +49,10 @@ export function createOriginCheck(config: Pick<AppConfig, 'corsOrigin' | 'public
   };
 
   const isAllowed = (origin: string, req: Request): boolean => {
+    const lowerOrigin = origin.toLowerCase();
+    if (lowerOrigin.startsWith('chrome-extension://')) {
+      return allowedExtensions.has(lowerOrigin);
+    }
     let url: URL;
     try {
       url = new URL(origin);
@@ -61,9 +76,11 @@ export function createOriginCheck(config: Pick<AppConfig, 'corsOrigin' | 'public
       return next();
     }
 
+    const isExtensionOrigin = typeof origin === 'string' && origin.toLowerCase().startsWith('chrome-extension://');
     res.status(403).json({
-      error:
-        'Request origin not allowed. If Joplin Web runs behind a reverse proxy, set PUBLIC_URL to the address you open it at.',
+      error: isExtensionOrigin
+        ? 'Request origin not allowed. To allow the browser clipper extension, set CLIPPER_EXTENSION_IDS on the server.'
+        : 'Request origin not allowed. If Joplin Web runs behind a reverse proxy, set PUBLIC_URL to the address you open it at.',
     });
   };
 }

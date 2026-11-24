@@ -240,6 +240,55 @@ describe('CSRF protection', () => {
     const login = await call(baseUrl, '/api/auth/login', { method: 'POST', json: { email: DEMO_EMAIL, password: DEMO_PASSWORD } });
     assert.equal((await newNotebook(baseUrl, { Authorization: `Bearer ${login.data.sessionId}` })).status, 201);
   });
+
+  test('CLIPPER_EXTENSION_IDS allows only configured chrome-extension origins without changing CORS/CORP', async () => {
+    const allowedId = 'nlplgmnmaigjhfbhkbmcpfcdnppaklco';
+    const otherId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const baseUrl = await startApp({ corsOrigin: false, clipperExtensionIds: [allowedId] });
+    const { cookie } = await browserLogin(baseUrl);
+
+    const allowed = await newNotebook(baseUrl, {
+      Cookie: cookie,
+      Origin: `chrome-extension://${allowedId}`,
+    });
+    assert.equal(allowed.status, 201);
+    assert.equal(allowed.headers.get('access-control-allow-origin'), null);
+    assert.equal(allowed.headers.get('cross-origin-resource-policy'), 'same-origin');
+
+    const rejected = await newNotebook(baseUrl, {
+      Cookie: cookie,
+      Origin: `chrome-extension://${otherId}`,
+    });
+    assert.equal(rejected.status, 403);
+    assert.match(rejected.data.error, /CLIPPER_EXTENSION_IDS/);
+
+    const spoofedPath = await newNotebook(baseUrl, {
+      Cookie: cookie,
+      Origin: `chrome-extension://${allowedId}/evil`,
+    });
+    assert.equal(spoofedPath.status, 403);
+
+    // Default (empty clipperExtensionIds) rejects all extension origins
+    const defaultUrl = await startApp({ corsOrigin: false, clipperExtensionIds: [] });
+    const defaultLogin = await browserLogin(defaultUrl);
+    const defaultRejected = await newNotebook(defaultUrl, {
+      Cookie: defaultLogin.cookie,
+      Origin: `chrome-extension://${allowedId}`,
+    });
+    assert.equal(defaultRejected.status, 403);
+  });
+
+  test('parses CLIPPER_EXTENSION_IDS from the environment', async () => {
+    const { parseClipperExtensionIds, ConfigError } = await import('../src/config.js');
+    assert.deepEqual(parseClipperExtensionIds(undefined), []);
+    assert.deepEqual(parseClipperExtensionIds('  '), []);
+    assert.deepEqual(
+      parseClipperExtensionIds('NLPLGMNMAIGJHFBHKBMCPFCDNPPAKLCO, aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, nlplgmnmaigjhfbhkbmcpfcdnppaklco'),
+      ['nlplgmnmaigjhfbhkbmcpfcdnppaklco', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa']
+    );
+    assert.throws(() => parseClipperExtensionIds('not-an-extension-id'), ConfigError);
+    assert.throws(() => parseClipperExtensionIds('zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz'), ConfigError);
+  });
 });
 
 describe('logout', () => {

@@ -49,7 +49,10 @@ async function respond(err: unknown, req: Request, res: Response): Promise<void>
   }
 
   if ((err as { type?: string })?.type === 'entity.too.large') {
-    res.status(413).json({ error: 'The file is too large to upload' });
+    const message = req.originalUrl.startsWith('/api/clip')
+      ? 'Clipped content exceeds the 10 MB size limit'
+      : 'The file is too large to upload';
+    res.status(413).json({ error: message });
     return;
   }
 

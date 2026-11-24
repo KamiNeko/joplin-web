@@ -60,6 +60,8 @@ export interface AppConfig {
   ocrInlineWaitMs: number;
   /** Transcription model name used via AI_BASE_URL (AI_TRANSCRIBE_MODEL; 'off'/'none'/'false' disables) */
   aiTranscribeModel: string | null;
+  /** Allowed Chrome extension IDs for the browser clipper (CLIPPER_EXTENSION_IDS, comma-separated) */
+  clipperExtensionIds: string[];
 }
 
 /**
@@ -258,6 +260,28 @@ function parseCacheDir(raw: string | undefined): string | null {
   return value ? path.resolve(value) : null;
 }
 
+const CHROME_EXTENSION_ID_PATTERN = /^[a-p]{32}$/;
+
+/**
+ * Parses CLIPPER_EXTENSION_IDS (comma-separated 32-character Chrome extension IDs).
+ * Unset or blank means no browser extension origins are allowed.
+ */
+export function parseClipperExtensionIds(raw: string | undefined): string[] {
+  const value = raw?.trim();
+  if (!value) return [];
+  const ids = value
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+  const invalid = ids.find((id) => !CHROME_EXTENSION_ID_PATTERN.test(id));
+  if (invalid) {
+    throw new ConfigError(
+      `CLIPPER_EXTENSION_IDS must be a comma-separated list of 32-character Chrome extension IDs (a-p), got: ${invalid}`
+    );
+  }
+  return Array.from(new Set(ids));
+}
+
 /**
  * Whether WebAuthn passkeys are configured on the server. Requires PUBLIC_URL in production; in
  * development/demo http://localhost origins are allowed.
@@ -345,6 +369,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     ocrServiceSecret: env.OCR_SERVICE_SECRET?.trim() || null,
     ocrInlineWaitMs: parseNonNegativeInt('OCR_INLINE_WAIT_MS', env.OCR_INLINE_WAIT_MS, 4000),
     aiTranscribeModel: parseAiTranscribeModel(env.AI_TRANSCRIBE_MODEL, aiBaseUrl, aiModel),
+    clipperExtensionIds: parseClipperExtensionIds(env.CLIPPER_EXTENSION_IDS),
   };
 }
 

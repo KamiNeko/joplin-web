@@ -6,11 +6,14 @@ import { joplinApi } from '../services/joplin-api.js';
 import { noteCache } from '../services/note-cache.js';
 import { assertValidId, noteWriter, WriteValidationError } from '../services/note-writer.js';
 import {
+  escapeHtml,
   extractArticleFromHtml,
   fetchAndClipUrl,
+  htmlToMarkdown,
   parseEmlMessage,
+  sanitizeClippedHtml,
 } from '../services/web-clipper.js';
-import type { Notebook } from '../types/index.js';
+import type { Notebook, NoteDetail } from '../types/index.js';
 
 function firstWritableNotebookId(notebooks: Notebook[]): string | null {
   for (const nb of notebooks) {
@@ -50,6 +53,78 @@ function verifySecret(provided: string | undefined, expected: string): boolean {
   return timingSafeEqual(a, b);
 }
 
+async function resolveClipNotebookId(sessionId: string, parentId: unknown): Promise<string> {
+  if (typeof parentId === 'string' && parentId.trim()) {
+    return assertValidId(parentId.trim(), 'notebook id');
+  }
+  const notebooks = await noteCache.getNotebooks(sessionId);
+  const fallback = findInboxOrDefaultNotebookId(notebooks, null);
+  if (!fallback) {
+    throw new WriteValidationError('Create a non-encrypted notebook before clipping pages', 400);
+  }
+  return fallback;
+}
+
+function buildSourceBannerMarkdown(url: string, byline?: string): string {
+  const bits = [`Clipped from ${url}`];
+  if (byline) bits.push(`by ${byline}`);
+  return `> ${bits.join(' · ')}`;
+}
+
+function buildSourceBannerHtml(url: string, byline?: string): string {
+  const safeUrl = escapeHtml(url);
+  const bylinePart = byline ? ` &middot; by ${escapeHtml(byline)}` : '';
+  return `<blockquote>Clipped from <a href="${safeUrl}">${safeUrl}</a>${bylinePart}</blockquote>`;
+}
+
+function parseClipSourceUrl(rawUrl: unknown): string {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) {
+    throw new WriteValidationError('url is required', 400);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl.trim());
+  } catch {
+    throw new WriteValidationError('url must be a valid http:// or https:// URL', 400);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new WriteValidationError('Only http:// and https:// URLs are supported', 400);
+  }
+  return parsed.toString();
+}
+
+async function saveClippedNote(
+  sessionId: string,
+  input: {
+    title: string;
+    body: string;
+    parentId: string;
+    tags?: unknown;
+    sourceUrl: string;
+    author?: string;
+    markupLanguage?: 1 | 2;
+  }
+): Promise<NoteDetail> {
+  let note = await noteWriter.createNote(sessionId, {
+    title: input.title,
+    body: input.body,
+    parentId: input.parentId,
+    sourceUrl: input.sourceUrl,
+    author: input.author,
+    markupLanguage: input.markupLanguage,
+  });
+
+  if (Array.isArray(input.tags)) {
+    for (const rawTag of input.tags.slice(0, 10)) {
+      if (typeof rawTag === 'string' && rawTag.trim()) {
+        note = await noteWriter.addTagToNote(sessionId, note.id, rawTag.trim());
+      }
+    }
+  }
+
+  return note;
+}
+
 export function createClipRouter(deps: { fetchClip?: typeof fetchAndClipUrl } = {}): Router {
   const router = Router();
   const clipUrl = deps.fetchClip ?? fetchAndClipUrl;
@@ -70,46 +145,98 @@ export function createClipRouter(deps: { fetchClip?: typeof fetchAndClipUrl } = 
       return;
     }
 
-    let targetNotebookId =
-      typeof parentId === 'string' && parentId.trim() ? assertValidId(parentId.trim(), 'notebook id') : '';
-    if (!targetNotebookId) {
-      const notebooks = await noteCache.getNotebooks(req.sessionId!);
-      const fallback = findInboxOrDefaultNotebookId(notebooks, null);
-      if (!fallback) {
-        throw new WriteValidationError('Create a non-encrypted notebook before clipping pages', 400);
-      }
-      targetNotebookId = fallback;
-    }
+    const targetNotebookId = await resolveClipNotebookId(req.sessionId!, parentId);
+    const article = await clipUrl(url, {
+      uploadImage: (image) => noteWriter.createResource(req.sessionId!, image),
+    });
 
-    const article = await clipUrl(url);
-    const metaLines: string[] = [];
-    if (includeSourceBanner !== false) {
-      const bits = [`Clipped from ${article.url}`];
-      if (article.byline) bits.push(`by ${article.byline}`);
-      metaLines.push(`> ${bits.join(' · ')}`);
-    }
-    const fullBody = [...metaLines, article.markdown].filter(Boolean).join('\n\n');
+    const banner = includeSourceBanner !== false ? buildSourceBannerMarkdown(article.url, article.byline) : '';
+    const fullBody = [banner, article.markdown].filter(Boolean).join('\n\n');
 
-    let note = await noteWriter.createNote(req.sessionId!, {
+    const note = await saveClippedNote(req.sessionId!, {
       title: article.title,
       body: fullBody,
       parentId: targetNotebookId,
+      tags,
       sourceUrl: article.url,
       author: article.byline,
+      markupLanguage: 1,
     });
-
-    if (Array.isArray(tags)) {
-      for (const rawTag of tags.slice(0, 10)) {
-        if (typeof rawTag === 'string' && rawTag.trim()) {
-          note = await noteWriter.addTagToNote(req.sessionId!, note.id, rawTag.trim());
-        }
-      }
-    }
 
     res.status(201).json({
       note,
       extractedTitle: article.title,
       siteName: article.siteName,
+      ...(article.skippedImages ? { skippedImages: article.skippedImages } : {}),
+    });
+  });
+
+  /**
+   * POST /api/clip/html
+   * Body: { url, title, html, format: 'markdown'|'html', parentId?, tags?, byline?, siteName?, includeSourceBanner? }
+   * Accepts rendered HTML captured by the browser clipper extension (with images already uploaded
+   * as Joplin resources `:/<id>`), converts to Markdown or sanitizes HTML, and saves a note.
+   */
+  router.post('/clip/html', requireAuth, async (req, res) => {
+    const { url, title, html, format, parentId, tags, byline, siteName, includeSourceBanner } = (req.body ?? {}) as {
+      url?: unknown;
+      title?: unknown;
+      html?: unknown;
+      format?: unknown;
+      parentId?: unknown;
+      tags?: unknown;
+      byline?: unknown;
+      siteName?: unknown;
+      includeSourceBanner?: unknown;
+    };
+
+    const sourceUrl = parseClipSourceUrl(url);
+    if (typeof title !== 'string' || !title.trim()) {
+      res.status(400).json({ error: 'title is required' });
+      return;
+    }
+    if (typeof html !== 'string' || !html.trim()) {
+      res.status(400).json({ error: 'html is required' });
+      return;
+    }
+    const resolvedFormat = format === undefined ? 'markdown' : format;
+    if (resolvedFormat !== 'markdown' && resolvedFormat !== 'html') {
+      res.status(400).json({ error: "format must be 'markdown' or 'html'" });
+      return;
+    }
+
+    const cleanTitle = title.replace(/\s+/g, ' ').trim();
+    const cleanByline = typeof byline === 'string' && byline.trim() ? byline.trim() : undefined;
+    const cleanSiteName = typeof siteName === 'string' && siteName.trim() ? siteName.trim() : undefined;
+    const targetNotebookId = await resolveClipNotebookId(req.sessionId!, parentId);
+
+    let fullBody: string;
+    let markupLanguage: 1 | 2;
+    if (resolvedFormat === 'html') {
+      const sanitized = sanitizeClippedHtml(html);
+      const banner = includeSourceBanner !== false ? buildSourceBannerHtml(sourceUrl, cleanByline) : '';
+      fullBody = [banner, sanitized].filter(Boolean).join('\n');
+      markupLanguage = 2;
+    } else {
+      const markdown = htmlToMarkdown(html);
+      const banner = includeSourceBanner !== false ? buildSourceBannerMarkdown(sourceUrl, cleanByline) : '';
+      fullBody = [banner, markdown].filter(Boolean).join('\n\n');
+      markupLanguage = 1;
+    }
+
+    const note = await saveClippedNote(req.sessionId!, {
+      title: cleanTitle,
+      body: fullBody,
+      parentId: targetNotebookId,
+      tags,
+      sourceUrl,
+      author: cleanByline,
+      markupLanguage,
+    });
+
+    res.status(201).json({
+      note,
+      ...(cleanSiteName ? { siteName: cleanSiteName } : {}),
     });
   });
 

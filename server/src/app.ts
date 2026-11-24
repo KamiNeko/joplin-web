@@ -15,6 +15,7 @@ import { accountRouter } from './routes/account.js';
 import { askRouter } from './routes/ask.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createClipRouter, createEmailWebhookRouter } from './routes/clip.js';
+import type { fetchAndClipUrl } from './services/web-clipper.js';
 import { notebooksRouter } from './routes/notebooks.js';
 import { notesRouter } from './routes/notes.js';
 import { createOrganizeRouter } from './routes/organize.js';
@@ -58,7 +59,10 @@ export function cspDirectives(
 /**
  * Creates the Express application (API, static client, security middleware) for a configuration
  */
-export function createApp(config: AppConfig, deps: { organizer?: OrganizerService } = {}): Express {
+export function createApp(
+  config: AppConfig,
+  deps: { organizer?: OrganizerService; fetchClip?: typeof fetchAndClipUrl } = {}
+): Express {
   const organizer = deps.organizer ?? organizerService;
   if (organizer.isEnabled()) {
     organizer.resumeFromDiskOnStartup();
@@ -179,7 +183,7 @@ export function createApp(config: AppConfig, deps: { organizer?: OrganizerServic
   app.use('/api/tags', tagsRouter);
   app.use('/api/search', searchRouter);
   app.use('/api/resources', resourcesRouter);
-  app.use('/api', createClipRouter());
+  app.use('/api', createClipRouter({ fetchClip: deps.fetchClip }));
 
   // Serve frontend static assets if available (production mode)
   if (fs.existsSync(config.clientDistPath)) {
