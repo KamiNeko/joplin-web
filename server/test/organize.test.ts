@@ -1485,11 +1485,12 @@ describe('multi-job storage, v1 migration, lazy loading, 409 exclusivity, and re
       assert.equal(loaded.retryableFailedCount, 1, 'excludes Duplicate copy (trashed)');
       assert.equal(loaded.canUndo, true);
       assert.deepEqual(loaded.usage, { promptTokens: 1200, completionTokens: 340, totalTokens: 1540 });
-      assert.equal(loaded.items[0].applied, true);
-      assert.equal(loaded.items[0].applyStatus, 'ok');
-      assert.equal(loaded.items[0].suggestion?.title, '2024-03-11 Acme Cloud – Invoice');
-      assert.equal(loaded.items[1].error, 'AI provider returned HTTP 402');
-      assert.equal(loaded.items[2].error, 'Duplicate copy (trashed)');
+      const item = (key: string) => loaded.items.find((i) => i.noteId === demoId(key))!;
+      assert.equal(item('note-scanned-invoice').applied, true);
+      assert.equal(item('note-scanned-invoice').applyStatus, 'ok');
+      assert.equal(item('note-scanned-invoice').suggestion?.title, '2024-03-11 Acme Cloud – Invoice');
+      assert.equal(item('note-markdown-extras').error, 'AI provider returned HTTP 402');
+      assert.equal(item('note-roadmap').error, 'Duplicate copy (trashed)');
 
       // Starting & finishing a second job keeps both and evicts the earlier finished job from RAM
       const second = await svc.startJob(session, { noteIds: [demoId('note-ramen')] });
@@ -1964,7 +1965,10 @@ describe('whole-job filtering, apply targets, useSuggestion/undoMode, and chunke
       assert.equal(vhPage2.data.totalItems, 2);
       assert.equal(vhPage2.data.progress.total, 5);
       assert.equal(vhPage2.data.items.length, 1);
-      assert.equal(vhPage2.data.items[0].noteId, nVeryHighPending);
+      // Applied rows sink to the end, so the pending one is on page 1 and the applied one on page 2
+      assert.equal(vhPage2.data.items[0].noteId, nVeryHighApplied);
+      const vhPage1 = await req(`/api/organize/jobs/${jobId}?filter=very-high&offset=0&limit=1`);
+      assert.equal(vhPage1.data.items[0].noteId, nVeryHighPending);
 
       const movesOnly = await req(`/api/organize/jobs/${jobId}?filter=moves`);
       assert.equal(movesOnly.status, 200);

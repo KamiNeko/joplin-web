@@ -2272,6 +2272,10 @@ export class OrganizerService {
       }
     }
 
+    // Applied rows sink to the end (stable sort) so the first page shows the work left; otherwise
+    // "Select all" ticks nothing visible once the first page has been applied.
+    matchingItems.sort((a, b) => Number(Boolean(a.applied)) - Number(Boolean(b.applied)));
+
     const slice = matchingItems.slice(offset, offset + limit).map((item): OrganizeJobItem => {
       const liveNote = entry?.notes.get(item.noteId);
       const currentTitle = liveNote ? liveNote.title : item.currentTitle;
