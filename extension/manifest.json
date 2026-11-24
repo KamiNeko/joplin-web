@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "Clip to Joplin Web",
+  "version": "1.0.0",
+  "description": "Clip rendered web pages, articles, selections, screenshots, and bookmarks into your self-hosted Joplin Web.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzUj5FYRBld1qlcxz/6/0/XyyGnf6KuPuiLJ0qgaic+8mL9thfMjkEo6p1NZ6DzErs2DCiKQTi/a7oFY2Hltrox38+vofhc/t9xZm+Tno3uI+oPHD16o02XKaBrRQuncnb2F1fsN0/MC3EvJwdrtTFxTNUUL2ymEQcLzAtx8zZUX0A5pMTUdBHI+crtsT9/CoeLQbCYDxwjn3xI9aZ2tPsakYbuCajO8nT4L4Abm1+tLYHBA+sqzeo7vrYzdi4mPeV2Glw+HHx1KinFYKBg9qSqTtteIl9fxJ5TT1KJe/i6h1yRxJzfC0VHmhIE/RUXPNaCRVjJv2xrpiNgisxA+liwIDAQAB",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Clip to Joplin Web",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+J"
+      },
+      "description": "Open Clip to Joplin Web"
+    }
+  }
+}
