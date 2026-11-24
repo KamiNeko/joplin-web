@@ -727,7 +727,8 @@ describe("OrganizePage", () => {
     expect(screen.getByRole("button", { name: "Apply selected (165)" })).toBeTruthy();
 
     // Server-side filter resets offset and fetches ?filter=very-high
-    fireEvent.click(screen.getByRole("button", { name: "Very high (>= 0.85) (207)" }));
+    // Tab labels count what is left, not just the total (42 of the 207 very-high are applied)
+    fireEvent.click(screen.getByRole("button", { name: "Very high (>= 0.85) (165 left of 207)" }));
     await waitFor(() => {
       expect(
         calls.some(
@@ -737,8 +738,8 @@ describe("OrganizePage", () => {
         )
       ).toBe(true);
     });
-    expect(screen.getByRole("button", { name: "All (365)" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "All (365)" }));
+    expect(screen.getByText(/42 applied · 323 left/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "All (323 left of 365)" }));
 
     // Navigate to Page 2, edit row 201's title and untick row 202
     await screen.findByText("Page 1 of 2 (365 notes)");

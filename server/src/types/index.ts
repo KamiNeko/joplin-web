@@ -289,6 +289,8 @@ export interface OrganizeJobItem {
   applied?: boolean;
   applyStatus?: 'ok' | 'conflict' | 'error';
   applyError?: string;
+  /** Set in job responses when the note was deleted or trashed after analysis (can't be applied). */
+  gone?: boolean;
 }
 
 export interface OrganizeUsage {
@@ -353,6 +355,8 @@ export interface OrganizeJobResponse {
   excludeNotebookIds: string[];
   progress: OrganizeJobProgress;
   appliedCount: number;
+  /** Unapplied suggestions whose note was deleted or trashed after analysis. */
+  goneCount: number;
   retryableFailedCount: number;
   filter: OrganizeFilter;
   filterCounts: OrganizeFilterCounts;

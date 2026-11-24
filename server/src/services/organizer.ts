@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { config } from '../config.js';
 import type {
   BatchNoteItem,
+  BatchNoteResult,
   OrganizeApplyItemInput,
   OrganizeApplyResponse,
   OrganizeDeleteResponse,
@@ -325,6 +326,13 @@ function isNotebookTrashed(entry: CacheEntry, notebookId: string): boolean {
     curId = nb.parentId;
   }
   return false;
+}
+
+/** True when the note was deleted or trashed after the job ran, so its suggestion can no longer be applied. */
+function isNoteGone(entry: CacheEntry | null, noteId: string): boolean {
+  if (!entry) return false;
+  const note = entry.notes.get(noteId);
+  return !note || note.deletedTime > 0 || Boolean(note.parentId && isNotebookTrashed(entry, note.parentId));
 }
 
 function resolveNotebookPath(entry: CacheEntry, notebookId: string, pathById: Map<string, string>): string {
@@ -1273,6 +1281,7 @@ export class OrganizerService {
   private activeIndexes = new Map<string, NoteSimilarityIndex>();
   private activeSessions = new Map<string, string>();
   private persistTimers = new Map<string, PersistTimerEntry>();
+  private jobLocks = new Map<string, Promise<unknown>>();
   private initializedFromDisk = false;
 
   constructor(deps: OrganizerDeps = {}) {
@@ -1465,6 +1474,8 @@ export class OrganizerService {
       if (loadedJob.status === 'running') continue;
       if (loadedId === state.lastViewedFinishedJobId) continue;
       if (this.hasPendingPersistTimer(ownerKey, loadedId)) continue;
+      // An apply/undo in flight still holds this object and must be able to save it.
+      if (this.jobLocks.has(this.persistKey(ownerKey, loadedId))) continue;
       state.loadedJobs.delete(loadedId);
     }
   }
@@ -1854,6 +1865,15 @@ export class OrganizerService {
     }
 
     const entry = await noteCache.ensureFresh(sessionId, 'stale-ok');
+    // A second request (double click, other tab) may have started a job while the cache refreshed.
+    const startedMeanwhile = this.findRunningJobId(ownerKey, state);
+    if (startedMeanwhile) {
+      throw new OrganizeValidationError(
+        `Another Auto-organize job (${startedMeanwhile}) is already running. Cancel it before starting a new job.`,
+        409,
+        { runningJobId: startedMeanwhile }
+      );
+    }
     const { systemPrompt, allowedNotebookIds, pathById } = buildOrganizeSystemPrompt(entry, excludeSet);
 
     const items: InternalJobItem[] = uniqueNoteIds.map((noteId) => {
@@ -2169,6 +2189,20 @@ export class OrganizerService {
     this.activeLoops.set(ownerKey, loopPromise);
   }
 
+  /** Runs apply/undo for one job one at a time so their undo records can't overwrite each other. */
+  private async withJobLock<T>(sessionId: string, jobId: string, fn: () => Promise<T>): Promise<T> {
+    const { ownerKey } = this.assertOwnerJob(sessionId, jobId);
+    const key = this.persistKey(ownerKey, jobId);
+    const run = (this.jobLocks.get(key) ?? Promise.resolve()).then(fn);
+    const tail = run.catch(() => undefined);
+    this.jobLocks.set(key, tail);
+    try {
+      return await run;
+    } finally {
+      if (this.jobLocks.get(key) === tail) this.jobLocks.delete(key);
+    }
+  }
+
   private assertOwnerJob(
     sessionId: string,
     jobId: string
@@ -2219,6 +2253,7 @@ export class OrganizerService {
     let failed = 0;
     let appliedCount = 0;
     let retryableFailedCount = 0;
+    const goneIds = new Set<string>();
     const filterCounts: OrganizeFilterCounts = {
       all: job.items.length,
       veryHigh: 0,
@@ -2242,6 +2277,11 @@ export class OrganizerService {
 
       let matchesFilter = filter === 'all';
       if (item.status === 'done' && item.suggestion) {
+        // Unapplied suggestions for notes trashed since the job ran can never be applied: keep them out
+        // of the "left to apply" counts so the numbers reach zero once everything applicable is done.
+        const gone = !item.applied && isNoteGone(entry, item.noteId);
+        if (gone) goneIds.add(item.noteId);
+        const open = !item.applied && !gone;
         const conf = item.suggestion.confidence;
         const liveNote = entry?.notes.get(item.noteId);
         const currentNotebookId = liveNote ? liveNote.parentId || '' : item.currentNotebookId;
@@ -2251,15 +2291,15 @@ export class OrganizerService {
 
         if (isVeryHigh) {
           filterCounts.veryHigh++;
-          if (!item.applied) filterCounts.veryHighUnapplied++;
+          if (open) filterCounts.veryHighUnapplied++;
         }
         if (isHigh) {
           filterCounts.high++;
-          if (!item.applied) filterCounts.highUnapplied++;
+          if (open) filterCounts.highUnapplied++;
         }
         if (isMove) {
           filterCounts.moves++;
-          if (!item.applied) filterCounts.movesUnapplied++;
+          if (open) filterCounts.movesUnapplied++;
         }
 
         if (filter === 'very-high') matchesFilter = isVeryHigh;
@@ -2274,7 +2314,8 @@ export class OrganizerService {
 
     // Applied rows sink to the end (stable sort) so the first page shows the work left; otherwise
     // "Select all" ticks nothing visible once the first page has been applied.
-    matchingItems.sort((a, b) => Number(Boolean(a.applied)) - Number(Boolean(b.applied)));
+    const isSettled = (it: InternalJobItem) => Number(Boolean(it.applied) || goneIds.has(it.noteId));
+    matchingItems.sort((a, b) => isSettled(a) - isSettled(b));
 
     const slice = matchingItems.slice(offset, offset + limit).map((item): OrganizeJobItem => {
       const liveNote = entry?.notes.get(item.noteId);
@@ -2287,6 +2328,7 @@ export class OrganizerService {
       return {
         ...item,
         ...(isNonRetryableFailed ? { skipped: true } : {}),
+        ...(goneIds.has(item.noteId) ? { gone: true } : {}),
         currentTitle,
         currentNotebookId,
         currentNotebookPath,
@@ -2306,6 +2348,7 @@ export class OrganizerService {
         failed,
       },
       appliedCount,
+      goneCount: goneIds.size,
       retryableFailedCount,
       filter,
       filterCounts,
@@ -2322,18 +2365,25 @@ export class OrganizerService {
 
   /**
    * Lists all unapplied completed `noteId`s across the whole job that satisfy the requested
-   * confidence threshold (`very-high` >= 0.85, `high` >= 0.7).
+   * confidence threshold (`very-high` >= 0.85, `high` >= 0.7), skipping notes trashed since the job ran.
    */
   public async getApplyTargets(
     sessionId: string,
     jobId: string,
     mode: OrganizeSelectionMode
   ): Promise<OrganizeTargetsResponse> {
-    const { job } = this.assertOwnerJob(sessionId, jobId);
+    const { ownerKey, job } = this.assertOwnerJob(sessionId, jobId);
     const threshold = mode === 'very-high' ? VERY_HIGH_CONFIDENCE_THRESHOLD : HIGH_CONFIDENCE_THRESHOLD;
+    const entry = noteCache.peekEntry(sessionId) ?? noteCache.loadSavedEntryByOwnerKey(ownerKey);
     const noteIds: string[] = [];
     for (const item of job.items) {
-      if (item.status === 'done' && !item.applied && item.suggestion && item.suggestion.confidence >= threshold) {
+      if (
+        item.status === 'done' &&
+        !item.applied &&
+        item.suggestion &&
+        item.suggestion.confidence >= threshold &&
+        !isNoteGone(entry, item.noteId)
+      ) {
         noteIds.push(item.noteId);
       }
     }
@@ -2492,6 +2542,14 @@ export class OrganizerService {
     jobId: string,
     body: { items?: unknown; undoMode?: unknown }
   ): Promise<OrganizeApplyResponse> {
+    return this.withJobLock(sessionId, jobId, () => this.applyJobLocked(sessionId, jobId, body));
+  }
+
+  private async applyJobLocked(
+    sessionId: string,
+    jobId: string,
+    body: { items?: unknown; undoMode?: unknown }
+  ): Promise<OrganizeApplyResponse> {
     const { ownerKey, job } = this.assertOwnerJob(sessionId, jobId);
     if (!body || !Array.isArray(body.items) || body.items.length === 0) {
       throw new OrganizeValidationError('items must be a non-empty array');
@@ -2550,7 +2608,9 @@ export class OrganizerService {
     // Snapshot pre-apply titles and parent notebooks before sending batch updates
     const entry = await noteCache.getEntry(sessionId);
     const jobItemMap = new Map(job.items.map((it) => [it.noteId, it]));
-    const needsSuggestionTags = parsedInputs.some((inp) => inp.useSuggestion && inp.addTags === undefined);
+    // Re-applying an applied row would snapshot the AI title as the "previous" one and break undo.
+    const inputs = parsedInputs.filter((inp) => !jobItemMap.get(inp.noteId)?.applied);
+    const needsSuggestionTags = inputs.some((inp) => inp.useSuggestion && inp.addTags === undefined);
     const keepTag = needsSuggestionTags
       ? recurringTagFilter(
           job.items,
@@ -2559,7 +2619,7 @@ export class OrganizerService {
       : null;
     const prevSnapshot = new Map<string, { title: string; parentId: string; updatedTime: number }>();
 
-    const batchItems: BatchNoteItem[] = parsedInputs.map((inp) => {
+    const batchItems: BatchNoteItem[] = inputs.map((inp) => {
       const liveNote = entry.notes.get(inp.noteId);
       const jobItem = jobItemMap.get(inp.noteId);
       if (inp.useSuggestion && (!jobItem || jobItem.status !== 'done' || !jobItem.suggestion)) {
@@ -2606,19 +2666,13 @@ export class OrganizerService {
       return batchItem;
     });
 
-    const allResults = [];
-    for (let offset = 0; offset < batchItems.length; offset += MAX_BATCH_SIZE) {
-      const chunk = batchItems.slice(offset, offset + MAX_BATCH_SIZE);
-      const chunkResults = await noteWriter.batchUpdateNotes(sessionId, { items: chunk });
-      allResults.push(...chunkResults);
-    }
-
+    const allResults: BatchNoteResult[] = [];
     const undoItems: OrganizeUndoRecord['items'] = [];
     let appliedCount = 0;
     let conflictCount = 0;
     let errorCount = 0;
 
-    for (const res of allResults) {
+    const recordResult = (res: BatchNoteResult) => {
       const jobItem = jobItemMap.get(res.id);
       const prev = prevSnapshot.get(res.id);
       if (res.status === 'ok') {
@@ -2650,28 +2704,56 @@ export class OrganizerService {
           jobItem.applyStatus = 'error';
           jobItem.applyError = res.error;
         }
-      }
-    }
-
-    if (undoItems.length > 0) {
-      if (undoMode === 'append' && job.lastUndo) {
-        const seenUndoIds = new Set(job.lastUndo.items.map((u) => u.noteId));
-        for (const u of undoItems) {
-          if (!seenUndoIds.has(u.noteId)) {
-            job.lastUndo.items.push(u);
-            seenUndoIds.add(u.noteId);
-          }
+        // The writer saves title/notebook before linking tags, so a failed tag step can leave the
+        // note half-changed: keep an undo entry so the original title and notebook stay recoverable.
+        const live = noteCache.peekEntry(sessionId)?.notes.get(res.id);
+        if (prev && live && (live.title !== prev.title || (live.parentId || '') !== prev.parentId)) {
+          undoItems.push({
+            noteId: res.id,
+            baseUpdatedTime: live.updatedTime,
+            previousTitle: prev.title,
+            previousNotebookId: prev.parentId,
+            addedTags: [],
+          });
         }
-        job.lastUndo.appliedAt = Date.now();
-      } else {
-        job.lastUndo = {
-          appliedAt: Date.now(),
-          items: undoItems,
-        };
       }
+    };
+
+    // Record each chunk as it lands and save in `finally`, so a failing later chunk (expired session,
+    // server error) can't leave earlier, already written notes unmarked and without undo.
+    try {
+      for (let offset = 0; offset < batchItems.length; offset += MAX_BATCH_SIZE) {
+        const chunk = batchItems.slice(offset, offset + MAX_BATCH_SIZE);
+        const chunkResults = await noteWriter.batchUpdateNotes(sessionId, { items: chunk });
+        allResults.push(...chunkResults);
+        chunkResults.forEach(recordResult);
+      }
+    } finally {
+      if (undoItems.length > 0) {
+        if (undoMode === 'append' && job.lastUndo) {
+          const byNoteId = new Map(job.lastUndo.items.map((u) => [u.noteId, u]));
+          for (const u of undoItems) {
+            const existing = byNoteId.get(u.noteId);
+            if (existing) {
+              // Keep the original title/notebook, but undo must start from the newest write.
+              existing.baseUpdatedTime = u.baseUpdatedTime;
+              existing.addedTags = [...new Set([...existing.addedTags, ...u.addedTags])];
+            } else {
+              job.lastUndo.items.push(u);
+              byNoteId.set(u.noteId, u);
+            }
+          }
+          job.lastUndo.appliedAt = Date.now();
+        } else {
+          job.lastUndo = {
+            appliedAt: Date.now(),
+            items: undoItems,
+          };
+        }
+      }
+      job.updatedAt = Date.now();
+      this.saveJobNow(ownerKey, job.id);
     }
-    job.updatedAt = Date.now();
-    this.saveJobNow(ownerKey, job.id);
 
     return {
       results: allResults,
@@ -2683,6 +2765,14 @@ export class OrganizerService {
   }
 
   public async undoJob(
+    sessionId: string,
+    jobId: string,
+    body?: { limit?: unknown }
+  ): Promise<OrganizeUndoResponse> {
+    return this.withJobLock(sessionId, jobId, () => this.undoJobLocked(sessionId, jobId, body));
+  }
+
+  private async undoJobLocked(
     sessionId: string,
     jobId: string,
     body?: { limit?: unknown }
@@ -2710,20 +2800,17 @@ export class OrganizerService {
       ...(item.addedTags.length > 0 ? { removeTags: item.addedTags } : {}),
     }));
 
-    const allResults = [];
-    for (let offset = 0; offset < batchItems.length; offset += MAX_BATCH_SIZE) {
-      const chunk = batchItems.slice(offset, offset + MAX_BATCH_SIZE);
-      const chunkResults = await noteWriter.batchUpdateNotes(sessionId, { items: chunk });
-      allResults.push(...chunkResults);
-    }
-
+    const allResults: BatchNoteResult[] = [];
     const jobItemMap = new Map(job.items.map((it) => [it.noteId, it]));
+    const settledIds = new Set<string>();
     let revertedCount = 0;
     let conflictCount = 0;
     let errorCount = 0;
 
-    for (const res of allResults) {
+    const recordResult = (res: BatchNoteResult) => {
       const jobItem = jobItemMap.get(res.id);
+      // Reverted and conflicting notes (edited since the apply) leave the record; errors stay for a retry.
+      if (res.status !== 'error') settledIds.add(res.id);
       if (res.status === 'ok') {
         revertedCount++;
         if (jobItem) {
@@ -2745,12 +2832,28 @@ export class OrganizerService {
           jobItem.applyError = res.error;
         }
       }
-    }
+    };
 
-    const remainingItems = record.items.slice(targetItems.length);
-    job.lastUndo = remainingItems.length > 0 ? { appliedAt: record.appliedAt, items: remainingItems } : null;
-    job.updatedAt = Date.now();
-    this.saveJobNow(ownerKey, job.id);
+    try {
+      for (let offset = 0; offset < batchItems.length; offset += MAX_BATCH_SIZE) {
+        const chunk = batchItems.slice(offset, offset + MAX_BATCH_SIZE);
+        const chunkResults = await noteWriter.batchUpdateNotes(sessionId, { items: chunk });
+        allResults.push(...chunkResults);
+        chunkResults.forEach(recordResult);
+      }
+    } finally {
+      // Failed reverts move behind the untried ones (unless the note is gone), so a later Undo retries them.
+      const entry = noteCache.peekEntry(sessionId) ?? null;
+      const attemptedIds = new Set(allResults.map((r) => r.id));
+      const failed = targetItems.filter(
+        (u) => attemptedIds.has(u.noteId) && !settledIds.has(u.noteId) && !isNoteGone(entry, u.noteId)
+      );
+      const untried = record.items.filter((u) => !attemptedIds.has(u.noteId));
+      const remainingItems = [...untried, ...failed];
+      job.lastUndo = remainingItems.length > 0 ? { appliedAt: record.appliedAt, items: remainingItems } : null;
+      job.updatedAt = Date.now();
+      this.saveJobNow(ownerKey, job.id);
+    }
 
     return {
       results: allResults,
@@ -2758,7 +2861,7 @@ export class OrganizerService {
       conflictCount,
       errorCount,
       canUndo: Boolean(job.lastUndo && job.lastUndo.items.length > 0),
-      remainingCount: remainingItems.length,
+      remainingCount: job.lastUndo?.items.length ?? 0,
     };
   }
 

@@ -163,6 +163,12 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
 
   const items = useMemo(() => job?.items ?? [], [job?.items]);
 
+  // Applying moves shrinks the "Changes notebook" list; step back to the last page that still has rows.
+  useEffect(() => {
+    if (!job || offset === 0 || job.offset !== offset || offset < job.totalItems) return;
+    setOffset(Math.max(0, Math.floor((job.totalItems - 1) / ORGANIZE_PAGE_SIZE) * ORGANIZE_PAGE_SIZE));
+  }, [job, offset]);
+
   useEffect(() => {
     if (!job?.items) return;
     for (const item of job.items) {
@@ -188,7 +194,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
   };
 
   const computeBaseSelected = useCallback((item: OrganizeJobItem, mode: ActiveSelectionMode): boolean => {
-    if (item.status !== "done" || !item.suggestion || item.applied) return false;
+    if (item.status !== "done" || !item.suggestion || item.applied || item.gone) return false;
     if (mode === "very-high") return item.suggestion.confidence >= VERY_HIGH_CONFIDENCE_THRESHOLD;
     if (mode === "high") return item.suggestion.confidence >= HIGH_CONFIDENCE_THRESHOLD;
     return false;
@@ -196,7 +202,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
 
   const isRowChecked = useCallback(
     (item: OrganizeJobItem): boolean => {
-      if (item.status !== "done" || !item.suggestion) return false;
+      if (item.status !== "done" || !item.suggestion || item.applied || item.gone) return false;
       const ov = selectionOverrides[item.noteId];
       if (ov !== undefined) return ov.checked;
       return computeBaseSelected(item, selectionMode);
@@ -278,6 +284,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
     let delta = 0;
     for (const [noteId, ov] of Object.entries(selectionOverrides)) {
       const liveItem = itemsById.get(noteId);
+      if (liveItem && (liveItem.applied || liveItem.gone)) continue;
       const baseSelected = liveItem
         ? computeBaseSelected(liveItem, selectionMode)
         : selectionMode === "very-high"
@@ -410,6 +417,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
   const markRevertedOk = (results: OrganizeUndoResponse["results"]) => {
     const revertedIds = new Set(results.filter((r) => r.status === "ok").map((r) => r.id));
     if (revertedIds.size === 0) return;
+    const updatedTimes = new Map(results.map((r) => [r.id, r.updatedTime]));
     setSelectionOverrides((prev) => {
       const next = { ...prev };
       for (const id of revertedIds) delete next[id];
@@ -418,7 +426,13 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
     for (const id of revertedIds) {
       const existing = seenItemsRef.current.get(id);
       if (existing) {
-        seenItemsRef.current.set(id, { ...existing, applied: false, applyStatus: undefined, applyError: undefined });
+        seenItemsRef.current.set(id, {
+          ...existing,
+          applied: false,
+          applyStatus: undefined,
+          applyError: undefined,
+          updatedTime: updatedTimes.get(id) ?? existing.updatedTime,
+        });
       }
     }
   };
@@ -426,6 +440,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
   const markAppliedOk = (results: OrganizeApplyResponse["results"]) => {
     const okIds = new Set(results.filter((r) => r.status === "ok").map((r) => r.id));
     if (okIds.size === 0) return;
+    const updatedTimes = new Map(results.map((r) => [r.id, r.updatedTime]));
     setSelectionOverrides((prev) => {
       const next = { ...prev };
       for (const id of okIds) delete next[id];
@@ -434,7 +449,13 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
     for (const id of okIds) {
       const existing = seenItemsRef.current.get(id);
       if (existing) {
-        seenItemsRef.current.set(id, { ...existing, applied: true, applyStatus: "ok", applyError: undefined });
+        seenItemsRef.current.set(id, {
+          ...existing,
+          applied: true,
+          applyStatus: "ok",
+          applyError: undefined,
+          updatedTime: updatedTimes.get(id) ?? existing.updatedTime,
+        });
       }
     }
   };
@@ -446,6 +467,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
         onProgress: setUndoProgress,
       });
       markRevertedOk(res.results);
+      if (res.revertedCount > 0) clearAllSelections();
       const parts: string[] = [];
       if (res.conflictCount > 0) parts.push(`${res.conflictCount} skipped: changed elsewhere`);
       if (res.errorCount > 0) parts.push(`${res.errorCount} failed`);
@@ -492,6 +514,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
       for (const [noteId, ov] of Object.entries(selectionOverrides)) {
         if (!ov.checked) continue;
         const seenItem = itemsById.get(noteId) ?? seenItemsRef.current.get(noteId);
+        if (seenItem?.applied || seenItem?.gone) continue;
         if (seenItem) {
           inputs.push(toExplicitInput(seenItem));
         } else {
@@ -533,6 +556,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
     const inputs: OrganizeApplyItemInput[] = [];
     for (const noteId of targetSet) {
       const seenItem = itemsById.get(noteId) ?? seenItemsRef.current.get(noteId);
+      if (seenItem?.applied || seenItem?.gone) continue;
       const edit = edits[noteId];
       if (seenItem && seenItem.status === "done" && seenItem.suggestion && (itemsById.has(noteId) || edit)) {
         inputs.push(toExplicitInput(seenItem));
@@ -561,7 +585,11 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
     } finally {
       setIsPreparingApply(false);
     }
-    if (payload.length === 0) return;
+    if (payload.length === 0) {
+      toast.info("Nothing left to apply: the selected suggestions are already applied or their notes were trashed");
+      void jobQuery.refetch();
+      return;
+    }
 
     try {
       const res = await applyMutation.mutateAsync({
@@ -646,6 +674,12 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
   };
 
   const processedCount = (job?.progress.done ?? 0) + (job?.progress.failed ?? 0);
+  const appliedTotal = job?.appliedCount ?? 0;
+  const goneTotal = job?.goneCount ?? 0;
+  // Suggestions still waiting for a decision: analysed, not applied, and the note still exists.
+  const allLeft = Math.max(0, (job?.progress.done ?? 0) - appliedTotal - goneTotal);
+  const leftLabel = (left: number, total: number) =>
+    left === total ? total.toLocaleString() : `${left.toLocaleString()} left of ${total.toLocaleString()}`;
   const totalCount = job?.progress.total ?? 0;
   const percent = totalCount > 0 ? Math.min(100, Math.round((processedCount / totalCount) * 100)) : 0;
   const totalPages = job ? Math.max(1, Math.ceil(job.totalItems / ORGANIZE_PAGE_SIZE)) : 1;
@@ -708,6 +742,14 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
   };
 
   const renderApplyBadge = (item: OrganizeJobItem) => {
+    if (item.gone) {
+      return (
+        <Badge variant="outline" className="text-[10px] border-border bg-muted/60 text-muted-foreground gap-0.5">
+          <Trash2 className="h-2.5 w-2.5" />
+          Trashed
+        </Badge>
+      );
+    }
     if (item.applyStatus === "ok" && item.applied) {
       return (
         <Badge variant="outline" className="text-[10px] border-success/35 bg-success/10 text-success gap-0.5">
@@ -1124,6 +1166,11 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                   Analysed {processedCount} / {totalCount}
                   {job.progress.failed > 0 ? ` (${job.progress.failed} failed)` : ""}
                 </span>
+                <span className="text-xs font-mono text-muted-foreground">
+                  · {appliedTotal > 0 ? `${appliedTotal.toLocaleString()} applied · ` : ""}
+                  {allLeft.toLocaleString()} left
+                  {goneTotal > 0 ? ` · ${goneTotal.toLocaleString()} trashed since` : ""}
+                </span>
                 {job.usage.totalTokens > 0 && (
                   <span className="text-[11px] font-mono text-muted-foreground/80 hidden sm:inline">
                     · {job.usage.totalTokens.toLocaleString()} tokens
@@ -1194,7 +1241,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                   onClick={() => handleFilterChange("all")}
                   className="h-7 px-2.5 text-xs"
                 >
-                  All ({counts.all})
+                  All ({appliedTotal + goneTotal > 0 ? leftLabel(allLeft, counts.all) : counts.all})
                 </Button>
                 <Button
                   type="button"
@@ -1204,7 +1251,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                   onClick={() => handleFilterChange("very-high")}
                   className="h-7 px-2.5 text-xs"
                 >
-                  Very high (&gt;= 0.85) ({counts.veryHigh})
+                  Very high (&gt;= 0.85) ({leftLabel(counts.veryHighUnapplied, counts.veryHigh)})
                 </Button>
                 <Button
                   type="button"
@@ -1214,7 +1261,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                   onClick={() => handleFilterChange("high")}
                   className="h-7 px-2.5 text-xs"
                 >
-                  High confidence ({counts.high})
+                  High confidence ({leftLabel(counts.highUnapplied, counts.high)})
                 </Button>
                 <Button
                   type="button"
@@ -1224,7 +1271,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                   onClick={() => handleFilterChange("moves")}
                   className="h-7 px-2.5 text-xs"
                 >
-                  Changes notebook ({counts.moves})
+                  Changes notebook ({leftLabel(counts.movesUnapplied, counts.moves)})
                 </Button>
               </div>
 
@@ -1382,7 +1429,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                             <input
                               type="checkbox"
                               checked={checked}
-                              disabled={item.status !== "done" || isMutating}
+                              disabled={item.status !== "done" || item.applied || item.gone || isMutating}
                               aria-label={`Select ${item.currentTitle || item.noteId}`}
                               onChange={(e) => toggleRow(item, e.target.checked)}
                               className="mt-1 h-4 w-4 rounded border-input accent-primary cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
@@ -1489,7 +1536,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                           <input
                             type="checkbox"
                             checked={checked}
-                            disabled={item.status !== "done" || isMutating}
+                            disabled={item.status !== "done" || item.applied || item.gone || isMutating}
                             aria-label={`Select ${item.currentTitle || item.noteId}`}
                             onChange={(e) => toggleRow(item, e.target.checked)}
                             className="mt-0.5 h-4 w-4 rounded border-input accent-primary shrink-0"

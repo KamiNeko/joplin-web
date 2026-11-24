@@ -277,7 +277,8 @@ export function useUndoOrganizeJob(jobId: string | undefined) {
             options?.onProgress?.({ completed: results.length, total: estimatedTotal });
           }
 
-          if (!canUndo || remainingCount <= 0) {
+          // Failed reverts stay in the server's undo record; stop once a round makes no progress.
+          if (!canUndo || remainingCount <= 0 || chunk.revertedCount + chunk.conflictCount === 0) {
             break;
           }
         }

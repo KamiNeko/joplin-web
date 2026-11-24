@@ -1942,6 +1942,15 @@ describe('whole-job filtering, apply targets, useSuggestion/undoMode, and chunke
       assert.equal(preApply.status, 200);
       assert.equal(preApply.data.appliedCount, 1);
 
+      // Re-applying an applied row is skipped: it would record the AI title as the "previous" one
+      const reApply = await req(`/api/organize/jobs/${jobId}/apply`, {
+        method: 'POST',
+        body: JSON.stringify({ items: [{ noteId: nVeryHighApplied, title: 'Clobbered', useSuggestion: true }] }),
+      });
+      assert.equal(reApply.status, 200);
+      assert.equal(reApply.data.appliedCount, 0);
+      assert.equal((await app.api(`/api/notes/${nVeryHighApplied}`)).data.title, '2025-01-01 Very High Applied');
+
       // Default GET reports full filterCounts across all 5 notes
       const fullJob = await req(`/api/organize/jobs/${jobId}`);
       assert.equal(fullJob.status, 200);
@@ -2069,6 +2078,24 @@ describe('whole-job filtering, apply targets, useSuggestion/undoMode, and chunke
       const reverted2 = (await app.api(`/api/notes/${nHighPending}`)).data;
       assert.equal(reverted2.title, 'high_pending.pdf');
       assert.equal(reverted2.parentId, demoId('nb-work'));
+
+      // A note trashed after analysis is "gone": out of the open counts and targets, flagged, sorted last
+      assert.equal((await app.api(`/api/notes/${nHighPending}`, { method: 'DELETE' })).status, 204);
+      const afterTrash = await req(`/api/organize/jobs/${jobId}?filter=high`);
+      assert.equal(afterTrash.data.goneCount, 1);
+      assert.equal(afterTrash.data.filterCounts.high, 3);
+      assert.equal(afterTrash.data.filterCounts.highUnapplied, 1);
+      assert.equal(afterTrash.data.filterCounts.veryHighUnapplied, 1);
+      assert.deepEqual(
+        afterTrash.data.items.map((it: any) => [it.noteId, Boolean(it.gone), Boolean(it.applied)]),
+        [
+          [nVeryHighPending, false, false],
+          [nVeryHighApplied, false, true],
+          [nHighPending, true, false],
+        ]
+      );
+      const highAfterTrash = await req(`/api/organize/jobs/${jobId}/targets?mode=high`);
+      assert.deepEqual(highAfterTrash.data, { noteIds: [nVeryHighPending] });
 
       // Also verify main Express router mounts GET /targets cleanly
       const mainStart = await app.api('/api/organize/jobs', {
