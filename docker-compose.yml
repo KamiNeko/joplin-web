@@ -21,6 +21,8 @@ services:
       # AI_API_KEY: ""
       # AI_MODEL: deepseek-flash
       # AI_CONCURRENCY: "4"
+      # Optional browser clipper extension allowlist (comma-separated Chrome extension IDs)
+      # CLIPPER_EXTENSION_IDS: nlplgmnmaigjhfbhkbmcpfcdnppaklco
     ports:
       # PORT is still honoured as the host port for one release cycle (deprecated, use HOST_PORT)
       - "${HOST_PORT:-${PORT:-3001}}:3001"

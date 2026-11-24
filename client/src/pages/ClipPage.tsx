@@ -9,6 +9,7 @@ import {
   Globe,
   Loader2,
   Mail,
+  Puzzle,
   Webhook,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -59,6 +60,7 @@ export function ClipPage() {
   const [includeSourceBanner, setIncludeSourceBanner] = useState(true);
   const [clippedNote, setClippedNote] = useState<Note | null>(null);
   const [copiedBookmarklet, setCopiedBookmarklet] = useState(false);
+  const [copiedExtensionEnv, setCopiedExtensionEnv] = useState(false);
 
   // Email Ingest state
   const [emailMode, setEmailMode] = useState<EmailInputMode>("raw");
@@ -99,6 +101,7 @@ export function ClipPage() {
 
   const origin = typeof window !== "undefined" ? window.location.origin : "";
   const bookmarkletCode = `javascript:(()=>{window.open('${origin}/clip?url='+encodeURIComponent(location.href),'_blank');})();`;
+  const extensionEnvSnippet = "CLIPPER_EXTENSION_IDS=nlplgmnmaigjhfbhkbmcpfcdnppaklco";
 
   const handleClipSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -168,6 +171,13 @@ export function ClipPage() {
     setCopiedBookmarklet(true);
     toast.success("Bookmarklet copied");
     window.setTimeout(() => setCopiedBookmarklet(false), 2000);
+  };
+
+  const handleCopyExtensionEnv = async () => {
+    await copyText(extensionEnvSnippet);
+    setCopiedExtensionEnv(true);
+    toast.success("Server setting copied");
+    window.setTimeout(() => setCopiedExtensionEnv(false), 2000);
   };
 
   return (
@@ -350,6 +360,44 @@ export function ClipPage() {
                   </Button>
                 </div>
               )}
+
+              {/* Browser extension card */}
+              <div className="rounded-xl border border-border bg-card/40 p-4 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                    <Puzzle className="h-4 w-4 text-primary" aria-hidden="true" />
+                    Browser Extension
+                  </h2>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void handleCopyExtensionEnv()}
+                    className="h-7 text-xs gap-1"
+                  >
+                    {copiedExtensionEnv ? <Check className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5" />}
+                    {copiedExtensionEnv ? "Copied" : "Copy server env"}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Clip rendered articles, selections, full pages, screenshots, and bookmarks straight from Chrome or Chromium — including logged-in pages — with images uploaded as Joplin attachments.
+                </p>
+                <ol className="list-decimal list-inside space-y-1 text-xs text-muted-foreground">
+                  <li>
+                    Open <code className="font-mono text-foreground">chrome://extensions</code>, enable <strong className="text-foreground">Developer mode</strong>, click <strong className="text-foreground">Load unpacked</strong>, and select the repository&apos;s <code className="font-mono text-foreground">extension/</code> folder.
+                  </li>
+                  <li>
+                    In the extension&apos;s Settings page, set the server URL to{" "}
+                    <code className="font-mono text-foreground">{origin || "https://notes.example.com"}</code>.
+                  </li>
+                  <li>
+                    Allow the extension&apos;s origin on the Joplin Web server by setting:
+                  </li>
+                </ol>
+                <pre className="rounded-lg border border-border bg-muted/50 p-2.5 text-[11px] font-mono overflow-x-auto text-foreground">
+                  {extensionEnvSnippet}
+                </pre>
+              </div>
 
               {/* Bookmarklet card */}
               <div className="rounded-xl border border-border bg-card/40 p-4 space-y-2.5">

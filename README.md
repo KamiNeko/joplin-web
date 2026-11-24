@@ -63,7 +63,7 @@ In short: choose Joplin Web if you want quick, install-free access to your notes
 | ✨ **Rich Rendering, Outline, Backlinks & Properties** | GFM tables & interactive task lists, KaTeX math, Mermaid diagrams, `==highlight==`, `++insert++`, `~sub~`, `^sup^`, GitHub-style `> [!NOTE]`/`[!TIP]`/`[!WARNING]`/`[!CAUTION]` callouts, and `<details>` toggles. Inspect any note's *Document outline*, automatic *Backlinks*, and collapsible *Properties* drawer (word/reading stats, `source_url`, `author`). |
 | 🖼️ **Images, Lightbox, Media, Voice & OCR** | Inline images with click-to-zoom lightbox, inline `<audio>`/`<video>` players, embedded PDFs with page-1 thumbnails, *Voice Note* microphone recording modal (with optional `AI_TRANSCRIBE_MODEL` transcription), and the *Attachments & OCR Inspector* drawer showing metadata and extracted OCR text (with optional instant upload OCR via `OCR_SERVICE_URL`). Note lists show thumbnails for the first image or PDF. |
 | ✅ **To-dos & Global Tasks Hub** | Manage to-dos with due dates/alarms, plus browse a unified **Tasks Hub** (`/tasks`) across all to-do notes and inline GFM `- [ ]` checklists with conflict-safe one-click toggling. |
-| 🌐 **Web Clipper & Email Ingest** | Convert article URLs to clean Markdown (`/clip` via Readability + Turndown, SSRF-guarded), use the one-click browser bookmarklet or installable PWA share target, import `.eml` / RFC-822 emails manually, or enable the headless webhook `POST /api/webhooks/email`. |
+| 🌐 **Web Clipper & Email Ingest** | Convert article URLs to clean Markdown (`/clip` via Readability + Turndown, SSRF-guarded, downloading images into local Joplin attachments), clip rendered pages directly from Chrome/Chromium with the [browser extension](extension/README.md) (article, selection, full page, screenshot, bookmark), use the browser bookmarklet or installable PWA share target, import `.eml` / RFC-822 emails manually, or enable the headless webhook `POST /api/webhooks/email`. |
 | 🏷️ **Tags** | Tag notes, browse by tag, rename and delete tags. |
 | 🔎 **Search** | Instant search across titles, bodies, and attachment OCR text (`Ctrl+K`): `"exact phrases"`, `-word`, `tag:`, `-tag:`, `tag:none`, `notebook:`, `-notebook:`, `type:todo\|note`, `iscompleted:0\|1`, `has:attachment`, `has:ocr`, `sourceurl:`, `created:`, and `updated:` (`today`, `7d`, `week`, `month`, `YYYY-MM`, `>=YYYY-MM-DD`). |
 | 📜 **Version History & Diffs** | Browse Joplin's revision history (`type_: 13`) in the *Version History* drawer, inspect line diffs against the current note, and restore previous versions safely. |
@@ -170,6 +170,7 @@ Set these as environment variables of the container. The repository's `docker-co
 | `COOKIE_SECURE` | `auto` | `Secure` flag of the session cookie. `auto` sets it when the request came in over HTTPS (directly, via a trusted proxy, or with an `https://` `PUBLIC_URL`). |
 | `HOST_PORT` | `3001` | Only for the repository's `docker-compose.yml`: the port published on the host. The container itself always listens on 3001. (`PORT` still works here but is deprecated.) |
 | `CORS_ORIGIN` | *(none)* | Allowed origins for API calls (comma-separated). Only needed when the UI is served from another origin than the API; the single-container setup doesn't need it. Without Docker in development mode the default is `http://localhost:5173`. |
+| `CLIPPER_EXTENSION_IDS` | *(not set)* | Comma-separated 32-character Chrome extension IDs allowed by the CSRF origin check for the [browser clipper extension](extension/README.md) (default unpacked ID: `nlplgmnmaigjhfbhkbmcpfcdnppaklco`). |
 | `RATE_LIMIT_MAX` | `1000` | Requests per client address and 15 minutes to the API. Behind a reverse proxy without `TRUST_PROXY` all users count as one address; set `TRUST_PROXY` (or raise this) if several people use the instance. |
 | `CACHE_TTL_MS` | `30000` | How long the note cache is used before it is re-synced with Joplin Server, in milliseconds. After that, reads still get the cached data (up to 10 × this value old) while the re-sync runs in the background. `0` re-syncs before every read. |
 | `CACHE_DIR` | *(not set)* | Persistent directory for server state: the per-user note caches (a restart or a new login doesn't re-read every note), workspace preferences (shortcuts, recent reads, scratchpad) under `<CACHE_DIR>/prefs/`, Auto-organize job history under `<CACHE_DIR>/organize/`, and two-factor authentication data under `<CACHE_DIR>/auth/`. Required for 2FA and for `REQUIRE_2FA`. |
@@ -256,13 +257,14 @@ Contributions are welcome: bug reports, ideas and pull requests.
 **Tech stack:** React 19, TypeScript, Vite, Tailwind CSS, shadcn/ui, TanStack Query, CodeMirror 6 and TipTap 3 on the frontend; Node.js 24, Express, TypeScript and Readability/Turndown on the backend.
 
 ```text
-client/   React single-page app (Vite)
-  e2e/    End-to-end smoke tests (Playwright, against the demo)
-server/   Express backend: auth, cache, Joplin serializer, REST API
-  demo/   Mock Joplin Server + sample notes (demo mode & tests)
-  test/   Serializer and API tests (Node test runner)
-docker/   Production Dockerfile
-docs/     Architecture notes and screenshots
+client/     React single-page app (Vite)
+  e2e/      End-to-end smoke tests (Playwright, against the demo)
+extension/  "Clip to Joplin Web" Chrome extension (plain JS, MV3)
+server/     Express backend: auth, cache, Joplin serializer, REST API
+  demo/     Mock Joplin Server + sample notes (demo mode & tests)
+  test/     Serializer and API tests (Node test runner)
+docker/     Production Dockerfile
+docs/       Architecture notes and screenshots
 ```
 
 ### Development setup
