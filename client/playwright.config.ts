@@ -35,7 +35,11 @@ export default defineConfig({
   webServer: [
     {
       command: "npm --prefix ../server run demo",
-      env: { PORT: String(API_PORT), MOCK_JOPLIN_PORT: String(MOCK_JOPLIN_PORT) },
+      env: {
+        PORT: String(API_PORT),
+        MOCK_JOPLIN_PORT: String(MOCK_JOPLIN_PORT),
+        CLIPPER_EXTENSION_IDS: "nlplgmnmaigjhfbhkbmcpfcdnppaklco",
+      },
       url: `http://localhost:${API_PORT}/api/health`,
       reuseExistingServer: !process.env.CI,
     },
