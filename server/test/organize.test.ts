@@ -246,6 +246,25 @@ describe('Auto-organize unit checks: prompts, similarity & validation', () => {
     assert.equal(recurringTagFilter(job, new Set(), 4)('hsbc'), false);
   });
 
+  test('a title cut to the length budget never ends on a dangling separator', { timeout: TEST_TIMEOUT_MS }, () => {
+    const base = '2024-03-11 Inland Revenue Department – Business Registration Exemption Notice';
+    for (const sep of ['–', '&']) {
+      const outcome = parseAndValidateSuggestion(
+        JSON.stringify({
+          title: `${base} ${sep} Hyperspark Limited`,
+          notebookId: demoId('nb-projects'),
+          tags: [],
+          confidence: 0.9,
+          documentDate: null,
+          reason: 'Long title.',
+        }),
+        { currentTitle: '09172026094304', currentNotebookId: demoId('nb-work'), allowedNotebookIds: new Set([demoId('nb-projects')]) }
+      );
+      assert.equal(outcome.ok, true);
+      if (outcome.ok) assert.equal(outcome.suggestion.title, base);
+    }
+  });
+
   test('validates JSON schema, strips extensions, enforces allowed notebooks, tag vocabulary & confidence fallback', { timeout: TEST_TIMEOUT_MS }, () => {
     const allowed = new Set([demoId('nb-projects'), demoId('nb-personal')]);
     assert.equal(ORGANIZE_DOCUMENT_TYPE_TAGS.length, 20);
