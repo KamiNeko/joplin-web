@@ -14,6 +14,7 @@ import { randomBytes } from 'crypto';
  *   GET    /api/items/root:/<name>:/content           raw item text, resource binary or info.json
  *   PUT    /api/items/root:/<name>:/content           multipart upload (field "file")
  *   DELETE /api/items/root:/<name>:
+ *   GET    /api/items/root/delta                      only with `delta: true`: { items, cursor, has_more }
  *
  * Used by the integration tests and the local demo (npm run demo). Never point it at real data.
  */
@@ -31,6 +32,14 @@ export interface MockJoplinServerOptions {
   items?: Map<string, MockItem>;
   /** Page size for the children listing, small values exercise cursor pagination */
   pageSize?: number;
+  /** Serve the delta feed (unknown route, i.e. 404, otherwise, like an old Joplin Server) */
+  delta?: boolean;
+}
+
+export interface MockChange {
+  item_name: string;
+  type: number;
+  updated_time: number;
 }
 
 export interface MockJoplinServer {
@@ -47,6 +56,10 @@ export interface MockJoplinServer {
    * `name` is the item name ('' for the root listing), `suffix` '/content', '/children' or ''.
    */
   onItemRequest: ((request: { method: string; name: string; suffix: string }) => void | Promise<void>) | null;
+  /** Adds a delta feed entry, for items changed straight in `items` (1 created, 2 updated, 3 deleted) */
+  recordChange: (name: string, type: number) => void;
+  /** Makes every delta cursor handed out so far invalid, as when Joplin Server prunes old changes */
+  expireCursors: () => void;
   close: () => Promise<void>;
 }
 
@@ -100,6 +113,12 @@ export async function startMockJoplinServer(
   let clock = Date.now();
   const tick = () => (clock = Math.max(clock + 1, Date.now()));
   const failures: number[] = [];
+  const changes: MockChange[] = [];
+  let cursorEpoch = 0;
+  const recordChange = (name: string, type: number) => {
+    if (options.delta) changes.push({ item_name: name, type, updated_time: items.get(name)?.updatedTime ?? tick() });
+  };
+  for (const name of items.keys()) recordChange(name, 1);
   let server: Server | undefined;
   const handle: MockJoplinServer = {
     url: '',
@@ -108,6 +127,8 @@ export async function startMockJoplinServer(
       for (let i = 0; i < count; i++) failures.push(status);
     },
     onItemRequest: null,
+    recordChange,
+    expireCursors: () => void cursorEpoch++,
     close: () => new Promise((resolve) => (server ? server.close(() => resolve()) : resolve())),
   };
 
@@ -146,6 +167,19 @@ export async function startMockJoplinServer(
     const session = req.headers['x-api-auth'];
     if (typeof session !== 'string' || !sessions.has(session)) {
       res.status(403).json({ error: 'Invalid session' });
+      return;
+    }
+
+    if (options.delta && req.method === 'GET' && req.path === '/root/delta') {
+      // Cursors are "<epoch>.<position>", so expireCursors() can invalidate all of them
+      const cursor = String(req.query.cursor ?? '');
+      const [epoch, position] = cursor ? cursor.split('.').map(Number) : [cursorEpoch, 0];
+      if (epoch !== cursorEpoch || !Number.isInteger(position)) {
+        res.status(400).json({ error: 'Delta cursor is invalid', code: 'resyncRequired' });
+        return;
+      }
+      const end = Math.min(changes.length, position + (Number(req.query.limit) || 200));
+      res.json({ items: changes.slice(position, end), cursor: `${cursorEpoch}.${end}`, has_more: end < changes.length });
       return;
     }
 
@@ -193,6 +227,7 @@ export async function startMockJoplinServer(
         contentType: isResource ? 'application/octet-stream' : 'text/plain; charset=utf-8',
         updatedTime: tick(),
       });
+      recordChange(name, 2);
       res.json({ name, updated_time: clock });
       return;
     }
@@ -202,6 +237,7 @@ export async function startMockJoplinServer(
         res.status(404).json({ error: `Not found: ${name}` });
         return;
       }
+      recordChange(name, 3);
       res.status(200).end();
       return;
     }

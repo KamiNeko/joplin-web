@@ -6,6 +6,7 @@ import { buildDemoItems, buildEncryptedDemoItems, DEMO_EMAIL, DEMO_PASSWORD } fr
  * Nothing leaves your machine; all changes live in memory until the process stops.
  *
  *   MOCK_JOPLIN_PORT  mock Joplin Server port (default 22300)
+ *   HOST              bind address for Joplin Web backend (optional)
  *   PORT              Joplin Web backend port (default 3001)
  *   DEMO_E2EE=1       an account with end-to-end encryption on (read-only in Joplin Web)
  */
@@ -16,6 +17,10 @@ const mock = await startMockJoplinServer({ email: DEMO_EMAIL, password: DEMO_PAS
 
 // Must be set before the backend's config module is loaded
 process.env.JOPLIN_SERVER_URL = mock.url;
+// Demo uses the deterministic fake organizer and never calls a real LLM
+process.env.AI_FAKE = '1';
+process.env.AI_BASE_URL ??= 'http://127.0.0.1:18317/v1';
+process.env.AI_MODEL ??= 'deepseek-flash';
 await import('../src/index.js');
 
 console.log(`[Demo] Mock Joplin Server running at ${mock.url}`);

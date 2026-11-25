@@ -54,12 +54,14 @@ In short: choose Joplin Web if you want quick, install-free access to your notes
 | | |
 | :--- | :--- |
 | 📚 **Notebooks** | Browse nested notebooks; create, rename, move (into another notebook or to the top level) and delete them. |
+| ☑️ **Bulk actions** | Multi-select notes (checkboxes, `Shift`-range, `Ctrl/Cmd`-click or *Select all*) to move them between notebooks, add tags or move them to the trash in bulk, with one-click *Undo*. |
+| ✨ **Auto-organize** | Optional AI assistant (any OpenAI-compatible endpoint) that analyses selected notes—including scanned PDF/image attachment OCR and local TF-IDF similarity hints from already-filed OCR notes—to suggest English `YYYY-MM-DD Issuer – Document type` titles, target notebooks from your taxonomy and up to two lowercase-hyphenated tags (one fixed document type plus optional issuer; an issuer tag is only shown once that issuer recurs in 3+ notes of the job, so a large backlog does not create one tag per one-off issuer), with confidence filters (*Very high ≥ 0.85*, *High*), inline editing, batch apply, *Undo*, persistent multi-job history (`/organize`), and one-click retry for failed items. |
 | 📝 **Markdown editor** | CodeMirror editor with *Edit*, *Split* and *Preview* modes, autosave and `Ctrl+S`. Formatting toolbar (also on phones) and shortcuts: `Ctrl+B` bold, `Ctrl+I` italic, `Ctrl+E` code, `Ctrl+K` link. Links to other notes via a search picker or *Copy Markdown link*. |
 | ✨ **Rich rendering** | GitHub-flavored Markdown: tables, task lists, syntax-highlighted code blocks, plus Joplin's extensions: math (KaTeX), Mermaid diagrams, `==highlight==`, `++insert++`, `~sub~` and `^sup^`. HTML notes (e.g. from the Web Clipper) are shown as sanitized HTML. |
 | 🖼️ **Images & attachments** | Shows Joplin resources inline. Drop, paste or attach files to upload them. |
 | ✅ **To-dos** | Create to-dos and tick them off, right from the note list. Set, change or clear due dates (synced with Joplin's alarms); overdue to-dos are highlighted. |
 | 🏷️ **Tags** | Tag notes, browse by tag, rename and delete tags. |
-| 🔎 **Search** | Instant search across titles and content (`Ctrl+K`): all words must match, `"exact phrases"`, `-word` to exclude, and Joplin-style filters `tag:`, `notebook:`, `type:todo`, `iscompleted:0`. |
+| 🔎 **Search** | Instant search across titles, bodies and attachment OCR text (`Ctrl+K`): all words must match, `"exact phrases"`, `-word` to exclude, Joplin-style filters `tag:`, `notebook:`, `type:todo`, `iscompleted:0`, and `"Found in attachment"` snippets when a match comes from OCR. |
 | 🗑️ **Trash** | Deleted notes and notebooks go to Joplin's trash, where you can restore them or delete them permanently. |
 | ⚔️ **Conflict detection** | If a note was changed elsewhere while you edited it, you choose which version to keep. |
 | 🔀 **Sync conflicts** | Conflict copies that Joplin desktop or mobile keep after a sync conflict are listed under *Conflicts* (only when there are any), not as duplicates in your notebooks, tags or search. Compare a copy with the original, then trash it or move it to a notebook to keep it. |
@@ -164,8 +166,16 @@ Set these as environment variables of the container. The repository's `docker-co
 | `CORS_ORIGIN` | *(none)* | Allowed origins for API calls (comma-separated). Only needed when the UI is served from another origin than the API; the single-container setup doesn't need it. Without Docker in development mode the default is `http://localhost:5173`. |
 | `RATE_LIMIT_MAX` | `1000` | Requests per client address and 15 minutes to the API. Behind a reverse proxy without `TRUST_PROXY` all users count as one address; set `TRUST_PROXY` (or raise this) if several people use the instance. |
 | `CACHE_TTL_MS` | `30000` | How long the note cache is used before it is re-synced with Joplin Server, in milliseconds. After that, reads still get the cached data (up to 10 × this value old) while the re-sync runs in the background. `0` re-syncs before every read. |
+| `CACHE_DIR` | unset | Directory for a note cache (and Auto-organize job history under `CACHE_DIR/organize/`) that all sessions of a Joplin user share and that survives restarts, so a new login or a restart doesn't read every item again (on a large account that first load takes minutes). Mount a volume there, e.g. `CACHE_DIR=/cache` with `-v joplin-web-cache:/cache`. It holds the notes in plain text, readable only by the container user. Unset: one in-memory cache per session. |
 | `AUTH_CACHE_TTL_MS` | `300000` | How long a validated session is trusted before it is checked again, in milliseconds. |
+| `AI_BASE_URL` | *(not set)* | Optional OpenAI-compatible Chat Completions base URL (e.g. `http://127.0.0.1:18317/v1`) for *Auto-organize*. Must be set together with `AI_MODEL`; leave unset to keep the feature off. |
+| `AI_API_KEY` | *(not set)* | Optional Bearer API key sent only to `AI_BASE_URL` (never returned to the browser or logged). |
+| `AI_MODEL` | *(not set)* | Chat model name sent to `AI_BASE_URL` (e.g. `deepseek-flash`). |
+| `AI_CONCURRENCY` | `4` | Maximum concurrent classification requests per Auto-organize job. |
 | `PORT` | `3001` | Port the server listens on when run without Docker. Leave it unset for the container; use `HOST_PORT` or the `-p` mapping instead. |
+
+> [!NOTE]
+> **Auto-organize privacy:** No note data leaves your server unless you both configure `AI_BASE_URL` + `AI_MODEL` and explicitly start an Auto-organize job. Each analysed note sends its title, link-stripped body text (up to ~2,000 chars), attachment filenames, extracted OCR text (up to ~6,000 chars), and up to 5 similar filed note titles/notebook paths (matched locally via attachment OCR), along with your notebook paths, sample note titles, and tag list, to the configured `AI_BASE_URL` provider. Review every suggestion before applying; the feature stays disabled on end-to-end encrypted (read-only) accounts and skips encrypted notes.
 
 ### Updating and versions
 

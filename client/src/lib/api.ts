@@ -1,7 +1,21 @@
 import {
+  BatchNoteRequest,
+  BatchNoteResult,
   Notebook,
   NoteListItem,
   Note,
+  OrganizeApplyItemInput,
+  OrganizeApplyResponse,
+  OrganizeDeleteResponse,
+  OrganizeFilter,
+  OrganizeJobResponse,
+  OrganizeJobStatus,
+  OrganizeJobSummary,
+  OrganizeRetryResponse,
+  OrganizeSelectionMode,
+  OrganizeStatus,
+  OrganizeTargetsResponse,
+  OrganizeUndoResponse,
   Tag,
   SearchResult,
   LoginResponse,
@@ -401,6 +415,19 @@ export async function restoreNote(id: string): Promise<Note> {
   return request<Note>(`/api/notes/${id}/restore`, { method: "POST" });
 }
 
+/** Maximum items sent in one POST /api/notes/batch request (matches server cap). */
+export const BATCH_CHUNK_SIZE = 1000;
+
+/**
+ * Applies a bulk update to up to 1000 notes; returns one outcome entry per item.
+ */
+export async function batchUpdateNotes(payload: BatchNoteRequest): Promise<BatchNoteResult[]> {
+  return request<BatchNoteResult[]>("/api/notes/batch", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 /**
  * Creates a notebook, optionally as a sub-notebook.
  */
@@ -582,4 +609,139 @@ export async function downloadResource(resourceId: string, fileName: string): Pr
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+// ---------------------------------------------------------------------------
+// Auto-organize
+// ---------------------------------------------------------------------------
+
+/**
+ * Checks whether Auto-organize is configured and enabled on the server.
+ */
+export async function getOrganizeStatus(): Promise<OrganizeStatus> {
+  const data = await request<{ enabled?: unknown; model?: unknown } | null>("/api/organize/status");
+  const enabled = data?.enabled === true;
+  return {
+    enabled,
+    ...(enabled && typeof data?.model === "string" ? { model: data.model } : {}),
+  };
+}
+
+/**
+ * Lists the user's persisted and active Auto-organize jobs, newest first.
+ */
+export async function listOrganizeJobs(): Promise<{ jobs: OrganizeJobSummary[] }> {
+  const data = await request<{ jobs?: unknown } | OrganizeJobSummary[] | null>("/api/organize/jobs");
+  if (Array.isArray(data)) {
+    return { jobs: data };
+  }
+  return {
+    jobs: Array.isArray(data?.jobs) ? (data.jobs as OrganizeJobSummary[]) : [],
+  };
+}
+
+/**
+ * Extracts `runningJobId` from a 409 response when starting or retrying while another job runs.
+ */
+export function getOrganizeRunningJobId(error: unknown): string | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  const details = (error.data as { details?: { runningJobId?: unknown } } | undefined)?.details;
+  return typeof details?.runningJobId === "string" ? details.runningJobId : null;
+}
+
+/**
+ * Starts a server-side Auto-organize job for the selected note IDs.
+ */
+export async function createOrganizeJob(payload: {
+  noteIds: string[];
+  excludeNotebookIds?: string[];
+}): Promise<{ jobId: string }> {
+  return request<{ jobId: string }>("/api/organize/jobs", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * Fetches job status, progress, token usage, filter counts, and a page of note suggestions.
+ */
+export async function getOrganizeJob(
+  jobId: string,
+  params?: { offset?: number; limit?: number; filter?: OrganizeFilter }
+): Promise<OrganizeJobResponse> {
+  const query = new URLSearchParams();
+  if (params?.offset !== undefined) query.set("offset", String(params.offset));
+  if (params?.limit !== undefined) query.set("limit", String(params.limit));
+  if (params?.filter && params.filter !== "all") query.set("filter", params.filter);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<OrganizeJobResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}${suffix}`);
+}
+
+/**
+ * Fetches all unapplied completed `noteId`s matching the confidence mode across the whole job.
+ */
+export async function getOrganizeTargets(
+  jobId: string,
+  mode: OrganizeSelectionMode
+): Promise<OrganizeTargetsResponse> {
+  const query = new URLSearchParams({ mode });
+  return request<OrganizeTargetsResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}/targets?${query.toString()}`);
+}
+
+/**
+ * Cancels an in-progress Auto-organize job.
+ */
+export async function cancelOrganizeJob(jobId: string): Promise<{ id: string; status: OrganizeJobStatus }> {
+  return request<{ id: string; status: OrganizeJobStatus }>(`/api/organize/jobs/${encodeURIComponent(jobId)}`, {
+    method: "DELETE",
+  });
+}
+
+/**
+ * Deletes a finished or cancelled Auto-organize job from disk and history.
+ */
+export async function deleteOrganizeJob(jobId: string): Promise<OrganizeDeleteResponse> {
+  return request<OrganizeDeleteResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}?remove=1`, {
+    method: "DELETE",
+  });
+}
+
+/**
+ * Re-queues retryable failed items on a job using the current notebook tree and resumes analysis.
+ */
+export async function retryOrganizeJob(jobId: string): Promise<OrganizeRetryResponse> {
+  return request<OrganizeRetryResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}/retry`, {
+    method: "POST",
+  });
+}
+
+/**
+ * Applies selected/edited suggestions from an organize job in bulk.
+ */
+export async function applyOrganizeJob(
+  jobId: string,
+  items: OrganizeApplyItemInput[],
+  options?: { undoMode?: "replace" | "append" }
+): Promise<OrganizeApplyResponse> {
+  const payload: { items: OrganizeApplyItemInput[]; undoMode?: "replace" | "append" } = { items };
+  if (options?.undoMode !== undefined) {
+    payload.undoMode = options.undoMode;
+  }
+  return request<OrganizeApplyResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}/apply`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * Reverts the last apply performed on this organize job (skipping notes changed since).
+ */
+export async function undoOrganizeJob(
+  jobId: string,
+  options?: { limit?: number }
+): Promise<OrganizeUndoResponse> {
+  return request<OrganizeUndoResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}/undo`, {
+    method: "POST",
+    ...(options?.limit !== undefined ? { body: JSON.stringify({ limit: options.limit }) } : {}),
+  });
 }

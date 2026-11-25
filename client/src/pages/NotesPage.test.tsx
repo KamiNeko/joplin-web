@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { Route, Routes } from "react-router-dom";
+import { toast } from "sonner";
 import { Note, NoteListItem, Notebook, Tag } from "@/lib/types";
 import { draftOwner, setDraftOwner } from "@/lib/drafts";
 import { FetchCall, jsonResponse, mockFetch } from "@/test/fetch-mock";
@@ -116,7 +117,10 @@ beforeEach(() => {
   );
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe("NotesPage", () => {
   it("lists all notes and opens one from the list", async () => {
@@ -221,5 +225,307 @@ describe("NotesPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close note view" }));
 
     await waitFor(() => expect(location()).toBe(`/notebooks/${work.id}`));
+  });
+});
+
+describe("bulk selection and actions", () => {
+  it("resets selection when switching notebooks, tags, or entering search", async () => {
+    mockNotesApi();
+    renderPage("/notes");
+    await noteRow("Roadmap");
+
+    fireEvent.click(screen.getByRole("button", { name: "Select" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select Roadmap" }));
+    expect(screen.getByText("1 selected")).toBeTruthy();
+
+    // Switch notebook in sidebar -> selection resets once the new list finishes loading too
+    fireEvent.click(await sidebar().findByRole("button", { name: "Work, 2 notes" }));
+    await waitFor(() => expect(location()).toBe(`/notebooks/${work.id}`));
+    await noteRow("Roadmap");
+    expect(screen.queryByRole("checkbox", { name: /^Select / })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Bulk actions" })).toBeNull();
+
+    // Select again, then search -> selection resets on search & stays reset on clear
+    fireEvent.click(screen.getByRole("button", { name: "Select" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select Roadmap" }));
+    expect(screen.getByText("1 selected")).toBeTruthy();
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search notes" }), { target: { value: "alfama" } });
+    expect(await screen.findByText("Search Results", {}, { timeout: 2000 })).toBeTruthy();
+    fireEvent.click(screen.getAllByRole("button", { name: "Clear search" })[0]);
+
+    await noteRow("Roadmap");
+    expect(screen.queryByRole("checkbox", { name: /^Select / })).toBeNull();
+  });
+
+  it("moves selected notes with conflict skipping and restores each note to its previous notebook on Undo", async () => {
+    const successSpy = vi.spyOn(toast, "success").mockReturnValue("t1");
+    const warningSpy = vi.spyOn(toast, "warning").mockReturnValue("t2");
+    const batchCalls = mockNotesApi((call) => {
+      if (call.method === "POST" && call.path === "/api/notes/batch") {
+        const body = call.body as { items: Array<{ id: string }> };
+        if (body.items.length === 2) {
+          return jsonResponse([
+            { id: notes[0].id, status: "ok", updatedTime: 9001 },
+            { id: notes[2].id, status: "conflict", error: "Changed elsewhere" },
+          ]);
+        }
+        return jsonResponse(body.items.map((item) => ({ id: item.id, status: "ok", updatedTime: 9002 })));
+      }
+      return undefined;
+    });
+
+    renderPage("/notes");
+    await noteRow("Roadmap");
+
+    fireEvent.click(screen.getByRole("button", { name: "Select" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select Roadmap" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select Lisbon trip" }));
+    fireEvent.click(screen.getByRole("button", { name: "Move to…" }));
+    const destList = await screen.findByRole("list", { name: "Destination" });
+    fireEvent.click(within(destList).getByRole("button", { name: "Personal" }));
+
+    await waitFor(() => expect(warningSpy).toHaveBeenCalled());
+    const [warnMsg, warnOpts] = warningSpy.mock.calls[0];
+    expect(warnMsg).toBe("Moved 1 note, 1 skipped: changed elsewhere");
+    expect(warnOpts?.description).toBe('to "Personal"');
+
+    const firstPost = batchCalls.find((c) => c.method === "POST" && c.path === "/api/notes/batch")!;
+    expect(firstPost.body).toEqual({
+      items: [
+        { id: notes[0].id, baseUpdatedTime: notes[0].updatedTime },
+        { id: notes[2].id, baseUpdatedTime: notes[2].updatedTime },
+      ],
+      parentId: personal.id,
+    });
+
+    // Trigger Undo from the toast action: only the 1 moved note reverts to Work
+    const undoAction = warnOpts?.action as { label: string; onClick: () => void };
+    expect(undoAction.label).toBe("Undo");
+    undoAction.onClick();
+
+    await waitFor(() => expect(successSpy).toHaveBeenCalledWith("Moved back 1 note"));
+    const allBatchPosts = batchCalls.filter((c) => c.method === "POST" && c.path === "/api/notes/batch");
+    expect(allBatchPosts).toHaveLength(2);
+    expect(allBatchPosts[1].body).toEqual({
+      items: [{ id: notes[0].id, baseUpdatedTime: 9001, parentId: work.id }],
+    });
+  });
+
+  it("adds tags in bulk and only removes newly added tags on Undo", async () => {
+    const successSpy = vi.spyOn(toast, "success").mockReturnValue("t1");
+    const batchCalls = mockNotesApi((call) => {
+      if (call.method === "POST" && call.path === "/api/notes/batch") {
+        const body = call.body as { addTags?: string[]; removeTags?: string[] };
+        if (body.addTags) {
+          return jsonResponse([
+            { id: notes[0].id, status: "ok", updatedTime: notes[0].updatedTime, addedTags: [] },
+            { id: notes[1].id, status: "ok", updatedTime: notes[1].updatedTime, addedTags: ["planning"] },
+          ]);
+        }
+        return jsonResponse([{ id: notes[1].id, status: "ok", updatedTime: notes[1].updatedTime }]);
+      }
+      return undefined;
+    });
+
+    renderPage(`/notebooks/${work.id}`);
+    await noteRow("Roadmap");
+
+    fireEvent.click(screen.getByRole("button", { name: "Select" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select all (2)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add tag…" }));
+    const tagInput = await screen.findByLabelText("Add tag");
+    fireEvent.change(tagInput, { target: { value: "planning" } });
+    fireEvent.keyDown(tagInput, { key: "Enter" });
+
+    await waitFor(() => expect(successSpy).toHaveBeenCalled());
+    const [msg, opts] = successSpy.mock.calls[0];
+    expect(msg).toBe("Added #planning to 1 note");
+    expect(opts?.description).toBe("1 already had #planning");
+
+    const undoAction = opts?.action as { label: string; onClick: () => void };
+    undoAction.onClick();
+
+    await waitFor(() => expect(successSpy).toHaveBeenCalledWith("Removed #planning from 1 note"));
+    const allBatchPosts = batchCalls.filter((c) => c.method === "POST" && c.path === "/api/notes/batch");
+    expect(allBatchPosts[1].body).toEqual({
+      items: [{ id: notes[1].id, baseUpdatedTime: notes[1].updatedTime }],
+      removeTags: ["planning"],
+    });
+  });
+
+  it("moves selected notes to trash, closes an affected open note, and restores on Undo", async () => {
+    const successSpy = vi.spyOn(toast, "success").mockReturnValue("t1");
+    const batchCalls = mockNotesApi((call) => {
+      if (call.method === "POST" && call.path === "/api/notes/batch") {
+        const body = call.body as { items: Array<{ id: string }> };
+        return jsonResponse(body.items.map((item) => ({ id: item.id, status: "ok", updatedTime: 9500 })));
+      }
+      return undefined;
+    });
+
+    renderPage(`/notebooks/${work.id}/notes/${notes[0].id}`);
+    await viewerTitle("Roadmap");
+
+    fireEvent.click(screen.getByRole("button", { name: "Select" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select all (2)" }));
+    fireEvent.click(within(screen.getByRole("region", { name: "Bulk actions" })).getByRole("button", { name: "Move to trash" }));
+
+    await waitFor(() => expect(location()).toBe(`/notebooks/${work.id}`));
+    await waitFor(() => expect(successSpy).toHaveBeenCalled());
+    const [msg, opts] = successSpy.mock.calls[0];
+    expect(msg).toBe("Moved 2 notes to trash");
+
+    const undoAction = opts?.action as { label: string; onClick: () => void };
+    undoAction.onClick();
+
+    await waitFor(() => expect(successSpy).toHaveBeenCalledWith("Restored 2 notes from trash"));
+    const allBatchPosts = batchCalls.filter((c) => c.method === "POST" && c.path === "/api/notes/batch");
+    expect(allBatchPosts[0].body).toEqual({
+      items: [
+        { id: notes[0].id, baseUpdatedTime: notes[0].updatedTime },
+        { id: notes[1].id, baseUpdatedTime: notes[1].updatedTime },
+      ],
+      trash: true,
+    });
+    expect(allBatchPosts[1].body).toEqual({
+      items: [
+        { id: notes[0].id, baseUpdatedTime: 9500 },
+        { id: notes[1].id, baseUpdatedTime: 9500 },
+      ],
+      restore: true,
+    });
+  });
+
+  it("shows Auto-organize only when enabled, pre-excludes uniform source notebook, and navigates to /organize/:jobId", async () => {
+    let organizeEnabled = false;
+    const calls = mockNotesApi((call) => {
+      if (call.path === "/api/organize/status") {
+        return jsonResponse(organizeEnabled ? { enabled: true, model: "deepseek-flash" } : { enabled: false });
+      }
+      if (call.method === "POST" && call.path === "/api/organize/jobs") {
+        return jsonResponse({ jobId: "abc1234567890abcdef1234567890abc" }, 201);
+      }
+      return undefined;
+    });
+
+    const first = renderPage(`/notebooks/${work.id}`);
+    await noteRow("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Select" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select all (2)" }));
+    const barDisabled = screen.getByRole("region", { name: "Bulk actions" });
+    expect(within(barDisabled).queryByRole("button", { name: "Auto-organize" })).toBeNull();
+    first.unmount();
+
+    organizeEnabled = true;
+    renderWithProviders(
+      <>
+        <Routes>
+          <Route path="/notebooks/:id" element={<NotesPage />} />
+          <Route path="/organize/:jobId" element={<div>Organize View</div>} />
+        </Routes>
+        <LocationProbe />
+      </>,
+      { route: `/notebooks/${work.id}` }
+    );
+    await noteRow("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Select" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select all (2)" }));
+
+    const barEnabled = screen.getByRole("region", { name: "Bulk actions" });
+    const btn = await within(barEnabled).findByRole("button", { name: "Auto-organize" });
+    fireEvent.click(btn);
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Auto-organize 2 notes")).toBeTruthy();
+    expect((within(dialog).getByRole("checkbox", { name: /Work/ }) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start organizing (2)" }));
+
+    await waitFor(() => expect(location()).toBe("/organize/abc1234567890abcdef1234567890abc"));
+    const post = calls.find((c) => c.method === "POST" && c.path === "/api/organize/jobs")!;
+    expect(post.body).toEqual({
+      noteIds: [notes[0].id, notes[1].id],
+      excludeNotebookIds: [work.id],
+    });
+  });
+
+  it("shows Auto-organize in sidebar when jobs exist and offers Cancel the running job and start on 409", async () => {
+    const runningId = "run1234567890abcdef1234567890abc";
+    const newId = "new1234567890abcdef1234567890abc";
+    let runningCancelled = false;
+
+    const calls = mockNotesApi((call) => {
+      if (call.path === "/api/organize/status") {
+        return jsonResponse({ enabled: true, model: "deepseek-flash" });
+      }
+      if (call.method === "GET" && call.path === "/api/organize/jobs") {
+        return jsonResponse({
+          jobs: [
+            {
+              id: "old1234567890abcdef1234567890abc",
+              status: "done",
+              progress: { total: 5, done: 5, failed: 0 },
+              appliedCount: 2,
+              usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 },
+              canUndo: true,
+              createdAt: 1_700_000_000_000,
+              updatedAt: 1_700_000_001_000,
+            },
+          ],
+        });
+      }
+      if (call.method === "POST" && call.path === "/api/organize/jobs") {
+        if (!runningCancelled) {
+          return jsonResponse(
+            {
+              error: `Another Auto-organize job (${runningId}) is already running.`,
+              details: { runningJobId: runningId },
+            },
+            409
+          );
+        }
+        return jsonResponse({ jobId: newId }, 201);
+      }
+      if (call.method === "DELETE" && call.path === `/api/organize/jobs/${runningId}`) {
+        runningCancelled = true;
+        return jsonResponse({ id: runningId, status: "cancelled" });
+      }
+      return undefined;
+    });
+
+    renderWithProviders(
+      <>
+        <Routes>
+          <Route path="/notebooks/:id" element={<NotesPage />} />
+          <Route path="/organize" element={<div>Organize List</div>} />
+          <Route path="/organize/:jobId" element={<div>Organize View</div>} />
+        </Routes>
+        <LocationProbe />
+      </>,
+      { route: `/notebooks/${work.id}` }
+    );
+
+    await noteRow("Roadmap");
+    const orgSidebarBtn = await sidebar().findByRole("button", { name: /^Auto-organize/ });
+    expect(orgSidebarBtn).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Select" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select all (2)" }));
+    const bar = screen.getByRole("region", { name: "Bulk actions" });
+    fireEvent.click(await within(bar).findByRole("button", { name: "Auto-organize" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("button", { name: "Previous jobs (1)" })).toBeTruthy();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start organizing (2)" }));
+
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert.textContent).toContain("Another Auto-organize job");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel the running job and start" }));
+
+    await waitFor(() => expect(location()).toBe(`/organize/${newId}`));
+    expect(calls.some((c) => c.method === "DELETE" && c.path === `/api/organize/jobs/${runningId}`)).toBe(true);
+    expect(calls.filter((c) => c.method === "POST" && c.path === "/api/organize/jobs")).toHaveLength(2);
   });
 });

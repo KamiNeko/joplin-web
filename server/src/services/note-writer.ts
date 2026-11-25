@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { JoplinApiError, JoplinNotFoundError, joplinApi } from './joplin-api.js';
+import { JoplinApiError, JoplinAuthError, JoplinConnectionError, JoplinNotFoundError, joplinApi } from './joplin-api.js';
 import { isConflictNote, noteCache } from './note-cache.js';
 import { deserialize, serialize } from './serializer.js';
 import { trashedTogether } from './trash.js';
@@ -10,7 +10,21 @@ import {
   defaultResourceProperties,
   defaultTagProperties,
 } from './item-defaults.js';
-import { JoplinItemType, NoteDetail, RawJoplinItem, WriteState } from '../types/index.js';
+import {
+  BatchNoteItem,
+  BatchNoteRequest,
+  BatchNoteResult,
+  JoplinItemType,
+  NoteDetail,
+  RawJoplinItem,
+  WriteState,
+} from '../types/index.js';
+
+/** Maximum number of notes accepted by POST /api/notes/batch in a single request */
+export const MAX_BATCH_SIZE = 1000;
+
+/** Maximum concurrent item operations against Joplin Server within one batch */
+export const BATCH_CONCURRENCY = 4;
 
 /**
  * Thrown when an item changed on Joplin Server since the client loaded it
@@ -29,8 +43,8 @@ export class ConflictError extends JoplinApiError {
  * Thrown for invalid write requests (bad ids, encrypted items, wrong item type, ...)
  */
 export class WriteValidationError extends JoplinApiError {
-  constructor(message: string, status = 400) {
-    super(message, status);
+  constructor(message: string, status = 400, details?: unknown) {
+    super(message, status, details);
     this.name = 'WriteValidationError';
   }
 }
@@ -304,16 +318,8 @@ export class NoteWriterService {
     }
 
     const props = { ...current.properties };
-    // Like Joplin's Note.moveToFolder: a conflict copy moved to a notebook (its own one too)
-    // becomes a regular note there
-    const conflictMoved = changes.parentId !== undefined && isConflictNote(current);
-    if (changes.parentId !== undefined && (changes.parentId !== current.parentId || conflictMoved)) {
-      await this.assertActiveNotebook(sessionId, changes.parentId);
-      props.parent_id = changes.parentId;
-      if (conflictMoved) {
-        props.is_conflict = '0';
-        props.conflict_original_id = '';
-      }
+    if (this.applyParentChange(props, current, changes.parentId)) {
+      await this.assertActiveNotebook(sessionId, changes.parentId!);
     }
     if (changes.todoCompleted !== undefined) {
       props.todo_completed = changes.todoCompleted ? String(Date.now()) : '0';
@@ -348,6 +354,61 @@ export class NoteWriterService {
   }
 
   /**
+   * Moves a note into `parentId`, clearing conflict-copy markers just like Joplin's
+   * `Note.moveToFolder`. Returns true if the note's parent (or conflict state) changed.
+   */
+  private applyParentChange(props: Record<string, string>, current: RawJoplinItem, parentId: string | undefined): boolean {
+    const conflictMoved = parentId !== undefined && isConflictNote(current);
+    if (parentId !== undefined && (parentId !== current.parentId || conflictMoved)) {
+      props.parent_id = parentId;
+      if (conflictMoved) {
+        props.is_conflict = '0';
+        props.conflict_original_id = '';
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /** Refuses to tag a note while the note or any ancestor notebook is in the trash */
+  private async assertNoteNotInTrash(sessionId: string, note: RawJoplinItem): Promise<void> {
+    const inTrash =
+      note.deletedTime > 0 ||
+      (!isConflictNote(note) && (await this.freshAncestors(sessionId, note.parentId)).some((f) => f.deletedTime > 0));
+    if (inTrash) throw new WriteValidationError(`Note not found: ${note.id}`, 404);
+  }
+
+  /**
+   * Restores any trashed ancestor notebooks of `note` (reading all before any write so an
+   * encrypted ancestor aborts before touching anything). Optional `restoreFolder` lets batch
+   * operations deduplicate concurrent writes to the same ancestor folder.
+   */
+  private async restoreTrashedAncestors(
+    sessionId: string,
+    note: RawJoplinItem,
+    restoreFolder?: (folder: RawJoplinItem) => Promise<void>
+  ): Promise<void> {
+    const trashedAncestors: RawJoplinItem[] = [];
+    const ancestors = isConflictNote(note) ? [] : await this.freshAncestors(sessionId, note.parentId);
+    for (const folder of ancestors) {
+      if (folder.deletedTime > 0) {
+        assertNotEncrypted(folder);
+        trashedAncestors.push(folder);
+      }
+    }
+    const doRestore =
+      restoreFolder ??
+      (async (folder: RawJoplinItem) => {
+        const folderProps = { ...folder.properties, deleted_time: '0' };
+        touch(folderProps);
+        await this.write(sessionId, { type_: JoplinItemType.Folder, title: folder.title, body: '', properties: folderProps });
+      });
+    for (const folder of trashedAncestors) {
+      await doRestore(folder);
+    }
+  }
+
+  /**
    * Restores a note from the trash, including any trashed parent notebooks. A conflict copy only
    * gets its own `deleted_time` cleared: it goes back to "Conflicts", which ignores the notebook.
    */
@@ -355,22 +416,7 @@ export class NoteWriterService {
     assertValidId(id, 'note id');
     await this.assertWritable(sessionId);
     const current = await this.fetchFreshOfType(sessionId, id, JoplinItemType.Note);
-
-    // Read the whole notebook chain first, so an encrypted ancestor stops the restore
-    // before anything is written
-    const trashedAncestors: RawJoplinItem[] = [];
-    const ancestors = isConflictNote(current) ? [] : await this.freshAncestors(sessionId, current.parentId);
-    for (const folder of ancestors) {
-      if (folder.deletedTime > 0) {
-        assertNotEncrypted(folder);
-        trashedAncestors.push(folder);
-      }
-    }
-    for (const folder of trashedAncestors) {
-      const folderProps = { ...folder.properties, deleted_time: '0' };
-      touch(folderProps);
-      await this.write(sessionId, { type_: JoplinItemType.Folder, title: folder.title, body: '', properties: folderProps });
-    }
+    await this.restoreTrashedAncestors(sessionId, current);
 
     if (current.deletedTime > 0) {
       const props = { ...current.properties, deleted_time: '0' };
@@ -696,22 +742,8 @@ export class NoteWriterService {
   // Tags
   // ---------------------------------------------------------------------------
 
-  /**
-   * Tags a note. Reuses an existing tag with the same title (case-insensitive, like Joplin),
-   * otherwise creates it. Tagging doesn't modify the note item itself.
-   */
-  public async addTagToNote(sessionId: string, noteId: string, title: string): Promise<NoteDetail> {
-    assertValidId(noteId, 'note id');
-    const tagTitle = sanitizeTitle(title);
-    if (!tagTitle) throw new WriteValidationError('Tag title is required');
-    await this.assertWritable(sessionId);
-    const note = await this.fetchFreshOfType(sessionId, noteId, JoplinItemType.Note);
-    // Like creating a note in a trashed notebook: a note in the trash cannot be tagged
-    const inTrash =
-      note.deletedTime > 0 ||
-      (!isConflictNote(note) && (await this.freshAncestors(sessionId, note.parentId)).some((f) => f.deletedTime > 0));
-    if (inTrash) throw new WriteValidationError(`Note not found: ${noteId}`, 404);
-
+  /** Finds an existing tag (case-insensitive) or creates it; refuses encrypted tags */
+  private async resolveOrCreateTag(sessionId: string, tagTitle: string): Promise<RawJoplinItem> {
     const entry = await noteCache.getEntry(sessionId);
     let tag = Array.from(entry.tags.values()).find(
       (t) => t.title.trim().toLowerCase() === tagTitle.toLowerCase()
@@ -734,16 +766,49 @@ export class NoteWriterService {
         properties: defaultTagProperties(newId()),
       });
     }
+    return tag;
+  }
 
-    const alreadyTagged = entry.noteTags.some((link) => link.noteId === noteId && link.tagId === tag!.id);
-    if (!alreadyTagged) {
-      const linkId = newId();
-      await this.write(sessionId, {
-        type_: JoplinItemType.NoteTag,
-        body: '',
-        properties: defaultNoteTagProperties(linkId, noteId, tag.id),
-      });
+  /** Creates a note-tag link if the note doesn't already have it; returns true if linked now */
+  private async linkTagItemToNote(sessionId: string, noteId: string, tagId: string): Promise<boolean> {
+    const entry = await noteCache.getEntry(sessionId);
+    const alreadyTagged = entry.noteTags.some((link) => link.noteId === noteId && link.tagId === tagId);
+    if (alreadyTagged) return false;
+    const linkId = newId();
+    await this.write(sessionId, {
+      type_: JoplinItemType.NoteTag,
+      body: '',
+      properties: defaultNoteTagProperties(linkId, noteId, tagId),
+    });
+    return true;
+  }
+
+  /** Deletes note-tag link items matching (noteId, tagId) */
+  private async unlinkTagLinks(sessionId: string, noteId: string, tagId: string): Promise<void> {
+    const entry = await noteCache.getEntry(sessionId);
+    const links = entry.noteTags.filter((link) => link.noteId === noteId && link.tagId === tagId);
+    for (const link of links) {
+      if (!ID_PATTERN.test(link.id)) continue;
+      await joplinApi.deleteItem(sessionId, `${link.id}.md`);
+      noteCache.removeItem(sessionId, link.id);
     }
+  }
+
+  /**
+   * Tags a note. Reuses an existing tag with the same title (case-insensitive, like Joplin),
+   * otherwise creates it. Tagging doesn't modify the note item itself.
+   */
+  public async addTagToNote(sessionId: string, noteId: string, title: string): Promise<NoteDetail> {
+    assertValidId(noteId, 'note id');
+    const tagTitle = sanitizeTitle(title);
+    if (!tagTitle) throw new WriteValidationError('Tag title is required');
+    await this.assertWritable(sessionId);
+    const note = await this.fetchFreshOfType(sessionId, noteId, JoplinItemType.Note);
+    // Like creating a note in a trashed notebook: a note in the trash cannot be tagged
+    await this.assertNoteNotInTrash(sessionId, note);
+
+    const tag = await this.resolveOrCreateTag(sessionId, tagTitle);
+    await this.linkTagItemToNote(sessionId, noteId, tag.id);
     return this.noteDetail(sessionId, noteId);
   }
 
@@ -752,14 +817,315 @@ export class NoteWriterService {
     assertValidId(noteId, 'note id');
     assertValidId(tagId, 'tag id');
     await this.assertWritable(sessionId);
-    const entry = await noteCache.getEntry(sessionId);
-    const links = entry.noteTags.filter((link) => link.noteId === noteId && link.tagId === tagId);
-    for (const link of links) {
-      if (!ID_PATTERN.test(link.id)) continue;
-      await joplinApi.deleteItem(sessionId, `${link.id}.md`);
-      noteCache.removeItem(sessionId, link.id);
-    }
+    await this.unlinkTagLinks(sessionId, noteId, tagId);
     return this.noteDetail(sessionId, noteId);
+  }
+
+  /**
+   * Applies bulk updates across a batch of notes with bounded concurrency toward Joplin Server.
+   * Reuses the same conflict detection, E2EE refusal, cache updates and property preservation
+   * as the single-note write paths; one failing or conflicting note never aborts the rest.
+   */
+  public async batchUpdateNotes(sessionId: string, request: BatchNoteRequest): Promise<BatchNoteResult[]> {
+    if (!Array.isArray(request.items) || request.items.length === 0) {
+      throw new WriteValidationError('items must be a non-empty array');
+    }
+    if (request.items.length > MAX_BATCH_SIZE) {
+      throw new WriteValidationError(`Batch size exceeds maximum of ${MAX_BATCH_SIZE} items`);
+    }
+    if (request.parentId !== undefined && typeof request.parentId !== 'string') {
+      throw new WriteValidationError('parentId must be a string');
+    }
+    if (request.trash !== undefined && typeof request.trash !== 'boolean') {
+      throw new WriteValidationError('trash must be a boolean');
+    }
+    if (request.restore !== undefined && typeof request.restore !== 'boolean') {
+      throw new WriteValidationError('restore must be a boolean');
+    }
+    if (request.trash && request.restore) {
+      throw new WriteValidationError('Cannot trash and restore in the same batch');
+    }
+
+    const parseTagList = (raw: unknown, field: string): string[] => {
+      if (raw === undefined) return [];
+      if (!Array.isArray(raw)) throw new WriteValidationError(`${field} must be an array of strings`);
+      const parsed: string[] = [];
+      for (const entry of raw) {
+        if (typeof entry !== 'string') throw new WriteValidationError(`${field} must contain strings only`);
+        const clean = sanitizeTitle(entry);
+        if (!clean) throw new WriteValidationError('Tag title is required');
+        parsed.push(clean);
+      }
+      return parsed;
+    };
+
+    const mergeTagLists = (first: string[], second: string[]): string[] => {
+      if (first.length === 0 && second.length === 0) return [];
+      const seen = new Set<string>();
+      const merged: string[] = [];
+      for (const list of [first, second]) {
+        for (const tagTitle of list) {
+          const key = tagTitle.toLowerCase();
+          if (seen.has(key)) continue;
+          seen.add(key);
+          merged.push(tagTitle);
+        }
+      }
+      return merged;
+    };
+
+    const addTags = parseTagList(request.addTags, 'addTags');
+    const removeTags = parseTagList(request.removeTags, 'removeTags');
+
+    const hasPerItemChange = request.items.some(
+      (item) =>
+        item &&
+        typeof item === 'object' &&
+        (item.parentId !== undefined ||
+          item.title !== undefined ||
+          (item.addTags !== undefined && (!Array.isArray(item.addTags) || item.addTags.length > 0)) ||
+          (item.removeTags !== undefined && (!Array.isArray(item.removeTags) || item.removeTags.length > 0)))
+    );
+    if (
+      request.parentId === undefined &&
+      addTags.length === 0 &&
+      removeTags.length === 0 &&
+      !request.trash &&
+      !request.restore &&
+      !hasPerItemChange
+    ) {
+      throw new WriteValidationError('No batch operation specified');
+    }
+
+    await this.assertWritable(sessionId);
+
+    const checkedNotebooks = new Map<string, Promise<void>>();
+    const ensureNotebook = (notebookId: string): Promise<void> => {
+      let pending = checkedNotebooks.get(notebookId);
+      if (!pending) {
+        pending = this.assertActiveNotebook(sessionId, notebookId);
+        pending.catch((err) => {
+          // Only drop transient failures so another item can retry; 4xx validation stays cached
+          if (!(err instanceof WriteValidationError) && checkedNotebooks.get(notebookId) === pending) {
+            checkedNotebooks.delete(notebookId);
+          }
+        });
+        checkedNotebooks.set(notebookId, pending);
+      }
+      return pending;
+    };
+
+    if (request.parentId !== undefined) {
+      await ensureNotebook(request.parentId);
+    }
+
+    // Tag creation and folder restore must run at most once per title/folder across concurrent workers
+    const resolvedTags = new Map<string, Promise<RawJoplinItem>>();
+    const getOrCreateTag = (tagTitle: string): Promise<RawJoplinItem> => {
+      const key = tagTitle.toLowerCase();
+      let pending = resolvedTags.get(key);
+      if (!pending) {
+        pending = this.resolveOrCreateTag(sessionId, tagTitle);
+        pending.catch((err) => {
+          if (!(err instanceof WriteValidationError) && resolvedTags.get(key) === pending) {
+            resolvedTags.delete(key);
+          }
+        });
+        resolvedTags.set(key, pending);
+      }
+      return pending;
+    };
+
+    const restoredFolders = new Map<string, Promise<void>>();
+    const restoreFolderOnce = (folder: RawJoplinItem): Promise<void> => {
+      let pending = restoredFolders.get(folder.id);
+      if (!pending) {
+        pending = (async () => {
+          const folderProps = { ...folder.properties, deleted_time: '0' };
+          touch(folderProps);
+          await this.write(sessionId, {
+            type_: JoplinItemType.Folder,
+            title: folder.title,
+            body: '',
+            properties: folderProps,
+          });
+        })();
+        pending.catch(() => {
+          if (restoredFolders.get(folder.id) === pending) restoredFolders.delete(folder.id);
+        });
+        restoredFolders.set(folder.id, pending);
+      }
+      return pending;
+    };
+
+    const inFlightByNote = new Map<string, Promise<unknown>>();
+    const runPerNote = <T>(id: string, fn: () => Promise<T>): Promise<T> => {
+      const prev = inFlightByNote.get(id) ?? Promise.resolve();
+      const next = prev.catch(() => undefined).then(fn);
+      inFlightByNote.set(id, next);
+      return next;
+    };
+
+    const processItem = async (rawItem: BatchNoteItem): Promise<BatchNoteResult> => {
+      const id = typeof rawItem?.id === 'string' ? rawItem.id : '';
+      try {
+        if (!rawItem || typeof rawItem !== 'object') {
+          throw new WriteValidationError('Invalid batch item');
+        }
+        assertValidId(id, 'note id');
+        if (rawItem.baseUpdatedTime !== undefined && (typeof rawItem.baseUpdatedTime !== 'number' || !Number.isFinite(rawItem.baseUpdatedTime))) {
+          throw new WriteValidationError('Invalid baseUpdatedTime');
+        }
+        if (rawItem.parentId !== undefined && typeof rawItem.parentId !== 'string') {
+          throw new WriteValidationError('Invalid notebook id');
+        }
+        if (rawItem.title !== undefined && typeof rawItem.title !== 'string') {
+          throw new WriteValidationError('Invalid note title');
+        }
+
+        const itemAddTags = parseTagList(rawItem.addTags, 'addTags');
+        const itemRemoveTags = parseTagList(rawItem.removeTags, 'removeTags');
+        const effectiveAddTags = mergeTagLists(addTags, itemAddTags);
+        const effectiveRemoveTags = mergeTagLists(removeTags, itemRemoveTags);
+
+        const current = await this.fetchFreshOfType(sessionId, id, JoplinItemType.Note);
+        if (rawItem.baseUpdatedTime !== undefined && current.updatedTime !== rawItem.baseUpdatedTime) {
+          noteCache.upsertItem(sessionId, current);
+          return { id, status: 'conflict', error: 'The note was changed elsewhere since you opened it' };
+        }
+
+        const targetParentId = rawItem.parentId !== undefined ? rawItem.parentId : request.parentId;
+        if (targetParentId !== undefined) {
+          await ensureNotebook(targetParentId);
+        }
+
+        if (effectiveAddTags.length > 0 && !request.restore) {
+          if (current.deletedTime > 0) {
+            throw new WriteValidationError(`Note not found: ${id}`, 404);
+          }
+          if (targetParentId === undefined) {
+            await this.assertNoteNotInTrash(sessionId, current);
+          }
+        }
+
+        if (request.restore && targetParentId === undefined) {
+          await this.restoreTrashedAncestors(sessionId, current, restoreFolderOnce);
+        }
+
+        const props = { ...current.properties };
+        let dirty = false;
+        let nextTitle = current.title;
+
+        if (request.restore && current.deletedTime > 0) {
+          props.deleted_time = '0';
+          dirty = true;
+        }
+        if (this.applyParentChange(props, current, targetParentId)) {
+          dirty = true;
+        }
+        if (rawItem.title !== undefined) {
+          const sanitized = sanitizeTitle(rawItem.title);
+          if (sanitized !== current.title) {
+            nextTitle = sanitized;
+            dirty = true;
+          }
+        }
+        if (request.trash && !(current.deletedTime > 0)) {
+          props.deleted_time = String(Date.now());
+          dirty = true;
+        }
+
+        let updatedTime = current.updatedTime;
+        if (dirty) {
+          touch(props);
+          const written = await this.write(sessionId, {
+            type_: JoplinItemType.Note,
+            title: nextTitle,
+            body: current.body,
+            properties: props,
+          });
+          updatedTime = written.updatedTime;
+        }
+
+        let addedTags: string[] | undefined;
+        if (effectiveAddTags.length > 0) {
+          addedTags = [];
+          for (const tagTitle of effectiveAddTags) {
+            const tag = await getOrCreateTag(tagTitle);
+            if (await this.linkTagItemToNote(sessionId, id, tag.id)) {
+              addedTags.push(tag.title);
+            }
+          }
+        }
+
+        if (effectiveRemoveTags.length > 0) {
+          const entry = await noteCache.getEntry(sessionId);
+          for (const tagTitle of effectiveRemoveTags) {
+            const tag = Array.from(entry.tags.values()).find(
+              (t) => t.title.trim().toLowerCase() === tagTitle.toLowerCase()
+            );
+            if (!tag) continue;
+            if (tag.properties.encryption_applied === '1' || entry.encryptedItemIds.has(tag.id)) {
+              throw new WriteValidationError('This item is end-to-end encrypted and cannot be edited here', 422);
+            }
+            await this.unlinkTagLinks(sessionId, id, tag.id);
+          }
+        }
+
+        return {
+          id,
+          status: 'ok',
+          updatedTime,
+          ...(addedTags !== undefined ? { addedTags } : {}),
+        };
+      } catch (err) {
+        return this.mapBatchItemError(sessionId, id, err);
+      }
+    };
+
+    return mapLimit(request.items, BATCH_CONCURRENCY, (rawItem) => {
+      const key = typeof rawItem?.id === 'string' && rawItem.id ? rawItem.id : '';
+      return key ? runPerNote(key, () => processItem(rawItem)) : processItem(rawItem);
+    });
+  }
+
+  private async isSessionInvalid(sessionId: string, err: JoplinAuthError): Promise<boolean> {
+    if (err.status === 401) return true;
+    try {
+      return !(await joplinApi.checkSession(sessionId));
+    } catch {
+      return false;
+    }
+  }
+
+  private async mapBatchItemError(sessionId: string, id: string, err: unknown): Promise<BatchNoteResult> {
+    if (err instanceof JoplinAuthError) {
+      if (await this.isSessionInvalid(sessionId, err)) {
+        throw err;
+      }
+      return { id, status: 'error', error: 'Joplin Server refused this request' };
+    }
+    if (err instanceof ConflictError) {
+      return { id, status: 'conflict', error: err.message };
+    }
+    if (err instanceof WriteValidationError) {
+      return { id, status: 'error', error: err.message };
+    }
+    if (err instanceof JoplinNotFoundError) {
+      return { id, status: 'error', error: `Note not found: ${id}` };
+    }
+    if (err instanceof JoplinConnectionError) {
+      return { id, status: 'error', error: 'Cannot connect to Joplin Server' };
+    }
+    if (err instanceof JoplinApiError) {
+      return {
+        id,
+        status: 'error',
+        error: err.status < 500 ? err.message : 'The request to Joplin Server failed',
+      };
+    }
+    console.error(`[NoteWriter] Unexpected batch error for note ${id}:`, err);
+    return { id, status: 'error', error: 'Unexpected error while updating note' };
   }
 
   public async renameTag(sessionId: string, tagId: string, title: string): Promise<{ id: string; title: string }> {

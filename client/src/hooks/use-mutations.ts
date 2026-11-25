@@ -1,5 +1,7 @@
 import { useMutation, useQueryClient, QueryClient } from "@tanstack/react-query";
 import {
+  BATCH_CHUNK_SIZE,
+  batchUpdateNotes,
   createNote,
   updateNote,
   deleteNote,
@@ -15,7 +17,7 @@ import {
   deleteTag,
   NoteUpdate,
 } from "@/lib/api";
-import { Note, NoteListItem, SearchResult } from "@/lib/types";
+import { BatchNoteRequest, BatchNoteResult, Note, NoteListItem, SearchResult } from "@/lib/types";
 import { NOTES_QUERY_KEY } from "./use-notes";
 import { NOTEBOOKS_QUERY_KEY } from "./use-notebooks";
 import { TAGS_QUERY_KEY } from "./use-tags";
@@ -204,6 +206,46 @@ export function useDeleteTag() {
     onSuccess: () => {
       invalidateLists(queryClient);
       queryClient.invalidateQueries({ queryKey: ["note"] });
+    },
+  });
+}
+
+export interface BulkUpdateProgress {
+  completed: number;
+  total: number;
+}
+
+export interface BulkUpdateVariables extends BatchNoteRequest {
+  onProgress?: (progress: BulkUpdateProgress) => void;
+}
+
+/**
+ * Applies a bulk note operation in chunks of up to 1000 items, reporting progress and
+ * invalidating affected lists and open notes once per batch.
+ */
+export function useBulkUpdateNotes() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ onProgress, ...request }: BulkUpdateVariables): Promise<BatchNoteResult[]> => {
+      const total = request.items.length;
+      const results: BatchNoteResult[] = [];
+      let completedChunks = 0;
+      onProgress?.({ completed: 0, total });
+      try {
+        for (let offset = 0; offset < total; offset += BATCH_CHUNK_SIZE) {
+          const chunk = request.items.slice(offset, offset + BATCH_CHUNK_SIZE);
+          const chunkResults = await batchUpdateNotes({ ...request, items: chunk });
+          completedChunks++;
+          results.push(...chunkResults);
+          onProgress?.({ completed: results.length, total });
+        }
+        return results;
+      } finally {
+        if (completedChunks > 0) {
+          invalidateLists(queryClient);
+          queryClient.invalidateQueries({ queryKey: ["note"] });
+        }
+      }
     },
   });
 }

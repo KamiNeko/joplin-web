@@ -14,9 +14,11 @@ import { accountRouter } from './routes/account.js';
 import { createAuthRouter } from './routes/auth.js';
 import { notebooksRouter } from './routes/notebooks.js';
 import { notesRouter } from './routes/notes.js';
+import { createOrganizeRouter } from './routes/organize.js';
 import { resourcesRouter } from './routes/resources.js';
 import { searchRouter } from './routes/search.js';
 import { tagsRouter } from './routes/tags.js';
+import { organizerService, OrganizerService } from './services/organizer.js';
 
 /**
  * Builds the Content-Security-Policy directives that differ from helmet's defaults.
@@ -41,7 +43,11 @@ export function cspDirectives(
 /**
  * Creates the Express application (API, static client, security middleware) for a configuration
  */
-export function createApp(config: AppConfig): Express {
+export function createApp(config: AppConfig, deps: { organizer?: OrganizerService } = {}): Express {
+  const organizer = deps.organizer ?? organizerService;
+  if (organizer.isEnabled()) {
+    organizer.resumeFromDiskOnStartup();
+  }
   const app = express();
 
   // Behind a reverse proxy, req.ip/req.secure come from X-Forwarded-* only when configured
@@ -114,6 +120,7 @@ export function createApp(config: AppConfig): Express {
   app.use('/api/account', accountRouter);
   app.use('/api/notebooks', notebooksRouter);
   app.use('/api/notes', notesRouter);
+  app.use('/api/organize', createOrganizeRouter(organizer));
   app.use('/api/tags', tagsRouter);
   app.use('/api/search', searchRouter);
   app.use('/api/resources', resourcesRouter);
