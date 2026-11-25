@@ -1,12 +1,17 @@
 import { readFile } from "node:fs/promises";
 import { expect, Page, test } from "@playwright/test";
-import { demoId, signIn, uniqueWord } from "./helpers";
+import { demoId, expandSidebar, signIn, uniqueWord } from "./helpers";
+
+/** A note's row in the list (its title also shows in the open note on desktop) */
+const listedNote = (page: Page, title: string) => page.getByRole("heading", { level: 3, name: title, exact: true });
 
 /** Opens the Reading List notebook and waits until its notes are listed */
 async function openReadingList(page: Page) {
   await page.getByRole("complementary").first().getByRole("button", { name: /^Reading List/ }).click();
   await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-reading")}(/|$)`));
-  await expect(page.getByText("Book Notes: Deep Work")).toBeVisible();
+  // The previous list (All Notes) lists the same note until the new one renders
+  await expect(page.getByRole("heading", { level: 2, name: "Reading List" })).toBeVisible();
+  await expect(listedNote(page, "Book Notes: Deep Work")).toBeVisible();
 }
 
 /** Creates a note in the current list; it opens in the editor */
@@ -28,7 +33,7 @@ test.describe("sign-in", () => {
     await expect(page.getByText("Invalid email or password", { exact: false })).toBeVisible();
 
     await signIn(page);
-    await expect(page).toHaveURL(/\/notes$/);
+    await expect(page).toHaveURL(/\/notes(\/[0-9a-f]{32})?$/);
     await expect(page.getByRole("heading", { name: "All Notes" })).toBeVisible();
   });
 
@@ -40,6 +45,8 @@ test.describe("sign-in", () => {
     await signIn(page, page.url());
     await expect(page).toHaveURL(new RegExp(`${roadmap}$`));
     await expect(page.getByRole("heading", { level: 1, name: "Website Relaunch Roadmap" })).toBeVisible();
+    // Ancestors of the opened nested notebook stay expanded automatically
+    await expect(page.getByRole("complementary").first().getByRole("button", { name: /^Projects\b/ })).toBeVisible();
 
     await page.getByRole("button", { name: "User account menu" }).click();
     await page.getByRole("menuitem", { name: "Sign Out" }).click();
@@ -53,16 +60,34 @@ test("browses notebooks and tags of the demo data", async ({ page }) => {
   await signIn(page);
   const sidebar = page.getByRole("complementary").first();
 
+  // Tree and Tags start collapsed (with the tag count badge visible)
+  await expect(sidebar.getByRole("button", { name: /^Recipes/ })).toHaveCount(0);
+  const tagsHeader = sidebar.getByRole("button", { name: /^Tags\b/i });
+  await expect(tagsHeader).toHaveAttribute("aria-expanded", "false");
+  await expect(tagsHeader).toContainText("6");
+  await expect(sidebar.getByRole("button", { name: /^books\b/ })).toHaveCount(0);
+
+  await sidebar.getByRole("button", { name: "Expand Personal" }).click();
   await sidebar.getByRole("button", { name: /^Recipes/ }).click();
-  await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-recipes")}$`));
-  await expect(page.getByText("Weeknight Miso Ramen")).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-recipes")}/notes/[0-9a-f]{32}$`));
+  await expect(listedNote(page, "Weeknight Miso Ramen")).toBeVisible();
   await expect(page.getByText("Website Relaunch Roadmap")).toHaveCount(0);
 
+  // Keyboard toggle expands Tags; persisted Personal stays expanded after reload
+  await tagsHeader.press("Enter");
+  await expect(tagsHeader).toHaveAttribute("aria-expanded", "true");
   await sidebar.getByRole("button", { name: /^books\b/ }).click();
-  await expect(page).toHaveURL(new RegExp(`/notes\\?tag=${demoId("tag-books")}$`));
-  await expect(page.getByText("Book Notes: Deep Work")).toBeVisible();
-  await expect(page.getByText("Books to Read in 2026")).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`/notes/[0-9a-f]{32}\\?tag=${demoId("tag-books")}$`));
+  await expect(listedNote(page, "Book Notes: Deep Work")).toBeVisible();
+  await expect(listedNote(page, "Books to Read in 2026")).toBeVisible();
   await expect(page.getByText("Weeknight Miso Ramen")).toHaveCount(0);
+
+  // Direct /tags/:id URL auto-expands Tags even when collapsed in storage
+  await page.evaluate(() => localStorage.removeItem("joplin-sidebar-tags-expanded"));
+  await page.goto(`/tags/${demoId("tag-cooking")}`);
+  await expect(page).toHaveURL(new RegExp(`/notes\\?tag=${demoId("tag-cooking")}$`));
+  await expect(sidebar.getByRole("button", { name: /^Tags\b/i })).toHaveAttribute("aria-expanded", "true");
+  await expect(sidebar.getByRole("button", { name: /^cooking\b/ })).toBeVisible();
 });
 
 test("creates, edits, tags, finds, trashes and restores a note", async ({ page }) => {
@@ -80,7 +105,7 @@ test("creates, edits, tags, finds, trashes and restores a note", async ({ page }
   await page.getByLabel("Note title").fill(title);
   await page.locator(".cm-content").click();
   await page.keyboard.type(`Written by the smoke test: ${word}`);
-  await page.getByRole("button", { name: "Done" }).click();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
   await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
   await expect(page.locator(".prose-content").getByText(`Written by the smoke test: ${word}`)).toBeVisible();
 
@@ -90,12 +115,14 @@ test("creates, edits, tags, finds, trashes and restores a note", async ({ page }
   await page.getByLabel("Add tag").press("Enter");
   await page.getByLabel("Add tag").press("Escape");
   await expect(page.getByRole("button", { name: `#${tag}` })).toBeVisible();
+  await sidebar.getByRole("button", { name: /^Tags\b/i }).click();
   await expect(sidebar.getByRole("button", { name: new RegExp(`^${tag}\\s*, 1 note$`) })).toBeVisible();
 
   // Edits survive a reload, so they reached the (mock) Joplin Server
   await page.reload();
   await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
   await expect(page.getByRole("button", { name: `#${tag}` })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: new RegExp(`^${tag}\\s*, 1 note$`) })).toBeVisible();
 
   // Find it through search from another list
   await sidebar.getByRole("button", { name: "All Notes" }).click();
@@ -122,6 +149,96 @@ test("creates, edits, tags, finds, trashes and restores a note", async ({ page }
   await expect(page.getByText(title).first()).toBeVisible();
 });
 
+test("selects multiple notes, moves them in bulk and undoes the move", async ({ page }) => {
+  await expandSidebar(page.context());
+  await signIn(page);
+  const sidebar = page.getByRole("complementary").first();
+
+  await sidebar.getByRole("button", { name: /^Recipes/ }).click();
+  await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-recipes")}(/|$)`));
+  await expect(page.getByRole("heading", { level: 2, name: "Recipes" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 3, name: "Weeknight Miso Ramen", exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await page.getByRole("checkbox", { name: "Select Weeknight Miso Ramen" }).click();
+  await page.getByRole("checkbox", { name: "Select Sourdough Starter Schedule" }).click();
+  await expect(page.getByText("2 selected")).toBeVisible();
+
+  await page.getByRole("button", { name: "Move to…" }).click();
+  await page.getByRole("list", { name: "Destination" }).getByRole("button", { name: "Projects" }).click();
+
+  await expect(page.getByText("Moved 2 notes")).toBeVisible();
+  await expect(page.getByText("This notebook is empty")).toBeVisible();
+
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(page.getByText("Moved back 2 notes")).toBeVisible();
+  await expect(page.getByRole("heading", { level: 3, name: "Weeknight Miso Ramen", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 3, name: "Sourdough Starter Schedule", exact: true })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: /^Recipes\s*, 2 notes$/ })).toBeVisible();
+});
+
+test("selects multiple notes, runs Auto-organize, applies and undoes", async ({ page }) => {
+  await expandSidebar(page.context());
+  await signIn(page);
+  const sidebar = page.getByRole("complementary").first();
+
+  await sidebar.getByRole("button", { name: /^Work\s*, 2 notes$/ }).click();
+  await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-work")}(/|$)`));
+  await expect(page.getByRole("heading", { level: 2, name: "Work" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await page.getByRole("checkbox", { name: "Select 2024_03_11.pdf" }).click();
+  await page.getByRole("checkbox", { name: "Select Markdown Extras: Math, Diagrams & More" }).click();
+  await expect(page.getByText("2 selected")).toBeVisible();
+
+  await page.getByRole("region", { name: "Bulk actions" }).getByRole("button", { name: "Auto-organize" }).click();
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("Auto-organize 2 notes")).toBeVisible();
+  await expect(dialog.getByRole("checkbox", { name: /Work/ })).toBeChecked();
+  await expect(dialog.getByRole("note")).toContainText("OCR text");
+  await dialog.getByRole("button", { name: "Start organizing (2)" }).click();
+
+  await expect(page).toHaveURL(/\/organize\/[0-9a-f]+$/);
+  await expect(page.getByText("Analysed 2 / 2")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Very high (>= 0.85) (1)" })).toBeVisible();
+
+  // High-confidence OCR invoice starts ticked; low-confidence reference note starts unticked
+  await expect(page.getByRole("checkbox", { name: "Select 2024_03_11.pdf" })).toBeChecked();
+  await expect(page.getByLabel("Suggested title for 2024_03_11.pdf")).toHaveValue(
+    "2024-03-11 Acme Cloud Services – Dedicated Backup Storage Invoice"
+  );
+  await expect(page.getByRole("checkbox", { name: "Select Markdown Extras: Math, Diagrams & More" })).not.toBeChecked();
+
+  await page.getByRole("button", { name: "Apply selected (1)" }).click();
+  await expect(page.getByText("Applied changes to 1 note")).toBeVisible();
+  await expect(page.getByText("Applied", { exact: true })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: /^Work\s*, 1 note$/ })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: /^Projects\s*, 3 notes$/ })).toBeVisible();
+
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(page.getByText("Reverted 1 note")).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: /^Work\s*, 2 notes$/ })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: /^Projects\s*, 2 notes$/ })).toBeVisible();
+
+  await page.getByRole("link", { name: "All jobs" }).click();
+  await expect(page).toHaveURL(/\/organize$/);
+  await expect(page.getByRole("heading", { name: "Auto-organize jobs" })).toBeVisible();
+
+  await sidebar.getByRole("button", { name: /^Work\s*, 2 notes$/ }).click();
+  await expect(page.getByText("2024_03_11.pdf").first()).toBeVisible();
+});
+
+test("finds a note via its attachment OCR text", async ({ page }) => {
+  await signIn(page);
+  await page.getByRole("searchbox", { name: "Search notes" }).fill("Backup Storage");
+  await expect(page.getByText("1 found")).toBeVisible();
+  await expect(page.getByText("Found in attachment:")).toBeVisible();
+  await page.getByRole("button", { name: /2024_03_11\.pdf/ }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "2024_03_11.pdf" })).toBeVisible();
+  await page.getByRole("button", { name: "Clear search" }).first().click();
+});
+
 test("attaches a file to a note", async ({ page }) => {
   const word = uniqueWord("attach");
   await signIn(page);
@@ -136,7 +253,7 @@ test("attaches a file to a note", async ({ page }) => {
   });
   // The placeholder becomes a link to the new resource
   await expect(page.locator(".cm-content")).toContainText(new RegExp(`\\[${word}\\.txt\\]\\(:/[0-9a-f]{32}\\)`));
-  await page.getByRole("button", { name: "Done" }).click();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
 
   // The rendered note links the attachment; clicking it downloads the uploaded file
   const download = page.waitForEvent("download");
@@ -150,6 +267,7 @@ test("navigates on a phone between menu, list and note @phone", async ({ page })
 
   await page.getByRole("button", { name: "Toggle navigation menu" }).click();
   const menu = page.getByRole("dialog", { name: "Navigation Menu" });
+  await menu.getByRole("button", { name: "Expand Personal" }).click();
   await menu.getByRole("button", { name: /^Travel/ }).click();
   await expect(menu).toBeHidden();
 
@@ -161,4 +279,30 @@ test("navigates on a phone between menu, list and note @phone", async ({ page })
   await page.getByRole("button", { name: "Close note view" }).click();
   await expect(page.getByRole("textbox", { name: "Filter this list" })).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`/notebooks/${demoId("nb-travel")}$`));
+});
+
+test("a long notebook name truncates and keeps its note count inside the sidebar", async ({ page }) => {
+  await signIn(page);
+  // Cookie-authenticated writes need the page's Origin, like the browser sends (CSRF check)
+  const headers = { Origin: new URL(page.url()).origin };
+  const prefix = uniqueWord("long");
+  const created = await page.request.post("/api/notebooks", {
+    headers,
+    data: { title: `${prefix} ${"with a very long notebook name ".repeat(4)}` },
+  });
+  expect(created.ok()).toBeTruthy();
+  const { id } = await created.json();
+  const note = await page.request.post("/api/notes", { headers, data: { title: "In a long notebook", parentId: id } });
+  expect(note.ok()).toBeTruthy();
+  await page.reload();
+
+  const sidebar = page.locator("aside").first();
+  const label = sidebar.getByRole("button", { name: new RegExp(`^${prefix}`) });
+  const count = label.locator("xpath=..").locator(':scope > [aria-hidden="true"]');
+  await expect(count).toHaveText("1");
+  const [countBox, sidebarBox] = await Promise.all([count.boundingBox(), sidebar.boundingBox()]);
+  // The count stays clear of the sidebar's padding and divider instead of being pushed under them
+  expect(countBox!.x + countBox!.width).toBeLessThanOrEqual(sidebarBox!.x + sidebarBox!.width - 12);
+
+  await page.request.delete(`/api/notebooks/${id}`, { headers });
 });

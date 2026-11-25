@@ -49,6 +49,23 @@ export interface NoteListItem {
   encrypted?: boolean;
   /** To-do due date in Unix ms; 0 or missing when none is set */
   todoDue?: number;
+  /** First image or PDF attachment the body links to, shown as the card's thumbnail */
+  thumbnail?: { resourceId: string; kind: "image" | "pdf" };
+  /** Linked tag ids (omitted when the note has no tags) */
+  tagIds?: string[];
+}
+
+export interface NotebookBreadcrumb {
+  id: string;
+  title: string;
+}
+
+export interface NoteBacklink {
+  id: string;
+  title: string;
+  parentId: string;
+  updatedTime: number;
+  snippet: string;
 }
 
 /**
@@ -66,6 +83,8 @@ export interface Note {
   parentId: string;
   notebookId: string;
   notebookTitle: string;
+  notebookPath?: NotebookBreadcrumb[];
+  backlinks?: NoteBacklink[];
   tags: Tag[];
   isTodo: boolean;
   todoCompleted: boolean;
@@ -79,6 +98,8 @@ export interface Note {
   encrypted?: boolean;
   /** To-do due date in Unix ms; 0 or missing when none is set */
   todoDue?: number;
+  /** Raw Joplin note properties (source_url, author, location, etc.) */
+  properties?: Record<string, string>;
 }
 
 /** `markupLanguage` of HTML notes, e.g. pages saved with the Joplin Web Clipper */
@@ -112,6 +133,8 @@ export interface SearchResult extends NoteListItem {
   matches?: {
     inTitle: boolean;
     inBody: boolean;
+    /** Set to "attachment" when the terms matched only in linked attachments' OCR text */
+    matchedIn?: "attachment";
     snippet?: string;
     /** Lower-cased words and phrases the note matched (empty for filter-only queries) */
     terms?: string[];
@@ -119,8 +142,372 @@ export interface SearchResult extends NoteListItem {
 }
 
 /**
- * Login response payload from API. The session itself is set as an httpOnly cookie.
+ * Item payload inside POST /api/notes/batch.
  */
-export interface LoginResponse {
-  userId: string;
+export interface BatchNoteItem {
+  id: string;
+  baseUpdatedTime?: number;
+  parentId?: string;
+  title?: string;
+  addTags?: string[];
+  removeTags?: string[];
+}
+
+/**
+ * Request body for POST /api/notes/batch.
+ */
+export interface BatchNoteRequest {
+  items: BatchNoteItem[];
+  parentId?: string;
+  addTags?: string[];
+  removeTags?: string[];
+  trash?: boolean;
+  restore?: boolean;
+}
+
+/**
+ * Per-note result returned by POST /api/notes/batch.
+ */
+export interface BatchNoteResult {
+  id: string;
+  status: "ok" | "conflict" | "error";
+  updatedTime?: number;
+  error?: string;
+  addedTags?: string[];
+}
+
+/**
+ * Available two-factor authentication methods.
+ */
+export type TwoFactorMethod = "passkey" | "totp" | "recovery";
+
+export interface TwoFactorChallenge {
+  required: true;
+  methods: TwoFactorMethod[];
+  mustEnroll: boolean;
+  passkeysAvailable?: boolean;
+}
+
+/**
+ * Login response payload from API. The session itself is set as an httpOnly cookie when complete,
+ * or enters a server-side pending state when two-factor verification or enrollment is needed.
+ */
+export type LoginResponse =
+  | {
+      userId: string;
+      twoFactor?: undefined;
+    }
+  | {
+      twoFactor: TwoFactorChallenge;
+    };
+
+export interface TwoFactorStatus {
+  persistenceEnabled: boolean;
+  require2fa: boolean;
+  passkeysAvailable: boolean;
+  enrolled: {
+    totp: boolean;
+    passkeysCount: number;
+    recoveryCodesRemaining: number;
+  };
+  methods: TwoFactorMethod[];
+  stepUpValid: boolean;
+  stepUpExpiresAt: number | null;
+}
+
+export interface PasskeyItem {
+  id: string;
+  name: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+}
+
+export interface TrustedDeviceItem {
+  id: string;
+  label: string;
+  createdAt: number;
+  lastUsedAt: number;
+  expiresAt: number;
+  current: boolean;
+}
+
+export interface TotpSetupResponse {
+  secret: string;
+  otpauthUri: string;
+  qrDataUrl: string;
+}
+
+export interface TwoFactorCompleteResponse {
+  verified?: boolean;
+  enrolled?: boolean;
+  userId?: string;
+  stepUpExpiresAt?: number;
+  recoveryCodes?: string[];
+  recoveryCodesRemaining?: number;
+  passkey?: PasskeyItem;
+}
+
+export interface OrganizeStatus {
+  enabled: boolean;
+  model?: string;
+}
+
+export type OrganizeJobStatus = "running" | "done" | "cancelled" | "failed";
+export type OrganizeItemStatus = "pending" | "running" | "done" | "failed";
+
+export interface OrganizeSuggestion {
+  title: string;
+  notebookId: string;
+  tags: string[];
+  confidence: number;
+  documentDate: string | null;
+  reason: string;
+}
+
+export interface OrganizeJobItem {
+  noteId: string;
+  currentTitle: string;
+  currentNotebookId: string;
+  currentNotebookPath: string;
+  updatedTime: number;
+  status: OrganizeItemStatus;
+  error?: string;
+  skipped?: boolean;
+  suggestion?: OrganizeSuggestion;
+  applied?: boolean;
+  applyStatus?: "ok" | "conflict" | "error";
+  applyError?: string;
+}
+
+export interface OrganizeUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+export interface OrganizeJobProgress {
+  total: number;
+  done: number;
+  failed: number;
+}
+
+export interface OrganizeJobSummary {
+  id: string;
+  status: OrganizeJobStatus;
+  error?: string;
+  progress: OrganizeJobProgress;
+  appliedCount: number;
+  usage: OrganizeUsage;
+  canUndo: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface OrganizeJobResponse {
+  id: string;
+  status: OrganizeJobStatus;
+  error?: string;
+  excludeNotebookIds: string[];
+  progress: OrganizeJobProgress;
+  appliedCount?: number;
+  retryableFailedCount?: number;
+  usage: OrganizeUsage;
+  offset: number;
+  limit: number;
+  totalItems: number;
+  canUndo: boolean;
+  createdAt: number;
+  updatedAt: number;
+  items: OrganizeJobItem[];
+}
+
+export interface OrganizeRetryResponse {
+  id: string;
+  status: OrganizeJobStatus;
+  requeuedCount: number;
+}
+
+export interface OrganizeDeleteResponse {
+  id: string;
+  deleted: boolean;
+}
+
+export interface OrganizeApplyItemInput {
+  noteId: string;
+  title?: string;
+  notebookId?: string;
+  addTags?: string[];
+  baseUpdatedTime?: number;
+}
+
+export interface OrganizeApplyResponse {
+  results: BatchNoteResult[];
+  appliedCount: number;
+  conflictCount: number;
+  errorCount: number;
+  canUndo: boolean;
+}
+
+export interface OrganizeUndoResponse {
+  results: BatchNoteResult[];
+  revertedCount: number;
+  conflictCount: number;
+  errorCount: number;
+  canUndo: boolean;
+}
+
+export interface SavedSearch {
+  id: string;
+  name: string;
+  query: string;
+  createdAt: number;
+}
+
+export interface RecentReadEntry {
+  noteId: string;
+  readAt: number;
+}
+
+export interface FavoriteNotebookSummary {
+  id: string;
+  title: string;
+  parentId: string;
+  noteCount: number;
+  encrypted: boolean;
+}
+
+export interface UserPreferences {
+  favoriteNoteIds: string[];
+  favoriteNotebookIds: string[];
+  savedSearches: SavedSearch[];
+  recentReads: RecentReadEntry[];
+  scratchpad: string;
+  favoriteNotes: NoteListItem[];
+  favoriteNotebooks: FavoriteNotebookSummary[];
+}
+
+export interface RecentReadNote extends NoteListItem {
+  readAt: number;
+}
+
+export interface RecentNotesResponse {
+  recentRead: RecentReadNote[];
+  recentCreated: NoteListItem[];
+}
+
+export type NoteAttachmentKind = "image" | "pdf" | "audio" | "video" | "file";
+export type AttachmentOcrStatus = "pending" | "done" | "failed" | "skipped";
+
+export interface NoteAttachment {
+  id: string;
+  title: string;
+  mime: string;
+  filename: string;
+  fileExtension: string;
+  size: number;
+  updatedTime: number;
+  ocrText: string;
+  ocrStatus?: AttachmentOcrStatus;
+  kind: NoteAttachmentKind;
+}
+
+export interface NoteRevisionMeta {
+  id: string;
+  itemId: string;
+  titleUpdatedTime: number;
+  updatedTime: number;
+  createdTime: number;
+}
+
+export interface NoteRevisionDetail {
+  id: string;
+  itemId: string;
+  title: string;
+  body: string;
+  updatedTime: number;
+  createdTime: number;
+}
+
+export interface TodoTaskItem extends NoteListItem {
+  notebookTitle: string;
+}
+
+export interface InlineTaskItem {
+  noteId: string;
+  noteTitle: string;
+  parentId: string;
+  notebookTitle: string;
+  line: number;
+  column: number;
+  text: string;
+  checked: boolean;
+  updatedTime: number;
+}
+
+export interface TasksResponse {
+  todoNotes: TodoTaskItem[];
+  inlineTasks: InlineTaskItem[];
+}
+
+export interface HygieneNoteItem extends NoteListItem {
+  notebookTitle: string;
+  previewLength?: number;
+}
+
+export interface DuplicateCluster {
+  id: string;
+  reason: "exact-title" | "similar-content";
+  score: number;
+  notes: HygieneNoteItem[];
+}
+
+export interface HygieneReport {
+  duplicateClusters: DuplicateCluster[];
+  emptyNotes: HygieneNoteItem[];
+  untaggedNotes: HygieneNoteItem[];
+}
+
+export interface AiFeatureStatus {
+  enabled: boolean;
+  model?: string;
+  transcribeEnabled?: boolean;
+  transcribeModel?: string;
+}
+
+export interface AudioTranscribeResponse {
+  text: string;
+  model: string;
+  usage?: OrganizeUsage;
+}
+
+export interface AskNotesCitation {
+  id: string;
+  title: string;
+  notebookTitle: string;
+  updatedTime: number;
+  excerpt: string;
+}
+
+export interface AskNotesResponse {
+  answer: string;
+  citations: AskNotesCitation[];
+  usage?: OrganizeUsage;
+}
+
+export type NoteAssistAction = "summarize" | "action-items" | "suggest-tags" | "cleanup";
+
+export interface NoteAssistResponse {
+  result: string;
+  tags?: string[];
+  usage?: OrganizeUsage;
+}
+
+export interface ClipResponse {
+  note: Note;
+  extractedTitle: string;
+  siteName?: string;
+}
+
+export interface EmailIngestResponse {
+  note: Note;
 }

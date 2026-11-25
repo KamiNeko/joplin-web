@@ -67,3 +67,7 @@ docker-compose.override.yml
 test_api.ps1
 *.tmp
 *.temp
+
+# Python
+__pycache__/
+*.py[cod]

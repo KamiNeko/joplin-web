@@ -11,7 +11,7 @@ export function LoginPage() {
   // Return to the page the user was on (e.g. the open note after an expired session)
   const fromPath = (location.state as { from?: { pathname?: unknown } } | null)?.from?.pathname;
   const target =
-    typeof fromPath === "string" && /^\/(notes|notebooks|trash)(\/|$)/.test(fromPath) ? fromPath : "/notes";
+    typeof fromPath === "string" && /^\/(notes|notebooks|tags|trash)(\/|$)/.test(fromPath) ? fromPath : "/notes";
 
   useEffect(() => {
     if (!isLoading && isAuthenticated) {

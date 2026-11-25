@@ -1,16 +1,28 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Header } from "./Header";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { MOBILE_SEARCH_INPUT_ID } from "@/lib/ui-constants";
+import { NotebookBreadcrumb } from "@/lib/types";
 import { useAutoRefresh } from "@/hooks/use-connection";
+import { useAiStatus } from "@/hooks/use-workspace";
 import { ConnectionBanner } from "./ConnectionBanner";
 import { ReadOnlyBanner } from "./ReadOnlyBanner";
+import { CommandPalette } from "@/components/common/CommandPalette";
+import { AskNotesDrawer } from "@/components/ai/AskNotesDrawer";
 
 interface AppLayoutProps {
-  sidebar: (props: { onCloseMobile?: () => void }) => React.ReactNode;
+  sidebar: (props: {
+    onCloseMobile?: () => void;
+    aiEnabled?: boolean;
+    onOpenAskAi?: () => void;
+  }) => React.ReactNode;
   children: React.ReactNode;
   notebookTitle?: string;
+  notebookPath?: NotebookBreadcrumb[];
   noteTitle?: string;
+  onSelectNotebook?: (notebookId: string) => void;
+  defaultAiNotebookId?: string | null;
+  defaultAiTagId?: string | null;
   searchQuery: string;
   onSearchChange: (query: string) => void;
   /** Search results are shown instead of the selected list */
@@ -24,7 +36,11 @@ export function AppLayout({
   sidebar,
   children,
   notebookTitle,
+  notebookPath,
   noteTitle,
+  onSelectNotebook,
+  defaultAiNotebookId = null,
+  defaultAiTagId = null,
   searchQuery,
   onSearchChange,
   isSearchActive = false,
@@ -32,15 +48,34 @@ export function AppLayout({
   readOnlyReason = null,
 }: AppLayoutProps) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [askAiOpen, setAskAiOpen] = useState(false);
   // Set when the menu is opened via Ctrl+K, so its search field gets focus instead of the first item
   const focusSearchOnOpen = useRef(false);
   useAutoRefresh();
+  const { data: aiStatus } = useAiStatus();
+  const aiEnabled = Boolean(aiStatus?.enabled);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      const lower = e.key.toLowerCase();
+      if ((e.metaKey || e.ctrlKey) && ((lower === "p" && !e.shiftKey) || (lower === "k" && e.shiftKey))) {
+        e.preventDefault();
+        setPaletteOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  const openAskAi = () => setAskAiOpen(true);
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-background">
       {/* Desktop Persistent Sidebar */}
       <div className="hidden md:flex w-64 lg:w-72 shrink-0 h-full">
-        {sidebar({})}
+        {sidebar({ aiEnabled, onOpenAskAi: openAskAi })}
       </div>
 
       {/* Mobile Slide-over Sidebar (Sheet). The sidebar has its own close button, so the
@@ -60,7 +95,7 @@ export function AppLayout({
           }}
         >
           <SheetTitle className="sr-only">Navigation Menu</SheetTitle>
-          {sidebar({ onCloseMobile: () => setMobileSidebarOpen(false) })}
+          {sidebar({ onCloseMobile: () => setMobileSidebarOpen(false), aiEnabled, onOpenAskAi: openAskAi })}
         </SheetContent>
       </Sheet>
 
@@ -68,9 +103,14 @@ export function AppLayout({
       <div className="flex flex-col flex-1 h-full min-w-0 overflow-hidden">
         <Header
           notebookTitle={notebookTitle}
+          notebookPath={notebookPath}
           noteTitle={noteTitle}
           isSearchActive={isSearchActive}
           onToggleSidebar={() => setMobileSidebarOpen(true)}
+          onSelectNotebook={onSelectNotebook}
+          onOpenCommandPalette={() => setPaletteOpen(true)}
+          onOpenAskAi={openAskAi}
+          aiEnabled={aiEnabled}
           searchQuery={searchQuery}
           onSearchChange={onSearchChange}
           onOpenMobileSearch={() => {
@@ -88,6 +128,22 @@ export function AppLayout({
           {children}
         </main>
       </div>
+
+      <CommandPalette
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
+        aiEnabled={aiEnabled}
+        onOpenAskAi={openAskAi}
+      />
+
+      {aiEnabled && (
+        <AskNotesDrawer
+          open={askAiOpen}
+          onOpenChange={setAskAiOpen}
+          defaultNotebookId={defaultAiNotebookId}
+          defaultTagId={defaultAiTagId}
+        />
+      )}
     </div>
   );
 }

@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { QueryClient, useQueryClient } from "@tanstack/react-query";
 import { NoteUpdate, updateNote } from "@/lib/api";
+import { announceWrite } from "@/lib/cross-tab";
 import { Note } from "@/lib/types";
-import { invalidateLists, updateNoteInLists } from "./use-mutations";
+import { invalidateLists, invalidateOtherNotes, updateNoteInLists } from "./use-mutations";
 import { recheckWriteStateAfter } from "./use-write-state";
 
 export interface NoteSaveHandlers {
@@ -63,8 +64,16 @@ export function createNoteSaver(
           const saved = await updateNote(noteId, { ...changes, baseUpdatedTime: base ?? undefined });
           base = saved.updatedTime;
           queryClient.setQueryData(["note", noteId], toCache ? toCache(saved) : saved);
-          if (changes.parentId !== undefined || changes.todoCompleted !== undefined) invalidateLists(queryClient);
-          else updateNoteInLists(queryClient, saved);
+          if (changes.parentId !== undefined || changes.todoCompleted !== undefined) {
+            invalidateLists(queryClient);
+          } else {
+            updateNoteInLists(queryClient, saved);
+            for (const key of ["recent-notes", "tasks", "hygiene", "preferences"] as const) {
+              queryClient.invalidateQueries({ queryKey: [key], refetchType: "none" });
+            }
+            announceWrite();
+          }
+          invalidateOtherNotes(queryClient, noteId);
           onSaved?.(saved);
           return true;
         } catch (err) {

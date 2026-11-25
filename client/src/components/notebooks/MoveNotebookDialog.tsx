@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Folder, FolderTree, Loader2, Search } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -9,13 +9,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { flattenNotebooks } from "@/lib/notebooks";
 import { Notebook } from "@/lib/types";
-import { cn } from "@/lib/utils";
-
-/** Value of the "top level" choice (no parent notebook) */
-const TOP_LEVEL = "";
+import { NotebookPicker, TOP_LEVEL } from "./NotebookPicker";
 
 interface MoveNotebookDialogProps {
   /** The notebook to move; the dialog is open while it is set */
@@ -50,41 +46,8 @@ export function MoveNotebookDialog({ notebook, notebooks, isPending = false, onO
     [notebook]
   );
 
-  const query = filter.trim().toLowerCase();
-  const choices = useMemo(() => {
-    // Encrypted notebooks can't take a cleartext sub-notebook
-    const flat = flattenNotebooks(notebooks).filter((nb) => !blockedIds.has(nb.id) && !nb.encrypted);
-    return query ? flat.filter((nb) => nb.title.toLowerCase().includes(query)) : flat;
-  }, [notebooks, blockedIds, query]);
-
   const currentParent = notebook?.parentId ?? TOP_LEVEL;
   const canMove = selected !== null && selected !== currentParent && !isPending;
-
-  const option = (id: string, label: string, depth: number, icon: React.ReactNode) => {
-    const isCurrent = id === currentParent;
-    const isSelected = id === selected;
-    return (
-      <li key={id || "top-level"}>
-        <button
-          type="button"
-          disabled={isCurrent}
-          aria-pressed={isSelected}
-          onClick={() => setSelected(id)}
-          onDoubleClick={() => !isCurrent && !isPending && onMove(id)}
-          style={{ paddingLeft: `${8 + depth * 14}px` }}
-          className={cn(
-            "w-full flex items-center gap-2 rounded-md py-1.5 pr-2 text-left text-sm outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-            isSelected ? "bg-primary/15 text-foreground font-medium" : "text-foreground hover:bg-muted",
-            isCurrent && "opacity-50 cursor-not-allowed hover:bg-transparent"
-          )}
-        >
-          {icon}
-          <span className="truncate">{label}</span>
-          {isCurrent && <span className="ml-auto shrink-0 text-xs text-muted-foreground">Current</span>}
-        </button>
-      </li>
-    );
-  };
 
   return (
     <Dialog open={notebook !== null} onOpenChange={onOpenChange}>
@@ -103,29 +66,17 @@ export function MoveNotebookDialog({ notebook, notebooks, isPending = false, onO
             </DialogDescription>
           </DialogHeader>
 
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-            <Input
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              placeholder="Filter notebooks..."
-              aria-label="Filter notebooks"
-              className="h-8 pl-8 text-sm"
-            />
-          </div>
-
-          <ul
-            aria-label="Destination"
-            className="max-h-64 overflow-y-auto rounded-md border border-border p-1 space-y-0.5"
-          >
-            {!query && option(TOP_LEVEL, "Top level", 0, <FolderTree className="h-4 w-4 shrink-0 text-muted-foreground" />)}
-            {choices.map((nb) =>
-              option(nb.id, nb.title || "Untitled Folder", query ? 0 : nb.depth + 1, <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />)
-            )}
-            {query && choices.length === 0 && (
-              <li className="px-2 py-3 text-center text-xs text-muted-foreground">No matching notebooks</li>
-            )}
-          </ul>
+          <NotebookPicker
+            notebooks={notebooks}
+            selectedId={selected}
+            currentId={currentParent}
+            blockedIds={blockedIds}
+            includeTopLevel
+            filter={filter}
+            onFilterChange={setFilter}
+            onSelect={(id) => setSelected(id)}
+            onDoubleClick={(id) => !isPending && onMove(id)}
+          />
 
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={isPending}>
