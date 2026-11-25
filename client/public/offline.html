@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#201f1e" />
+    <title>Offline · Joplin Web</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --background: #faf9f5;
+        --foreground: #151514;
+        --muted: #64635e;
+        --primary: #a64e30;
+        --primary-foreground: #fff;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --background: #272725;
+          --foreground: #e7e4da;
+          --muted: #9d9b95;
+          --primary: #d97959;
+          --primary-foreground: #151514;
+        }
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: var(--background);
+        color: var(--foreground);
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        text-align: center;
+      }
+      main {
+        max-width: 22rem;
+        padding: 1.5rem;
+      }
+      svg {
+        width: 4rem;
+        height: 4rem;
+      }
+      h1 {
+        margin: 1.25rem 0 0.5rem;
+        font-size: 1.25rem;
+      }
+      p {
+        margin: 0 0 1.5rem;
+        color: var(--muted);
+        font-size: 0.875rem;
+        line-height: 1.5;
+      }
+      a {
+        display: inline-block;
+        padding: 0.5rem 1.25rem;
+        border-radius: 0.5rem;
+        background: var(--primary);
+        color: var(--primary-foreground);
+        font-size: 0.875rem;
+        font-weight: 600;
+        text-decoration: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <svg viewBox="0 0 512 512" aria-hidden="true">
+        <rect x="32" y="32" width="448" height="448" rx="100" fill="#c0603f" />
+        <g fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" transform="translate(256 256) scale(11.5) translate(-12 -12)">
+          <path d="M12 5v16" />
+          <path d="M20.001 19A2 2 0 0022 17V5a2 2 0 00-1.999-2L16 3.002A5 5 0 0012 5a5 5 0 00-4-2H4a2 2 0 00-2 2v12a2 2 0 001.999 2H8a5 5 0 014 2 5 5 0 014-2z" />
+        </g>
+      </svg>
+      <h1>You're offline</h1>
+      <p>Joplin Web needs a connection to your server. Unsaved edits stay on this device until it's back.</p>
+      <!-- An empty href reloads the page that couldn't be opened -->
+      <a href="">Try again</a>
+    </main>
+  </body>
+</html>

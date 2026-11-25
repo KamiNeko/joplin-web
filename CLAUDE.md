@@ -27,6 +27,7 @@ npm --prefix client test            # Vitest + Testing Library (jsdom), offline
 npm --prefix client run test:e2e    # Playwright smoke tests; starts the demo itself (Chrome, or E2E_EXECUTABLE_PATH)
 npm --prefix client run dev         # Vite :5173, proxies /api to API_PROXY_TARGET (default :3001)
 npm --prefix client run screenshots # README screenshots into docs/images (demo must run; SCREENSHOT_BASE_URL)
+npm --prefix client run icons       # app icons (PNG) in client/public from public/icon.svg + scripts/icon-maskable.svg
 ```
 
 Browser preview: `.claude/launch.json` has `demo-server` (API :3101) and `demo-client` (Vite :5174, proxied to :3101). Use these so you don't clash with a user's own dev servers on :3001/:5173. Demo login: `demo@joplin-web.test` / `demo` (from `server/demo/seed.ts`).
