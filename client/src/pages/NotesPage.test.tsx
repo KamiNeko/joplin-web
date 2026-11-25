@@ -269,6 +269,37 @@ describe("NotesPage", () => {
     expect(sidebar().getByRole("button", { name: /^Tags\b/i }).getAttribute("aria-expanded")).toBe("true");
     expect((await sidebar().findByRole("button", { name: "planning, 1 note" })).getAttribute("aria-current")).toBe("page");
   });
+
+  it("names the shown list in the header breadcrumb, not the open note's notebook", async () => {
+    const trips: Notebook = { id: id("6"), title: "Trips", parentId: personal.id, children: [], noteCount: 0 };
+    mockNotesApi((call) => {
+      const url = new URL(call.path, "http://localhost");
+      if (url.pathname === "/api/notebooks") return jsonResponse([work, { ...personal, children: [trips] }]);
+      // The server sends the open note's own notebook path
+      const note = notes.find((n) => url.pathname === `/api/notes/${n.id}`);
+      if (note) return jsonResponse({ ...note, notebookPath: [{ id: note.notebookId, title: note.notebookTitle }] });
+      return undefined;
+    });
+    const breadcrumb = () => within(screen.getByRole("navigation", { name: "Breadcrumb" }));
+
+    renderPage("/notes");
+    fireEvent.click(await noteRow("Lisbon trip"));
+    await waitFor(() => expect(breadcrumb().getByText("Lisbon trip")).toBeTruthy());
+    expect(breadcrumb().getByText("All Notes")).toBeTruthy();
+    expect(breadcrumb().queryByText("Personal")).toBeNull();
+
+    cleanup();
+    renderPage(`/notes?tag=${planning.id}`);
+    await waitFor(() => expect(breadcrumb().getByText("Roadmap")).toBeTruthy());
+    expect(breadcrumb().getByText("#planning")).toBeTruthy();
+    expect(breadcrumb().queryByText("Work")).toBeNull();
+
+    // A notebook shows its parents too, with or without an open note
+    cleanup();
+    renderPage(`/notebooks/${trips.id}`);
+    expect(await breadcrumb().findByRole("button", { name: "Trips" })).toBeTruthy();
+    expect(breadcrumb().getByRole("button", { name: "Personal" })).toBeTruthy();
+  });
 });
 
 describe("bulk selection and actions", () => {

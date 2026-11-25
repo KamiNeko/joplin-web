@@ -13,8 +13,8 @@ import { useSearch } from "@/hooks/use-search";
 import { BulkUpdateProgress, useBulkUpdateNotes, useCreateNote, useUpdateNote } from "@/hooks/use-mutations";
 import { useCreateSavedSearch, usePreferences, useRecordRecentRead } from "@/hooks/use-preferences";
 import { useNoteSelection } from "@/hooks/use-note-selection";
-import { findNotebookById, flattenNotebooks } from "@/lib/notebooks";
-import { BatchNoteItem, BatchNoteResult, NoteListItem } from "@/lib/types";
+import { findNotebookAncestors, findNotebookById, flattenNotebooks } from "@/lib/notebooks";
+import { BatchNoteItem, BatchNoteResult, NoteListItem, NotebookBreadcrumb } from "@/lib/types";
 import { toast } from "sonner";
 import { noteDisplayTitle } from "@/lib/format";
 import { useWriteState } from "@/hooks/use-write-state";
@@ -221,6 +221,16 @@ export function NotesPage() {
     if (currentNotebook) return currentNotebook.title;
     return undefined;
   }, [currentNotebook, selectedTagId, isTrashSelected, isConflictsSelected, tags]);
+
+  // The header names the list being shown (All Notes, a tag, a notebook with its parents), never the
+  // open note's own notebook: the note viewer shows that one
+  const notebookPath = useMemo<NotebookBreadcrumb[] | undefined>(() => {
+    if (!currentNotebook) return undefined;
+    return [...findNotebookAncestors(notebooks, currentNotebook.id), currentNotebook.id]
+      .map((nbId) => findNotebookById(notebooks, nbId))
+      .filter((nb): nb is NonNullable<typeof nb> => nb !== null)
+      .map((nb) => ({ id: nb.id, title: nb.title }));
+  }, [notebooks, currentNotebook]);
 
   const noteTitle = fullNote ? noteDisplayTitle(fullNote) : undefined;
 
@@ -543,7 +553,7 @@ export function NotesPage() {
   return (
     <AppLayout
       notebookTitle={notebookTitle}
-      notebookPath={!isSearchActive && fullNote ? fullNote.notebookPath : undefined}
+      notebookPath={notebookPath}
       noteTitle={noteTitle}
       onSelectNotebook={handleSelectNotebook}
       defaultAiNotebookId={selectedNotebookId}
