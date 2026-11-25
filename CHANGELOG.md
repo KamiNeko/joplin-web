@@ -4,6 +4,14 @@ Notable changes to Joplin Web. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Features
+
+- **Install as an app:** Joplin Web is a Progressive Web App with its own icon. Install it from Chrome or Edge, or add it to the Home Screen on iPhone and iPad, and it opens in its own window. The title bar follows the light/dark theme, and an offline page replaces the browser's error when the server can't be reached. No notes are stored for offline use.
+
+### Changed
+
+- Works behind sign-in proxies such as Cloudflare Access: the web app manifest is requested with cookies, and when the proxy's sign-in runs out while the app is open, a banner offers to reload and sign in again (before, every request failed with "Can't reach the server"). API requests no longer follow redirects.
+
 ## [1.1.1] – 2026-10-19
 
 ### Changed

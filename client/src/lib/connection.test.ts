@@ -9,6 +9,7 @@ import {
   isTemporaryFailure,
   recordNetworkError,
   recordResponse,
+  recordSignInRedirect,
   resetConnection,
   setNoteUnsaved,
   StatusInput,
@@ -18,6 +19,7 @@ const NOW = 1_700_000_000_000;
 const base: StatusInput = {
   online: true,
   sessionExpired: false,
+  signInRedirect: false,
   isFetching: false,
   isSaving: false,
   lastError: null,
@@ -61,6 +63,15 @@ describe("deriveConnectionStatus", () => {
     const busy = { ...base, isSaving: true, lastError: { message: "x", status: 0, at: NOW } };
     expect(deriveConnectionStatus({ ...busy, online: false, sessionExpired: true }).state).toBe("offline");
     expect(deriveConnectionStatus({ ...busy, sessionExpired: true }).state).toBe("expired");
+  });
+
+  it("asks for a sign-in when a sign-in proxy redirected requests", () => {
+    const busy = { ...base, isSaving: true, sessionExpired: true, lastError: { message: "x", status: 0, at: NOW } };
+    expect(deriveConnectionStatus({ ...busy, signInRedirect: true })).toEqual({
+      state: "expired",
+      label: "Sign-in required",
+    });
+    expect(deriveConnectionStatus({ ...busy, signInRedirect: true, online: false }).state).toBe("offline");
   });
 });
 
@@ -110,6 +121,16 @@ describe("connection store", () => {
     expect(getConnectionSnapshot().sessionExpired).toBe(true);
     resetConnection();
     expect(getConnectionSnapshot().sessionExpired).toBe(false);
+  });
+
+  it("flags a sign-in proxy redirect until the server answers again", () => {
+    recordSignInRedirect();
+    expect(getConnectionSnapshot().signInRedirect).toBe(true);
+    recordResponse(200, true, "");
+    expect(getConnectionSnapshot().signInRedirect).toBe(false);
+    recordSignInRedirect();
+    resetConnection();
+    expect(getConnectionSnapshot().signInRedirect).toBe(false);
   });
 
   it("counts pending writes", () => {

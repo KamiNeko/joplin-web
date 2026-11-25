@@ -39,6 +39,12 @@ export function ThemeProvider({
       root.classList.add(theme);
     }
 
+    // The installed app's title bar (and the mobile browser's toolbar) takes the header's colour
+    const headerColor = getComputedStyle(root).getPropertyValue("--sidebar-background").trim();
+    if (headerColor) {
+      document.querySelector('meta[name="theme-color"]')?.setAttribute("content", `hsl(${headerColor})`);
+    }
+
     return () => {
       window.clearTimeout(transitionTimer);
       root.classList.remove("theme-transition");

@@ -19,6 +19,11 @@ export interface ConnectionSnapshot {
   lastError: ConnectionError | null;
   /** A request was rejected with 401: the session is gone */
   sessionExpired: boolean;
+  /**
+   * A sign-in proxy in front of Joplin Web (e.g. Cloudflare Access) redirected a request to its own
+   * login page, which only a page load can show
+   */
+  signInRedirect: boolean;
 }
 
 const initialSnapshot: ConnectionSnapshot = {
@@ -26,6 +31,7 @@ const initialSnapshot: ConnectionSnapshot = {
   lastUpdatedAt: null,
   lastError: null,
   sessionExpired: false,
+  signInRedirect: false,
 };
 
 let snapshot: ConnectionSnapshot = initialSnapshot;
@@ -70,6 +76,8 @@ export function isTemporaryFailure(status: number): boolean {
 
 /** Records the outcome of a request that got an HTTP response. */
 export function recordResponse(status: number, isRead: boolean, message: string): void {
+  // An answer from Joplin Web itself means the sign-in proxy lets requests through again
+  if (snapshot.signInRedirect) update({ signInRedirect: false });
   if (status === 401) {
     if (!snapshot.sessionExpired) update({ sessionExpired: true });
   } else if (isConnectionFailure(status)) {
@@ -83,6 +91,11 @@ export function recordResponse(status: number, isRead: boolean, message: string)
 /** Records a request that never reached the server. */
 export function recordNetworkError(message: string): void {
   update({ lastError: { message, status: 0, at: Date.now() } });
+}
+
+/** Records a request that a sign-in proxy redirected to its login page. */
+export function recordSignInRedirect(): void {
+  if (!snapshot.signInRedirect) update({ signInRedirect: true });
 }
 
 /** Adjusts the number of writes in flight. */
@@ -110,6 +123,7 @@ export type ConnectionState = "offline" | "expired" | "saving" | "refreshing" | 
 export interface StatusInput {
   online: boolean;
   sessionExpired: boolean;
+  signInRedirect: boolean;
   isFetching: boolean;
   isSaving: boolean;
   lastError: ConnectionError | null;
@@ -139,6 +153,7 @@ export function formatAgo(timestamp: number, now: number): string {
  */
 export function deriveConnectionStatus(input: StatusInput): ConnectionStatus {
   if (!input.online) return { state: "offline", label: "Offline" };
+  if (input.signInRedirect) return { state: "expired", label: "Sign-in required" };
   if (input.sessionExpired) return { state: "expired", label: "Session expired" };
   if (input.isSaving) return { state: "saving", label: "Saving…" };
   if (input.isFetching) return { state: "refreshing", label: "Refreshing…" };

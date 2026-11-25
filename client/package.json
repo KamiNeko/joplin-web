@@ -12,6 +12,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "screenshots": "node scripts/screenshots.mjs",
+    "icons": "node scripts/icons.mjs",
     "test": "vitest run",
     "test:e2e": "playwright test"
   },

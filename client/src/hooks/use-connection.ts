@@ -60,6 +60,7 @@ export function useConnectionStatus(isRefreshing = false): ConnectionStatus {
   return deriveConnectionStatus({
     online,
     sessionExpired: connection.sessionExpired,
+    signInRedirect: connection.signInRedirect,
     isFetching: isRefreshing || fetching > 0,
     isSaving: connection.pendingWrites > 0,
     lastError: connection.lastError,
