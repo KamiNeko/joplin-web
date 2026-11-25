@@ -5,7 +5,11 @@
   const TEMP_ID_ATTR = 'data-joplin-clip-id';
 
   const UNSAFE_SELECTOR = 'script, style, iframe, object, embed, form, noscript, template';
-  const ADJUSTED_UNSAFE_SELECTOR = 'script, style, iframe, object, embed, form, button, noscript, template';
+  const BOILERPLATE_SELECTOR =
+    'nav, aside, footer, [role="navigation"], [role="complementary"]';
+  const ARTICLE_CLEAN_SELECTOR =
+    'script, style, iframe, object, embed, form, button, noscript, template, ' +
+    'nav, aside, footer, [role="navigation"], [role="complementary"], [aria-hidden="true"]';
 
   function pickLargestFromSrcset(srcset) {
     if (!srcset) return '';
@@ -235,13 +239,10 @@
     return cleaned.split(/\s+/).filter(Boolean).length;
   }
 
-  function summarizeContainer(root, baseUrl) {
-    const clone = root.cloneNode(true);
-    stripUnsafeElements(clone, ADJUSTED_UNSAFE_SELECTOR);
-    normalizeDomUrls(clone, baseUrl);
-    const words = countWords(clone.textContent || '');
+  function summarizeCleanedRoot(root) {
+    const words = countWords(root.textContent || '');
     const seenUrls = new Set();
-    for (const img of Array.from(clone.querySelectorAll('img[src]'))) {
+    for (const img of Array.from(root.querySelectorAll('img[src]'))) {
       const src = (img.getAttribute('src') || '').trim();
       if (src && /^(https?:|data:)/i.test(src)) {
         seenUrls.add(src);
@@ -250,14 +251,22 @@
     return { words, images: seenUrls.size };
   }
 
-  function summarizeLiveElements(elements) {
-    const baseUrl = document.baseURI || window.location.href;
+  function buildCleanedElementsWrapper(elements, baseUrl) {
+    const ordered = dedupeTopMostInDocumentOrder(elements || []);
     const wrapper = document.createElement('div');
-    for (const el of elements || []) {
+    for (const el of ordered) {
       if (!el || !el.isConnected || isLiveElementHidden(el)) continue;
       wrapper.appendChild(cloneVisibleElement(el));
     }
-    return summarizeContainer(wrapper, baseUrl);
+    stripUnsafeElements(wrapper, ARTICLE_CLEAN_SELECTOR);
+    normalizeDomUrls(wrapper, baseUrl);
+    return wrapper;
+  }
+
+  function summarizeLiveElements(elements) {
+    const baseUrl = document.baseURI || window.location.href;
+    const wrapper = buildCleanedElementsWrapper(elements, baseUrl);
+    return summarizeCleanedRoot(wrapper);
   }
 
   function summarizeSelection() {
@@ -271,7 +280,9 @@
     for (let i = 0; i < sel.rangeCount; i++) {
       wrapper.appendChild(sel.getRangeAt(i).cloneContents());
     }
-    const summary = summarizeContainer(wrapper, baseUrl);
+    stripUnsafeElements(wrapper, UNSAFE_SELECTOR);
+    normalizeDomUrls(wrapper, baseUrl);
+    const summary = summarizeCleanedRoot(wrapper);
     return { hasSelection: true, words: summary.words, images: summary.images };
   }
 
@@ -329,7 +340,7 @@
   }
 
   function dedupeTopMostInDocumentOrder(elements) {
-    const unique = Array.from(new Set(elements.filter((el) => el && el.isConnected)));
+    const unique = Array.from(new Set((elements || []).filter((el) => el && el.isConnected)));
     const filtered = unique.filter(
       (el) => !unique.some((other) => other !== el && other.contains(el))
     );
@@ -341,6 +352,20 @@
       return 0;
     });
     return filtered;
+  }
+
+  function containsBoilerplate(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.matches(BOILERPLATE_SELECTOR)) return true;
+    return Boolean(el.querySelector(BOILERPLATE_SELECTOR));
+  }
+
+  function isHeadingInSiteChrome(heading) {
+    if (!heading || heading.nodeType !== 1) return true;
+    if (heading.closest(BOILERPLATE_SELECTOR)) return true;
+    const header = heading.closest('header');
+    if (header && header.querySelector('nav, [role="navigation"]')) return true;
+    return false;
   }
 
   function isMetadataOrHeading(el) {
@@ -378,6 +403,192 @@
       }
     }
     return false;
+  }
+
+  function normalizeTitleText(str) {
+    return String(str || '')
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function extractTitleTokens(str) {
+    const matches = normalizeTitleText(str).match(/[\p{L}\p{N}]+/gu);
+    return matches ? matches : [];
+  }
+
+  function buildTitleReferences(parsedTitle) {
+    const raw = [];
+    if (parsedTitle && String(parsedTitle).trim()) raw.push(String(parsedTitle).trim());
+    if (document.title && document.title.trim()) raw.push(document.title.trim());
+
+    const seen = new Set();
+    const refs = [];
+    const addRef = (text, isPrimary) => {
+      const norm = normalizeTitleText(text);
+      if (!norm || seen.has(norm)) return;
+      const tokens = extractTitleTokens(norm);
+      if (tokens.length === 0) return;
+      seen.add(norm);
+      refs.push({ norm, tokens, tokenSet: new Set(tokens), isPrimary });
+    };
+
+    for (const candidate of raw) {
+      addRef(candidate, true);
+      // Also consider the leading segment before common site-name separators (" | ", " - ", " — ", etc.)
+      const split = candidate.split(/\s+(?:\||—|–|-|·|::)\s+/);
+      if (split.length > 1 && split[0].trim().length >= 3) {
+        addRef(split[0].trim(), true);
+      }
+    }
+    return refs;
+  }
+
+  function scoreHeadingAgainstTitles(headingText, refs) {
+    const norm = normalizeTitleText(headingText);
+    if (!norm || norm.length < 2) return 0;
+    const hTokens = extractTitleTokens(norm);
+    if (hTokens.length === 0) return 0;
+    const hSet = new Set(hTokens);
+
+    let best = 0;
+    for (const ref of refs) {
+      if (norm === ref.norm) {
+        best = Math.max(best, ref.isPrimary ? 1.15 : 1.0);
+        continue;
+      }
+      let matchedH = 0;
+      for (const tok of hTokens) {
+        if (ref.tokenSet.has(tok)) matchedH++;
+      }
+      let matchedRef = 0;
+      for (const tok of ref.tokens) {
+        if (hSet.has(tok)) matchedRef++;
+      }
+      if (matchedH === 0) continue;
+
+      const precision = matchedH / hTokens.length;
+      const recall = matchedRef / ref.tokens.length;
+      let score = (2 * precision * recall) / (precision + recall);
+      if (ref.norm.startsWith(norm) || norm.startsWith(ref.norm)) {
+        score += 0.15;
+      } else if (ref.norm.includes(norm) || norm.includes(ref.norm)) {
+        score += 0.05;
+      }
+      if (score > best) best = score;
+    }
+    return best;
+  }
+
+  function isElementBefore(a, b) {
+    if (!a || !b || a === b) return false;
+    if (a.contains(b) || b.contains(a)) return false;
+    const pos = a.compareDocumentPosition(b);
+    return Boolean(pos & Node.DOCUMENT_POSITION_FOLLOWING);
+  }
+
+  function findBestArticleHeading(regionElements, parsedTitle) {
+    if (!regionElements || regionElements.length === 0 || !document.body) return null;
+    const refs = buildTitleReferences(parsedTitle);
+    if (refs.length === 0) return null;
+
+    const firstRegion = regionElements[0];
+    const isInRegion = (el) => regionElements.some((r) => r === el || r.contains(el));
+
+    const pickFromSelector = (selector, minScore) => {
+      let bestEl = null;
+      let bestScore = 0;
+      for (const h of Array.from(document.body.querySelectorAll(selector))) {
+        if (!getVisibleRect(h)) continue;
+        if (isHeadingInSiteChrome(h)) continue;
+        const inside = isInRegion(h);
+        if (!inside && !isElementBefore(h, firstRegion)) continue;
+        const score = scoreHeadingAgainstTitles(h.textContent || '', refs);
+        if (score >= minScore && score > bestScore) {
+          bestScore = score;
+          bestEl = h;
+        }
+      }
+      if (!bestEl) return null;
+      // If the best matching heading is already inside the detected region, no extension is needed.
+      if (isInRegion(bestEl)) return { alreadyIncluded: true, heading: bestEl };
+      return { alreadyIncluded: false, heading: bestEl };
+    };
+
+    // Prefer h1 first; fall back to h2 only when no h1 matches (e.g. blogs whose post title is an h2).
+    const h1Result = pickFromSelector('h1', 0.45);
+    if (h1Result) {
+      return h1Result.alreadyIncluded ? null : h1Result.heading;
+    }
+    const h2Result = pickFromSelector('h2', 0.65);
+    if (h2Result) {
+      return h2Result.alreadyIncluded ? null : h2Result.heading;
+    }
+    return null;
+  }
+
+  function directChildOfAncestor(el, ancestor) {
+    let cur = el;
+    while (cur && cur.parentElement && cur.parentElement !== ancestor) {
+      cur = cur.parentElement;
+    }
+    return cur && cur.parentElement === ancestor ? cur : null;
+  }
+
+  function extendRegionWithHeading(regionElements, parsedTitle) {
+    if (!regionElements || regionElements.length === 0) return regionElements;
+    const heading = findBestArticleHeading(regionElements, parsedTitle);
+    if (!heading) return regionElements;
+
+    const lca = lowestCommonAncestor([heading, ...regionElements]);
+    if (
+      lca &&
+      lca !== document.body &&
+      lca !== document.documentElement &&
+      getVisibleRect(lca) &&
+      !containsBoilerplate(lca)
+    ) {
+      return [lca];
+    }
+
+    // If LCA is not body/html (e.g. a <main> that also contains a sidebar <aside>),
+    // climb the heading branch to the clean direct child of LCA and include clean siblings
+    // between the heading branch and the region (e.g. MDN's layout__header + layout__body).
+    if (lca && lca !== document.body && lca !== document.documentElement) {
+      const headingBranch = directChildOfAncestor(heading, lca);
+      const regionBranch = directChildOfAncestor(regionElements[0], lca);
+      if (
+        headingBranch &&
+        regionBranch &&
+        headingBranch !== regionBranch &&
+        getVisibleRect(headingBranch) &&
+        !containsBoilerplate(headingBranch) &&
+        !isHeadingInSiteChrome(headingBranch)
+      ) {
+        const siblings = Array.from(lca.children);
+        const startIdx = siblings.indexOf(headingBranch);
+        const endIdx = siblings.indexOf(regionBranch);
+        if (startIdx !== -1 && endIdx !== -1 && startIdx < endIdx) {
+          const picked = [headingBranch];
+          for (let i = startIdx + 1; i < endIdx; i++) {
+            const sib = siblings[i];
+            if (
+              !getVisibleRect(sib) ||
+              containsBoilerplate(sib) ||
+              /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|FORM|BUTTON|IFRAME|OBJECT|EMBED)$/.test(sib.tagName)
+            ) {
+              continue;
+            }
+            picked.push(sib);
+          }
+          picked.push(...regionElements);
+          return dedupeTopMostInDocumentOrder(picked);
+        }
+      }
+    }
+
+    // Fallback: multi-element selection of the heading plus the region (never growing to body).
+    return dedupeTopMostInDocumentOrder([heading, ...regionElements]);
   }
 
   function detectArticleLiveDom() {
@@ -426,7 +637,6 @@
     }
 
     let selectedElements = [];
-    let summary = { words: 0, images: 0 };
 
     if (parsed && parsed.content) {
       const container = document.createElement('div');
@@ -466,6 +676,7 @@
           lca !== document.body &&
           lca !== document.documentElement &&
           getVisibleRect(lca) &&
+          !containsBoilerplate(lca) &&
           !containerHasSubstantialUnmatchedChild(lca, matchedLiveSet)
         ) {
           selectedElements = [lca];
@@ -483,14 +694,12 @@
           articleAncestor !== selectedElements[0] &&
           articleAncestor !== document.body &&
           getVisibleRect(articleAncestor) &&
+          !containsBoilerplate(articleAncestor) &&
           !containerHasSubstantialUnmatchedChild(articleAncestor, matchedLiveSet)
         ) {
           selectedElements = [articleAncestor];
         }
       }
-
-      // Clean temp IDs from parsed.content summary calculation
-      summary = summarizeContainer(container, baseUrl);
     }
 
     if (selectedElements.length === 0) {
@@ -501,27 +710,31 @@
       if (fallback && getVisibleRect(fallback)) {
         selectedElements = [fallback];
       }
-      summary = summarizeLiveElements(selectedElements);
     }
 
-    return { elements: selectedElements, parsed, summary };
+    const parsedTitle = (parsed && parsed.title && parsed.title.trim()) || '';
+    selectedElements = extendRegionWithHeading(selectedElements, parsedTitle);
+
+    const meta = {
+      title: parsedTitle || undefined,
+      byline: (parsed && parsed.byline && parsed.byline.trim()) || undefined,
+      siteName: (parsed && parsed.siteName && parsed.siteName.trim()) || undefined,
+    };
+
+    // Always compute the summary from the exact same cleaned output that gets saved.
+    const summary = summarizeLiveElements(selectedElements);
+
+    return { elements: selectedElements, parsed, meta, summary };
   }
 
-  function captureElementsAsMarkdown(elements) {
+  function captureElementsAsMarkdown(elements, meta = {}) {
     const baseUrl = document.baseURI || window.location.href;
     const pageUrl = window.location.href;
     const fallbackTitle = (document.title || '').trim() || window.location.hostname || 'Clipped Page';
-    const siteName = getMetaContent(['meta[property="og:site_name"]']) || undefined;
+    const siteName =
+      (meta && meta.siteName) || getMetaContent(['meta[property="og:site_name"]']) || undefined;
 
-    const ordered = dedupeTopMostInDocumentOrder(elements || []);
-    const wrapper = document.createElement('div');
-    for (const el of ordered) {
-      if (!el || !el.isConnected || isLiveElementHidden(el)) continue;
-      wrapper.appendChild(cloneVisibleElement(el));
-    }
-
-    stripUnsafeElements(wrapper, ADJUSTED_UNSAFE_SELECTOR);
-    normalizeDomUrls(wrapper, baseUrl);
+    const wrapper = buildCleanedElementsWrapper(elements, baseUrl);
     const images = tokenizeImages(wrapper);
     const html = wrapper.innerHTML.trim();
     if (!html) {
@@ -530,9 +743,10 @@
 
     return {
       url: pageUrl,
-      title: fallbackTitle,
+      title: (meta && meta.title) || fallbackTitle,
       html,
       format: 'markdown',
+      ...(meta && meta.byline ? { byline: meta.byline } : {}),
       siteName,
       images,
     };
@@ -576,7 +790,7 @@
     };
   };
 
-  globalThis.__joplinClipperCapture = (mode, options = {}) => {
+  globalThis.__joplinClipperCapture = (mode) => {
     const baseUrl = document.baseURI || window.location.href;
     const pageUrl = window.location.href;
     const fallbackTitle = (document.title || '').trim() || window.location.hostname || 'Clipped Page';
@@ -662,61 +876,26 @@
       };
     }
 
-    // Article mode: if the user adjusted the overlay area, save the highlighted elements
+    // Article mode: what is saved always equals what is highlighted (Readability only picks the default box).
     if (
-      options &&
-      options.useOverlaySelection &&
       globalThis.__joplinClipperOverlay &&
-      typeof globalThis.__joplinClipperOverlay.isAdjusted === 'function' &&
-      globalThis.__joplinClipperOverlay.isAdjusted()
+      typeof globalThis.__joplinClipperOverlay.getSelectedElements === 'function'
     ) {
       const selected = globalThis.__joplinClipperOverlay.getSelectedElements();
       if (Array.isArray(selected) && selected.length > 0) {
-        return captureElementsAsMarkdown(selected);
+        const meta =
+          typeof globalThis.__joplinClipperOverlay.getArticleMeta === 'function'
+            ? globalThis.__joplinClipperOverlay.getArticleMeta()
+            : {};
+        return captureElementsAsMarkdown(selected, meta);
       }
     }
 
-    // Default / unadjusted 'article' mode: Readability on a clone of the live DOM
-    const docClone = document.cloneNode(true);
-    const overlayClone = docClone.getElementById(OVERLAY_HOST_ID);
-    if (overlayClone) overlayClone.remove();
-    normalizeDomUrls(docClone, baseUrl);
-
-    let parsed = null;
-    if (typeof Readability === 'function') {
-      try {
-        parsed = new Readability(docClone).parse();
-      } catch {
-        parsed = null;
-      }
+    const detected = detectArticleLiveDom();
+    if (detected.elements.length > 0) {
+      return captureElementsAsMarkdown(detected.elements, detected.meta);
     }
 
-    const container = document.createElement('div');
-    if (parsed && parsed.content) {
-      container.innerHTML = parsed.content;
-    } else {
-      const bodyClone = cloneVisibleBody();
-      stripUnsafeElements(bodyClone);
-      normalizeDomUrls(bodyClone, baseUrl);
-      container.innerHTML = bodyClone.innerHTML;
-    }
-
-    stripUnsafeElements(container);
-    normalizeDomUrls(container, baseUrl);
-    const images = tokenizeImages(container);
-    const html = container.innerHTML.trim();
-    if (!html) {
-      throw new Error('Could not extract readable content from this page. Try Full page or Bookmark mode.');
-    }
-
-    return {
-      url: pageUrl,
-      title: (parsed && parsed.title && parsed.title.trim()) || fallbackTitle,
-      html,
-      format: 'markdown',
-      byline: (parsed && parsed.byline && parsed.byline.trim()) || undefined,
-      siteName: (parsed && parsed.siteName && parsed.siteName.trim()) || siteName,
-      images,
-    };
+    throw new Error('Could not extract readable content from this page. Try Full page or Bookmark mode.');
   };
 })();

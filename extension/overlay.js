@@ -510,6 +510,7 @@
 
     let initialArticleElements = [];
     let initialArticleSummary = { words: 0, images: 0 };
+    let initialArticleMeta = {};
     let selectedElements = [];
     let adjusted = false;
     let lastSummary = { words: 0, images: 0 };
@@ -1148,6 +1149,7 @@
 
     function onPointerDown(e) {
       if (mode !== 'article' && mode !== 'screenshot') return;
+      if (!e.isTrusted) return;
       if (isEventFromOverlay(e) || isOnNativeScrollbar(e)) return;
       if (e.button !== 0) return;
 
@@ -1200,6 +1202,7 @@
 
     function onClickCapture(e) {
       if (mode !== 'article' && mode !== 'screenshot') return;
+      if (!e.isTrusted) return;
       if (isEventFromOverlay(e) || isOnNativeScrollbar(e)) return;
 
       e.preventDefault();
@@ -1219,6 +1222,7 @@
 
     function onAuxClickCapture(e) {
       if (mode !== 'article' && mode !== 'screenshot') return;
+      if (!e.isTrusted) return;
       if (isEventFromOverlay(e) || isOnNativeScrollbar(e)) return;
       e.preventDefault();
       e.stopPropagation();
@@ -1227,6 +1231,8 @@
 
     function onKeyDown(e) {
       if (mode !== 'article' && mode !== 'screenshot') return;
+      // Page scripts can dispatch synthetic key events into this listener; only real keys count
+      if (!e.isTrusted) return;
       const target = e.target;
       if (
         target &&
@@ -1352,9 +1358,10 @@
         const detected =
           lib && typeof lib.detectArticleLiveDom === 'function'
             ? lib.detectArticleLiveDom()
-            : { elements: [], summary: { words: 0, images: 0 } };
+            : { elements: [], meta: {}, summary: { words: 0, images: 0 } };
         initialArticleElements = detected.elements || [];
         initialArticleSummary = detected.summary || { words: 0, images: 0 };
+        initialArticleMeta = detected.meta || {};
         selectedElements = [...initialArticleElements];
         lastSummary = { ...initialArticleSummary };
         adjusted = false;
@@ -1394,6 +1401,7 @@
       hideForCapture,
       getState: buildStatePayload,
       getSelectedElements: () => selectedElements.slice(),
+      getArticleMeta: () => initialArticleMeta,
       isAdjusted: () => adjusted,
     };
   }

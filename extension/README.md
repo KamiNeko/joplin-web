@@ -15,7 +15,7 @@ A plain JavaScript Manifest V3 browser extension (no build step, no bundler) tha
     - **Click to pick:** hover to outline any block element and click to select just that element (page clicks are captured so links don't navigate; scrolling still works).
     - **`Esc`** resets to the detected article; **`Enter`** saves the clip.
     - **Live summary** in the side panel shows estimated word and image counts as you adjust the box.
-    - Unadjusted clips keep Readability's clean Markdown output; adjusted clips save the exact highlighted elements (cleaned of scripts, styles, hidden elements, forms, buttons, and iframes) as Markdown.
+    - **What is saved = what is highlighted:** Readability picks the default region (extended to include the matching article headline), and saving always clones and cleans the highlighted elements (stripping navigation, sidebars, footers, scripts, styles, hidden elements, forms, buttons, and iframes) as Markdown.
   - **Selection:** highlights your current text selection on the page and saves it as Markdown.
   - **Full page:** strips scripts, styles, iframes, forms, and hidden elements and saves an HTML note.
   - **Screenshot:** overlays a resizable crop rectangle (defaulting to the full visible viewport), hides the overlay before capture, crops to your chosen area (DPR-aware), and attaches the PNG with a source link.
