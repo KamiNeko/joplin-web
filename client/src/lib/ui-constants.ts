@@ -5,6 +5,9 @@ export const MOBILE_SEARCH_INPUT_ID = "mobile-sidebar-search";
 export const SEARCH_SYNTAX_HINT =
   'All words must match. Use "exact phrase", -word to exclude, and filters tag:name, notebook:name, type:todo, iscompleted:0.';
 
+/** Search result cards rendered at first and added per "Show more" (or scroll to the end) */
+export const SEARCH_RESULTS_PAGE_SIZE = 100;
+
 /**
  * Classes for sidebar row action buttons: shown on hover/focus on wide screens with a mouse,
  * always visible on small or touch screens, which have no hover.

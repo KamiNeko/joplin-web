@@ -1,7 +1,7 @@
 import { config } from '../config.js';
 import { joplinApi } from './joplin-api.js';
 import { deserialize, markupLanguageOf, notePreview } from './serializer.js';
-import { isEmptySearchQuery, matchesNamePattern, parseSearchQuery } from './search-query.js';
+import { compileSearchTerm, isEmptySearchQuery, matchesNamePattern, parseSearchQuery } from './search-query.js';
 import { trashedTogether } from './trash.js';
 import {
   JoplinItemType,
@@ -51,6 +51,20 @@ const notebookTitle = (item: RawJoplinItem): string =>
 
 /** Display title of a tag, see `notebookTitle` */
 const tagTitle = (item: RawJoplinItem): string => (isEncrypted(item) ? 'Encrypted tag' : item.title || 'Untitled Tag');
+
+/** List previews by note object, kept while the note's body and markup language stay the same */
+const listPreviews = new WeakMap<RawJoplinItem, { body: string; markup: number; preview: string }>();
+
+/** A note's 150-character list preview (`notePreview` of its body), computed once per note version */
+function listPreviewOf(note: RawJoplinItem): string {
+  const body = note.body || '';
+  const markup = markupLanguageOf(note.properties);
+  const cached = listPreviews.get(note);
+  if (cached && cached.body === body && cached.markup === markup) return cached.preview;
+  const preview = notePreview(body, markup, 150);
+  listPreviews.set(note, { body, markup, preview });
+  return preview;
+}
 
 /**
  * How a caller wants the cache refreshed, see `NoteCacheService.ensureFresh`
@@ -632,7 +646,7 @@ export class NoteCacheService {
       createdTime: n.createdTime,
       updatedTime: n.updatedTime,
       deletedTime: n.deletedTime || 0,
-      preview: notePreview(n.body, markupLanguageOf(n.properties), 150),
+      preview: listPreviewOf(n),
       isTodo: n.isTodo,
       todoCompleted: Boolean(n.todoCompleted),
       todoDue: n.todoDue,
@@ -684,7 +698,7 @@ export class NoteCacheService {
       id: note.id,
       title: note.title,
       body: note.body,
-      preview: notePreview(note.body, markupLanguageOf(note.properties), 150),
+      preview: listPreviewOf(note),
       parentId: note.parentId || '',
       notebook,
       tags,
@@ -789,6 +803,8 @@ export class NoteCacheService {
       }
     }
 
+    const termMatchers = parsed.terms.map(compileSearchTerm);
+    const excludedMatchers = parsed.excludedTerms.map(compileSearchTerm);
     const results: Array<SearchResult & { relevanceScore: number }> = [];
 
     for (const note of entry.notes.values()) {
@@ -818,23 +834,32 @@ export class NoteCacheService {
 
       const title = note.title || '';
       const body = note.body || '';
-      const titleLower = title.toLowerCase();
-      const bodyLower = body.toLowerCase();
+      if (excludedMatchers.some((re) => re.test(title) || re.test(body))) continue;
 
-      const contains = (term: string) => titleLower.includes(term) || bodyLower.includes(term);
-      if (!parsed.terms.every(contains) || parsed.excludedTerms.some(contains)) continue;
-
-      const titleHits = parsed.terms.filter((term) => titleLower.includes(term)).length;
+      let titleHits = 0;
+      let bodyHits = 0;
       // Earliest occurrence of any term in the body, for the snippet
       let matchIdx = -1;
       let matchLength = 0;
-      for (const term of parsed.terms) {
-        const idx = bodyLower.indexOf(term);
-        if (idx !== -1 && (matchIdx === -1 || idx < matchIdx)) {
-          matchIdx = idx;
-          matchLength = term.length;
+      let allFound = true;
+      for (const re of termMatchers) {
+        const titleMatch = re.test(title);
+        const bodyMatch = re.exec(body);
+        if (!titleMatch && !bodyMatch) {
+          allFound = false;
+          break;
+        }
+        if (titleMatch) titleHits++;
+        if (bodyMatch) {
+          bodyHits++;
+          if (matchIdx === -1 || bodyMatch.index < matchIdx) {
+            matchIdx = bodyMatch.index;
+            matchLength = bodyMatch[0].length;
+          }
         }
       }
+      if (!allFound) continue;
+
       const inTitle = titleHits > 0;
       const inBody = matchIdx !== -1;
 
@@ -849,7 +874,6 @@ export class NoteCacheService {
       }
 
       // Title matches receive higher priority
-      const bodyHits = parsed.terms.filter((term) => bodyLower.includes(term)).length;
       const relevanceScore = titleHits * 100 + bodyHits * 10;
 
       results.push({
@@ -859,7 +883,7 @@ export class NoteCacheService {
         createdTime: note.createdTime,
         updatedTime: note.updatedTime,
         deletedTime: note.deletedTime || 0,
-        preview: notePreview(note.body, markupLanguageOf(note.properties), 150),
+        preview: listPreviewOf(note),
         isTodo: note.isTodo,
         todoCompleted: Boolean(note.todoCompleted),
         todoDue: note.todoDue,

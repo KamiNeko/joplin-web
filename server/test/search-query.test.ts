@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { isEmptySearchQuery, matchesNamePattern, parseSearchQuery } from '../src/services/search-query.js';
+import {
+  compileSearchTerm,
+  isEmptySearchQuery,
+  matchesNamePattern,
+  parseSearchQuery,
+} from '../src/services/search-query.js';
 
 /**
  * Offline tests for the search query parser.
@@ -74,5 +79,27 @@ describe('matchesNamePattern', () => {
     assert.equal(matchesNamePattern('a.b', 'a.b'), true);
     assert.equal(matchesNamePattern('axb', 'a.b'), false);
     assert.equal(matchesNamePattern('C++ (notes)', 'c++*'), true);
+  });
+});
+
+describe('compileSearchTerm', () => {
+  test('matches case-insensitively, including non-ASCII letters', () => {
+    assert.ok(compileSearchTerm('weeknight miso').test('WEEKNIGHT Miso Ramen'));
+    assert.ok(compileSearchTerm('école').test('ÉCOLE primaire'));
+    assert.ok(compileSearchTerm('straße').test('STRAẞE 5'));
+    assert.ok(compileSearchTerm('結單').test('2024 年 結單'));
+    assert.ok(!compileSearchTerm('miso').test('mis o'));
+  });
+
+  test('treats regex syntax in the term literally', () => {
+    assert.ok(compileSearchTerm('c++ (beta)').test('Notes on C++ (Beta) builds'));
+    assert.ok(compileSearchTerm('[x] $5.00?').test('done [X] $5.00?'));
+    assert.ok(!compileSearchTerm('a.c').test('abc'));
+    assert.ok(!compileSearchTerm('a*').test('aaa'));
+  });
+
+  test('keeps the spaces of a phrase literal, like a substring match', () => {
+    assert.ok(compileSearchTerm('weeknight miso').test('a weeknight miso ramen'));
+    assert.ok(!compileSearchTerm('weeknight miso').test('weeknight\nmiso'));
   });
 });
