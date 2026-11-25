@@ -106,7 +106,8 @@ export function createOrganizeRouter(service: OrganizerService = organizerServic
 
   /**
    * POST /api/organize/jobs/:id/retry
-   * Re-queues retryable failed items using the current notebook tree and resumes the job.
+   * Re-queues retryable failed items (and resumes never-analysed ones of a cancelled job) using the
+   * current notebook tree.
    */
   router.post('/jobs/:id/retry', async (req, res) => {
     const result = await service.retryJob(req.sessionId!, req.params.id);

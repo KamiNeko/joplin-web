@@ -192,8 +192,12 @@ describe("OrganizePage", () => {
     const row2Box = within(table).getByRole("checkbox", { name: "Select Loose scratchpad" }) as HTMLInputElement;
     const row3Box = within(table).getByRole("checkbox", { name: "Select Encrypted scan" }) as HTMLInputElement;
 
+    // Nothing is selected until the user asks for it
+    expect(row1Box.checked).toBe(false);
+    expect(screen.getByRole("button", { name: "Apply selected (0)" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Select all high-confidence" }));
     expect(row1Box.checked).toBe(true);
-    expect(row2Box.checked).toBe(false); // < 0.7 starts unticked
+    expect(row2Box.checked).toBe(false); // < 0.7 stays unticked
     expect(row3Box.disabled).toBe(true);
     expect(screen.getByRole("button", { name: "Apply selected (1)" })).toBeTruthy();
 
@@ -371,7 +375,8 @@ describe("OrganizePage", () => {
     expect(screen.getByText("High 74%")).toBeTruthy();
     expect(screen.getByText("Low 51%")).toBeTruthy();
 
-    // >= 0.7 starts ticked (0.92 and 0.74)
+    // "Select all high-confidence" ticks >= 0.7 (0.92 and 0.74)
+    fireEvent.click(screen.getByRole("button", { name: "Select all high-confidence" }));
     expect((within(table).getByRole("checkbox", { name: "Select Very High Note" }) as HTMLInputElement).checked).toBe(
       true
     );
@@ -713,7 +718,9 @@ describe("OrganizePage", () => {
     renderOrganizePage(`/organize/${jobId}`);
 
     expect(await screen.findByText("Analysed 365 / 365")).toBeTruthy();
-    // Initial default selection is high-confidence unapplied across all pages (4 on page 1 + 165 on page 2 = 169)
+    // Nothing starts selected; Select all high-confidence takes unapplied rows across all pages (4 + 165 = 169)
+    expect(screen.getByRole("button", { name: "Apply selected (0)" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Select all high-confidence" }));
     expect(screen.getByRole("button", { name: "Apply selected (169)" })).toBeTruthy();
 
     // Select all very-high works even when page 1's 42 very-high items are already applied

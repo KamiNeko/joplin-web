@@ -358,6 +358,8 @@ export interface OrganizeJobResponse {
   /** Unapplied suggestions whose note was deleted or trashed after analysis. */
   goneCount: number;
   retryableFailedCount: number;
+  /** Items never analysed (a cancelled job); retry resumes them. */
+  pendingCount: number;
   filter: OrganizeFilter;
   filterCounts: OrganizeFilterCounts;
   usage: OrganizeUsage;

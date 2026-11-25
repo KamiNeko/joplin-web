@@ -1796,6 +1796,17 @@ describe('multi-job storage, v1 migration, lazy loading, 409 exclusivity, and re
       assert.deepEqual(seenUserTitlesDuringRetry.sort(), ['Retry note 1', 'Retry note 2']);
       assert.equal(afterRetry.items[0].suggestion?.notebookId, extraNbId);
       assert.equal(afterRetry.items[2].skipped, true);
+
+      // Restoring the trashed note from the trash makes it retryable again; the duplicate marker stays out
+      assert.equal((await app.api(`/api/notes/${willTrashNote}/restore`, { method: 'POST' })).status, 200);
+      const afterRestore = await svc2.getJob(session, jobId);
+      assert.equal(afterRestore.retryableFailedCount, 1);
+      assert.equal(afterRestore.items[2].skipped, undefined);
+      assert.equal((await svc2.retryJob(session, jobId)).requeuedCount, 1);
+      await svc2.waitForIdle(session);
+      const afterRestoreRetry = await svc2.getJob(session, jobId);
+      assert.equal(afterRestoreRetry.progress.done, 3);
+      assert.equal(afterRestoreRetry.items[3].skipped, true);
     } finally {
       for (const nid of extraNoteIds) {
         app.mock.items.delete(`${nid}.md`);
@@ -1805,6 +1816,59 @@ describe('multi-job storage, v1 migration, lazy loading, 409 exclusivity, and re
       }
       await app.api('/api/notebooks/refresh', { method: 'POST' });
       rmSync(retryDir, { recursive: true, force: true });
+    }
+  });
+
+  test('retryJob resumes the never-analysed items of a cancelled job', { timeout: TEST_TIMEOUT_MS }, async () => {
+    const resumeDir = mkdtempSync(join(tmpdir(), 'joplin-organize-resume-'));
+    try {
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const svc = trackService(
+        new OrganizerService({
+          aiBaseUrl: 'http://127.0.0.1:18317/v1',
+          aiModel: 'deepseek-flash',
+          aiConcurrency: 1,
+          aiFake: false,
+          cacheDir: resumeDir,
+          completionFn: async (_messages, signal) => {
+            await Promise.race([gate, new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted'))))]);
+            return {
+              content: JSON.stringify({
+                title: '2024-01-01 Acme – Invoice',
+                notebookId: demoId('nb-projects'),
+                tags: ['invoice'],
+                confidence: 0.9,
+                documentDate: '2024-01-01',
+                reason: 'Resumed.',
+              }),
+              usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+            };
+          },
+        })
+      );
+      const noteIds = [demoId('note-roadmap'), demoId('note-api-notes'), demoId('note-ramen')];
+      const { jobId } = await svc.startJob(session, { noteIds });
+      assert.equal((await svc.cancelJob(session, jobId)).status, 'cancelled');
+      const cancelled = await svc.getJob(session, jobId);
+      assert.equal(cancelled.pendingCount, 3);
+      assert.equal(cancelled.retryableFailedCount, 0);
+
+      release();
+      const resumed = await svc.retryJob(session, jobId);
+      assert.equal(resumed.status, 'running');
+      assert.equal(resumed.requeuedCount, 3);
+      await svc.waitForIdle(session);
+      const finished = await svc.getJob(session, jobId);
+      assert.equal(finished.status, 'done');
+      assert.equal(finished.progress.done, 3);
+      assert.equal(finished.pendingCount, 0);
+      await assert.rejects(
+        () => svc.retryJob(session, jobId),
+        (err: unknown) => err instanceof OrganizeValidationError && err.status === 409
+      );
+    } finally {
+      rmSync(resumeDir, { recursive: true, force: true });
     }
   });
 

@@ -175,7 +175,9 @@ test("selects multiple notes, runs Auto-organize, applies and undoes", async ({ 
   await expect(page.getByText("Analysed 2 / 2")).toBeVisible();
   await expect(page.getByRole("button", { name: "Very high (>= 0.85) (1)" })).toBeVisible();
 
-  // High-confidence OCR invoice starts ticked; low-confidence reference note starts unticked
+  // Nothing starts ticked; Select all high-confidence ticks the OCR invoice, not the low-confidence note
+  await expect(page.getByRole("checkbox", { name: "Select 2024_03_11.pdf" })).not.toBeChecked();
+  await page.getByRole("button", { name: "Select all high-confidence" }).click();
   await expect(page.getByRole("checkbox", { name: "Select 2024_03_11.pdf" })).toBeChecked();
   await expect(page.getByLabel("Suggested title for 2024_03_11.pdf")).toHaveValue(
     "2024-03-11 Acme Cloud Services – Dedicated Backup Storage Invoice"

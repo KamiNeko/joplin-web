@@ -97,6 +97,8 @@ const OWNER_KEY_RE = /^[A-Za-z0-9_-]+$/;
 const SAFE_JOB_ID_RE = /^[0-9a-f]{32}$|^[0-9a-f-]{16,64}$/i;
 const NON_RETRYABLE_ERROR_RE =
   /\bskipped\b|\btrashed\b|duplicate copy|^note not found$|^encrypted notes cannot|^conflict copies cannot/i;
+/** Preflight marker for a duplicate copy of a filed note: never organized, whatever its live state. */
+const DUPLICATE_COPY_RE = /duplicate copy/i;
 const DOC_EXTENSION_RE = /\.(pdf|png|jpe?g|tiff?|bmp|webp|heic|heif|gif)$/i;
 const SCANNER_TITLE_PATTERNS: RegExp[] = [
   DOC_EXTENSION_RE,
@@ -351,12 +353,11 @@ function classifyRetryability(
   item: InternalJobItem,
   entry: CacheEntry | null
 ): { retryable: boolean; reason?: string; liveNote?: RawJoplinItem } {
-  if (item.skipped) {
-    return { retryable: false, reason: item.error || 'Skipped note' };
-  }
-  if (item.error && NON_RETRYABLE_ERROR_RE.test(item.error)) {
+  if (item.error && DUPLICATE_COPY_RE.test(item.error)) {
     return { retryable: false, reason: item.error };
   }
+  // Every other skip reason (missing, encrypted, conflict copy, trashed) is live state, so re-check it:
+  // a note restored from the trash can be organized again.
   if (entry) {
     const liveNote = entry.notes.get(item.noteId);
     if (!liveNote) {
@@ -372,6 +373,12 @@ function classifyRetryability(
       return { retryable: false, reason: 'Trashed notes cannot be organized' };
     }
     return { retryable: true, liveNote };
+  }
+  if (item.skipped) {
+    return { retryable: false, reason: item.error || 'Skipped note' };
+  }
+  if (item.error && NON_RETRYABLE_ERROR_RE.test(item.error)) {
+    return { retryable: false, reason: item.error };
   }
   return { retryable: true };
 }
@@ -2253,6 +2260,7 @@ export class OrganizerService {
     let failed = 0;
     let appliedCount = 0;
     let retryableFailedCount = 0;
+    let pendingCount = 0;
     const goneIds = new Set<string>();
     const filterCounts: OrganizeFilterCounts = {
       all: job.items.length,
@@ -2267,6 +2275,7 @@ export class OrganizerService {
 
     for (const item of job.items) {
       if (item.status === 'done') done++;
+      else if (item.status === 'pending') pendingCount++;
       else if (item.status === 'failed') {
         failed++;
         if (classifyRetryability(item, entry).retryable) {
@@ -2325,8 +2334,10 @@ export class OrganizerService {
         (pathById && currentNotebookId ? pathById.get(currentNotebookId) : undefined) ?? item.currentNotebookPath;
       const updatedTime = liveNote ? liveNote.updatedTime : item.updatedTime;
       const isNonRetryableFailed = item.status === 'failed' && !classifyRetryability(item, entry).retryable;
+      // `skipped` reflects live state (a restored note can be retried), not the flag stored at skip time.
+      const { skipped: _storedSkipped, ...rest } = item;
       return {
-        ...item,
+        ...rest,
         ...(isNonRetryableFailed ? { skipped: true } : {}),
         ...(goneIds.has(item.noteId) ? { gone: true } : {}),
         currentTitle,
@@ -2350,6 +2361,7 @@ export class OrganizerService {
       appliedCount,
       goneCount: goneIds.size,
       retryableFailedCount,
+      pendingCount,
       filter,
       filterCounts,
       usage: { ...job.usage },
@@ -2488,7 +2500,10 @@ export class OrganizerService {
       }
     }
 
-    if (retryTargets.length === 0) {
+    // A cancelled (or stopped) job resumes its never-analysed items along with the retried ones.
+    const pendingCount = job.items.filter((it) => it.status === 'pending').length;
+
+    if (retryTargets.length === 0 && pendingCount === 0) {
       for (const { item, reason } of liveSkipUpdates) {
         item.skipped = true;
         item.error = reason;
@@ -2497,7 +2512,7 @@ export class OrganizerService {
         job.updatedAt = Date.now();
         this.saveJobNow(ownerKey, job.id);
       }
-      throw new OrganizeValidationError('No failed items can be retried for this job.', 409);
+      throw new OrganizeValidationError('Nothing to retry or resume for this job.', 409);
     }
 
     for (const { item, reason } of liveSkipUpdates) {
@@ -2533,7 +2548,7 @@ export class OrganizerService {
     return {
       id: job.id,
       status: job.status,
-      requeuedCount: retryTargets.length,
+      requeuedCount: retryTargets.length + pendingCount,
     };
   }
 

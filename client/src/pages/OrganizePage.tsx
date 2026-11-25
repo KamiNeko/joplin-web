@@ -116,7 +116,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
   const [filter, setFilter] = useState<OrganizeFilter>("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [edits, setEdits] = useState<Record<string, RowEdit>>({});
-  const [selectionMode, setSelectionMode] = useState<ActiveSelectionMode>("high");
+  const [selectionMode, setSelectionMode] = useState<ActiveSelectionMode>("none");
   const [selectionOverrides, setSelectionOverrides] = useState<Record<string, SelectionOverride>>({});
   const [isPreparingApply, setIsPreparingApply] = useState(false);
   const [applyProgress, setApplyProgress] = useState<OrganizeBatchProgress | null>(null);
@@ -309,6 +309,8 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
     typeof job?.retryableFailedCount === "number"
       ? job.retryableFailedCount
       : items.filter((item) => item.status === "failed" && !item.skipped).length;
+  const pendingCount = job && job.status !== "running" ? job.pendingCount ?? 0 : 0;
+  const resumableCount = retryableFailedCount + pendingCount;
 
   const filteredItems = useMemo(() => {
     if (filter === "all") return items;
@@ -663,8 +665,9 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
   const handleRetryFailed = async () => {
     try {
       const res = await retryMutation.mutateAsync();
+      const noun = res.requeuedCount === 1 ? "note" : "notes";
       toast.success(
-        `Retrying ${res.requeuedCount} failed ${res.requeuedCount === 1 ? "note" : "notes"}`
+        pendingCount > 0 ? `Resuming ${res.requeuedCount} ${noun}` : `Retrying ${res.requeuedCount} failed ${noun}`
       );
     } catch (err) {
       toast.error("Could not retry failed items", {
@@ -1176,7 +1179,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                     · {job.usage.totalTokens.toLocaleString()} tokens
                   </span>
                 )}
-                {job.status !== "running" && retryableFailedCount > 0 && (
+                {job.status !== "running" && resumableCount > 0 && (
                   <Button
                     type="button"
                     variant="outline"
@@ -1190,7 +1193,7 @@ function OrganizePageContent({ jobId }: { jobId: string | undefined }) {
                     ) : (
                       <RotateCcw className="h-3 w-3" />
                     )}
-                    Retry failed ({retryableFailedCount})
+                    {pendingCount > 0 ? `Resume (${resumableCount})` : `Retry failed (${retryableFailedCount})`}
                   </Button>
                 )}
                 {job.status === "running" && (
