@@ -29,6 +29,24 @@ const EXT_BY_MIME = {
   'image/vnd.microsoft.icon': 'ico',
 };
 
+// Track open side panel ports so closing the panel or switching tabs always cleans up the overlay.
+const panelPorts = new Map(); // Port -> { tabId: number | null }
+
+function isTabTrackedByAnyPort(tabId) {
+  for (const entry of panelPorts.values()) {
+    if (entry.tabId === tabId) return true;
+  }
+  return false;
+}
+
+function configureSidePanelBehavior() {
+  if (chrome.sidePanel && typeof chrome.sidePanel.setPanelBehavior === 'function') {
+    chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+  }
+}
+
+configureSidePanelBehavior();
+
 function detectImageMime(bytes) {
   if (bytes.length >= 4) {
     if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
@@ -113,6 +131,25 @@ function decodeDataUri(dataUri) {
     mime: detected,
     name: filenameForImage('', detected, 'embedded-image'),
   };
+}
+
+async function cropPngBytes(bytes, cropRect, dpr) {
+  const blob = new Blob([bytes], { type: 'image/png' });
+  const bitmap = await createImageBitmap(blob);
+  try {
+    const scale = typeof dpr === 'number' && dpr > 0 ? dpr : 1;
+    const sx = Math.max(0, Math.min(bitmap.width - 1, Math.round(cropRect.x * scale)));
+    const sy = Math.max(0, Math.min(bitmap.height - 1, Math.round(cropRect.y * scale)));
+    const sw = Math.max(1, Math.min(bitmap.width - sx, Math.round(cropRect.width * scale)));
+    const sh = Math.max(1, Math.min(bitmap.height - sy, Math.round(cropRect.height * scale)));
+    const canvas = new OffscreenCanvas(sw, sh);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
+    const outBlob = await canvas.convertToBlob({ type: 'image/png' });
+    return new Uint8Array(await outBlob.arrayBuffer());
+  } finally {
+    bitmap.close();
+  }
 }
 
 async function fetchImagePayload(url) {
@@ -224,15 +261,109 @@ function escapeHtml(text) {
     .replace(/"/g, '&quot;');
 }
 
-async function captureInTab(tabId, mode) {
+export async function removeOverlayFromTab(tabId) {
+  if (typeof tabId !== 'number') return;
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        if (
+          globalThis.__joplinClipperOverlay &&
+          typeof globalThis.__joplinClipperOverlay.destroy === 'function'
+        ) {
+          globalThis.__joplinClipperOverlay.destroy();
+          return;
+        }
+        const host = document.getElementById('joplin-clipper-overlay-host');
+        if (host) host.remove();
+        for (const el of Array.from(document.querySelectorAll('[data-joplin-clip-id]'))) {
+          el.removeAttribute('data-joplin-clip-id');
+        }
+      },
+    });
+  } catch {
+    // Tab may have closed, navigated, or disallow script injection
+  }
+}
+
+export async function activateOverlayInTab(tabId, mode) {
+  if (typeof tabId !== 'number') return null;
+  if (mode !== 'article' && mode !== 'screenshot' && mode !== 'selection') {
+    await removeOverlayFromTab(tabId);
+    return { mode: 'off', adjusted: false };
+  }
+
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ['vendor/Readability.js', 'capture.js', 'overlay.js'],
+  });
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (m) =>
+      globalThis.__joplinClipperOverlay ? globalThis.__joplinClipperOverlay.activate(m) : null,
+    args: [mode],
+  });
+  return (results && results[0] && results[0].result) || null;
+}
+
+async function resetOverlayInTab(tabId) {
+  if (typeof tabId !== 'number') return null;
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      if (!globalThis.__joplinClipperOverlay) return null;
+      globalThis.__joplinClipperOverlay.reset();
+      return globalThis.__joplinClipperOverlay.getState();
+    },
+  });
+  return (results && results[0] && results[0].result) || null;
+}
+
+async function getOverlayStateFromTab(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () =>
+        globalThis.__joplinClipperOverlay ? globalThis.__joplinClipperOverlay.getState() : null,
+    });
+    return (results && results[0] && results[0].result) || null;
+  } catch {
+    return null;
+  }
+}
+
+async function hideOverlayAndWaitForPaint(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        if (
+          globalThis.__joplinClipperOverlay &&
+          typeof globalThis.__joplinClipperOverlay.hideForCapture === 'function'
+        ) {
+          return globalThis.__joplinClipperOverlay.hideForCapture();
+        }
+        const host = document.getElementById('joplin-clipper-overlay-host');
+        if (host) host.style.display = 'none';
+        return new Promise((resolve) => {
+          window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve(true)));
+        });
+      },
+    });
+  } catch {
+    // Ignore if overlay wasn't injected
+  }
+}
+
+async function captureInTab(tabId, mode, options = {}) {
   await chrome.scripting.executeScript({
     target: { tabId },
     files: ['vendor/Readability.js', 'capture.js'],
   });
   const results = await chrome.scripting.executeScript({
     target: { tabId },
-    func: (m) => globalThis.__joplinClipperCapture(m),
-    args: [mode],
+    func: (m, opts) => globalThis.__joplinClipperCapture(m, opts),
+    args: [mode, options],
   });
   const first = results && results[0];
   if (!first || !first.result) {
@@ -241,7 +372,16 @@ async function captureInTab(tabId, mode) {
   return first.result;
 }
 
-export async function performClip({ tabId, mode, title, parentId, tags, serverUrl: explicitServerUrl, onProgress }) {
+export async function performClip({
+  tabId,
+  mode,
+  title,
+  parentId,
+  tags,
+  serverUrl: explicitServerUrl,
+  useOverlaySelection = false,
+  onProgress,
+}) {
   const serverUrl = explicitServerUrl || (await getServerUrl());
   if (!serverUrl) {
     throw new Error('No Joplin Web server URL configured. Open extension options to set it.');
@@ -254,6 +394,8 @@ export async function performClip({ tabId, mode, title, parentId, tags, serverUr
 
   if (mode === 'screenshot') {
     onProgress?.('Capturing visible tab…');
+    const overlayState = await getOverlayStateFromTab(tabId);
+
     let previousActiveTabId = null;
     if (!tab.active) {
       const activeTabs = await chrome.tabs.query({ active: true, windowId: tab.windowId });
@@ -261,17 +403,31 @@ export async function performClip({ tabId, mode, title, parentId, tags, serverUr
         previousActiveTabId = activeTabs[0].id;
       }
       await chrome.tabs.update(tabId, { active: true });
-      await new Promise((r) => setTimeout(r, 150));
+      await new Promise((r) => setTimeout(r, 120));
     }
+
     let dataUrl;
     try {
+      await hideOverlayAndWaitForPaint(tabId);
+      await new Promise((r) => setTimeout(r, 60));
       dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
     } finally {
       if (previousActiveTabId !== null) {
         await chrome.tabs.update(previousActiveTabId, { active: true }).catch(() => {});
       }
     }
+
     const payload = decodeDataUri(dataUrl);
+    if (
+      overlayState &&
+      overlayState.mode === 'screenshot' &&
+      overlayState.adjusted &&
+      overlayState.cropRect &&
+      overlayState.cropRect.width > 0 &&
+      overlayState.cropRect.height > 0
+    ) {
+      payload.data = await cropPngBytes(payload.data, overlayState.cropRect, overlayState.dpr);
+    }
     payload.name = `screenshot-${Date.now()}.png`;
     onProgress?.('Uploading screenshot…');
     const resource = await uploadResource(serverUrl, payload);
@@ -286,12 +442,29 @@ export async function performClip({ tabId, mode, title, parentId, tags, serverUr
       ...(parentId ? { parentId } : {}),
       ...(Array.isArray(tags) && tags.length > 0 ? { tags } : {}),
     });
+    await removeOverlayFromTab(tabId);
     await savePreferences({ lastNotebookId: parentId || res.note.parentId || '', lastMode: mode });
     return { note: res.note, uploadedImages: 1, skippedImages: 0 };
   }
 
   onProgress?.('Capturing page…');
-  const captured = await captureInTab(tabId, mode);
+  let captured;
+  try {
+    captured = await captureInTab(tabId, mode, { useOverlaySelection });
+  } catch (err) {
+    if (mode === 'bookmark') {
+      // Allow bookmarking pages where script injection is blocked (Web Store, PDF viewer, etc.)
+      captured = {
+        url: tab.url,
+        title: tab.title || new URL(tab.url).hostname,
+        html: `<p><a href="${escapeHtml(tab.url)}">${escapeHtml(tab.url)}</a></p>`,
+        format: 'markdown',
+        images: [],
+      };
+    } else {
+      throw err;
+    }
+  }
   const noteTitle = (title && title.trim()) || captured.title;
 
   const totalImgs = Math.min((captured.images || []).length, MAX_IMAGES_PER_CLIP);
@@ -317,6 +490,7 @@ export async function performClip({ tabId, mode, title, parentId, tags, serverUr
     ...(captured.siteName ? { siteName: captured.siteName } : {}),
   });
 
+  await removeOverlayFromTab(tabId);
   await savePreferences({ lastNotebookId: parentId || res.note.parentId || '', lastMode: mode });
   return { note: res.note, uploadedImages, skippedImages };
 }
@@ -372,6 +546,7 @@ function registerContextMenus() {
 }
 
 chrome.runtime.onInstalled.addListener(async (details) => {
+  configureSidePanelBehavior();
   registerContextMenus();
   if (details.reason === 'install') {
     const serverUrl = await getServerUrl();
@@ -382,7 +557,53 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 });
 
 chrome.runtime.onStartup.addListener(() => {
+  configureSidePanelBehavior();
   registerContextMenus();
+});
+
+if (chrome.commands && chrome.commands.onCommand) {
+  chrome.commands.onCommand.addListener((command, tab) => {
+    if (command !== 'open-side-panel') return;
+    if (!chrome.sidePanel || typeof chrome.sidePanel.open !== 'function') return;
+    if (tab && typeof tab.windowId === 'number') {
+      chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});
+    } else {
+      chrome.windows
+        .getLastFocused()
+        .then((win) => {
+          if (win && typeof win.id === 'number') {
+            chrome.sidePanel.open({ windowId: win.id }).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }
+  });
+}
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'joplin-clipper-panel') return;
+  panelPorts.set(port, { tabId: null });
+
+  port.onMessage.addListener((msg) => {
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type === 'PANEL_BIND_TAB') {
+      const entry = panelPorts.get(port);
+      const prevTabId = entry ? entry.tabId : null;
+      const nextTabId = typeof msg.tabId === 'number' ? msg.tabId : null;
+      if (entry) entry.tabId = nextTabId;
+      if (prevTabId !== null && prevTabId !== nextTabId && !isTabTrackedByAnyPort(prevTabId)) {
+        void removeOverlayFromTab(prevTabId);
+      }
+    }
+  });
+
+  port.onDisconnect.addListener(() => {
+    const entry = panelPorts.get(port);
+    panelPorts.delete(port);
+    if (entry && entry.tabId !== null && !isTabTrackedByAnyPort(entry.tabId)) {
+      void removeOverlayFromTab(entry.tabId);
+    }
+  });
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
@@ -434,6 +655,37 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message !== 'object') return false;
 
+  if (message.type === 'OVERLAY_ACTIVATE') {
+    activateOverlayInTab(message.tabId, message.mode)
+      .then((state) => sendResponse({ ok: true, state }))
+      .catch((err) =>
+        sendResponse({
+          ok: false,
+          error: err instanceof Error ? err.message : 'Could not show overlay on this page',
+        })
+      );
+    return true;
+  }
+
+  if (message.type === 'OVERLAY_RESET') {
+    resetOverlayInTab(message.tabId)
+      .then((state) => sendResponse({ ok: true, state }))
+      .catch((err) =>
+        sendResponse({
+          ok: false,
+          error: err instanceof Error ? err.message : 'Could not reset overlay',
+        })
+      );
+    return true;
+  }
+
+  if (message.type === 'OVERLAY_DESTROY') {
+    removeOverlayFromTab(message.tabId)
+      .then(() => sendResponse({ ok: true }))
+      .catch(() => sendResponse({ ok: true }));
+    return true;
+  }
+
   if (message.type === 'CLIP_PAGE') {
     performClip({
       tabId: message.tabId,
@@ -442,6 +694,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       parentId: message.parentId,
       tags: message.tags,
       serverUrl: message.serverUrl,
+      useOverlaySelection: Boolean(message.useOverlaySelection),
       onProgress: (statusText) => {
         chrome.runtime.sendMessage({ type: 'CLIP_PROGRESS', text: statusText }).catch(() => {});
       },
@@ -470,4 +723,6 @@ globalThis.__joplinClipper = {
   performClip,
   saveSingleImage,
   clipUrl,
+  activateOverlayInTab,
+  removeOverlayFromTab,
 };

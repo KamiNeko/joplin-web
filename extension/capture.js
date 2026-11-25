@@ -1,6 +1,12 @@
 (() => {
   'use strict';
 
+  const OVERLAY_HOST_ID = 'joplin-clipper-overlay-host';
+  const TEMP_ID_ATTR = 'data-joplin-clip-id';
+
+  const UNSAFE_SELECTOR = 'script, style, iframe, object, embed, form, noscript, template';
+  const ADJUSTED_UNSAFE_SELECTOR = 'script, style, iframe, object, embed, form, button, noscript, template';
+
   function pickLargestFromSrcset(srcset) {
     if (!srcset) return '';
     let bestUrl = '';
@@ -112,6 +118,8 @@
       img.removeAttribute('data-original');
       img.removeAttribute('data-lazy-src');
       img.removeAttribute('data-srcset');
+      img.removeAttribute('data-lazy-srcset');
+      img.removeAttribute('data-actualsrc');
     }
 
     for (const a of Array.from(root.querySelectorAll('a[href]'))) {
@@ -126,12 +134,16 @@
     }
   }
 
-  function stripUnsafeElements(root) {
-    const junk = root.querySelectorAll('script, style, iframe, object, embed, form, noscript, template');
+  function stripUnsafeElements(root, selector = UNSAFE_SELECTOR) {
+    const overlayInRoot = root.querySelector ? root.querySelector(`#${OVERLAY_HOST_ID}`) : null;
+    if (overlayInRoot) overlayInRoot.remove();
+
+    const junk = root.querySelectorAll(selector);
     for (const el of Array.from(junk)) {
       el.remove();
     }
     for (const el of Array.from(root.querySelectorAll('*'))) {
+      el.removeAttribute(TEMP_ID_ATTR);
       for (const attr of Array.from(el.attributes)) {
         const lower = attr.name.toLowerCase();
         if (lower.startsWith('on') || lower === 'srcdoc') {
@@ -141,36 +153,42 @@
     }
   }
 
-  function cloneVisibleBody() {
-    const clone = document.body.cloneNode(true);
-    // Walk live DOM and clone in parallel to prune hidden elements without mutating the live page
-    const pruneHidden = (liveEl, cloneEl) => {
-      const liveChildren = Array.from(liveEl.children);
-      const cloneChildren = Array.from(cloneEl.children);
-      const len = Math.min(liveChildren.length, cloneChildren.length);
-      for (let i = len - 1; i >= 0; i--) {
-        const lc = liveChildren[i];
-        const cc = cloneChildren[i];
-        let hidden = lc.hasAttribute('hidden') || lc.getAttribute('aria-hidden') === 'true';
-        if (!hidden) {
-          try {
-            const style = window.getComputedStyle(lc);
-            if (style.display === 'none' || style.visibility === 'hidden') {
-              hidden = true;
-            }
-          } catch {
-            // ignore style errors
-          }
-        }
-        if (hidden) {
-          cc.remove();
-        } else {
-          pruneHidden(lc, cc);
-        }
+  function isLiveElementHidden(el) {
+    if (!el || el.nodeType !== 1) return true;
+    if (el.id === OVERLAY_HOST_ID) return true;
+    if (el.hasAttribute('hidden') || el.getAttribute('aria-hidden') === 'true') return true;
+    try {
+      const style = window.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') return true;
+    } catch {
+      // ignore style errors
+    }
+    return false;
+  }
+
+  function pruneHiddenClone(liveEl, cloneEl) {
+    const liveChildren = Array.from(liveEl.children);
+    const cloneChildren = Array.from(cloneEl.children);
+    const len = Math.min(liveChildren.length, cloneChildren.length);
+    for (let i = len - 1; i >= 0; i--) {
+      const lc = liveChildren[i];
+      const cc = cloneChildren[i];
+      if (isLiveElementHidden(lc)) {
+        cc.remove();
+      } else {
+        pruneHiddenClone(lc, cc);
       }
-    };
-    pruneHidden(document.body, clone);
+    }
+  }
+
+  function cloneVisibleElement(liveEl) {
+    const clone = liveEl.cloneNode(true);
+    pruneHiddenClone(liveEl, clone);
     return clone;
+  }
+
+  function cloneVisibleBody() {
+    return cloneVisibleElement(document.body);
   }
 
   function tokenizeImages(root) {
@@ -211,22 +229,354 @@
     return '';
   }
 
-  globalThis.__joplinClipperInspect = () => {
+  function countWords(text) {
+    const cleaned = String(text || '').trim();
+    if (!cleaned) return 0;
+    return cleaned.split(/\s+/).filter(Boolean).length;
+  }
+
+  function summarizeContainer(root, baseUrl) {
+    const clone = root.cloneNode(true);
+    stripUnsafeElements(clone, ADJUSTED_UNSAFE_SELECTOR);
+    normalizeDomUrls(clone, baseUrl);
+    const words = countWords(clone.textContent || '');
+    const seenUrls = new Set();
+    for (const img of Array.from(clone.querySelectorAll('img[src]'))) {
+      const src = (img.getAttribute('src') || '').trim();
+      if (src && /^(https?:|data:)/i.test(src)) {
+        seenUrls.add(src);
+      }
+    }
+    return { words, images: seenUrls.size };
+  }
+
+  function summarizeLiveElements(elements) {
+    const baseUrl = document.baseURI || window.location.href;
+    const wrapper = document.createElement('div');
+    for (const el of elements || []) {
+      if (!el || !el.isConnected || isLiveElementHidden(el)) continue;
+      wrapper.appendChild(cloneVisibleElement(el));
+    }
+    return summarizeContainer(wrapper, baseUrl);
+  }
+
+  function summarizeSelection() {
     const sel = window.getSelection();
     const selText = sel ? sel.toString().trim() : '';
+    if (!sel || sel.rangeCount === 0 || !selText) {
+      return { hasSelection: false, words: 0, images: 0 };
+    }
+    const baseUrl = document.baseURI || window.location.href;
+    const wrapper = document.createElement('div');
+    for (let i = 0; i < sel.rangeCount; i++) {
+      wrapper.appendChild(sel.getRangeAt(i).cloneContents());
+    }
+    const summary = summarizeContainer(wrapper, baseUrl);
+    return { hasSelection: true, words: summary.words, images: summary.images };
+  }
+
+  function cleanupTempIds() {
+    for (const el of Array.from(document.querySelectorAll(`[${TEMP_ID_ATTR}]`))) {
+      el.removeAttribute(TEMP_ID_ATTR);
+    }
+  }
+
+  function getVisibleRect(el) {
+    if (!el || !el.isConnected || isLiveElementHidden(el)) return null;
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return null;
+    return rect;
+  }
+
+  function getElementVisibleTextLen(el) {
+    if (!el || isLiveElementHidden(el)) return 0;
+    const tag = el.tagName;
+    if (/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|SVG|IFRAME|OBJECT|EMBED)$/.test(tag)) return 0;
+    let total = 0;
+    for (const node of el.childNodes) {
+      if (node.nodeType === 3) {
+        total += (node.textContent || '').trim().length;
+      } else if (node.nodeType === 1) {
+        total += getElementVisibleTextLen(node);
+      }
+    }
+    return total;
+  }
+
+  function lowestCommonAncestor(elements) {
+    if (!elements || elements.length === 0) return null;
+    if (elements.length === 1) return elements[0];
+    const chains = elements.map((el) => {
+      const chain = [];
+      let cur = el;
+      while (cur) {
+        chain.push(cur);
+        cur = cur.parentElement;
+      }
+      return chain.reverse();
+    });
+    let lca = null;
+    const minLen = Math.min(...chains.map((c) => c.length));
+    for (let i = 0; i < minLen; i++) {
+      const candidate = chains[0][i];
+      if (chains.every((c) => c[i] === candidate)) {
+        lca = candidate;
+      } else {
+        break;
+      }
+    }
+    return lca;
+  }
+
+  function dedupeTopMostInDocumentOrder(elements) {
+    const unique = Array.from(new Set(elements.filter((el) => el && el.isConnected)));
+    const filtered = unique.filter(
+      (el) => !unique.some((other) => other !== el && other.contains(el))
+    );
+    filtered.sort((a, b) => {
+      if (a === b) return 0;
+      const pos = a.compareDocumentPosition(b);
+      if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+      if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+      return 0;
+    });
+    return filtered;
+  }
+
+  function isMetadataOrHeading(el) {
+    if (!el) return false;
+    if (/^H[1-6]$/.test(el.tagName)) return true;
+    const hint = `${el.className || ''} ${el.id || ''}`.toLowerCase();
+    if (/(byline|author|meta|date|time|subtitle|kicker|standfirst|header)/.test(hint)) return true;
+    if (el.tagName === 'HEADER' || el.tagName === 'TIME') return true;
+    return false;
+  }
+
+  function containerHasSubstantialUnmatchedChild(container, matchedLiveSet) {
+    for (const child of Array.from(container.children)) {
+      if (isLiveElementHidden(child)) continue;
+      if (/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|FORM|BUTTON|IFRAME|OBJECT|EMBED)$/.test(child.tagName)) {
+        continue;
+      }
+      if (matchedLiveSet.has(child)) continue;
+      let containsMatched = false;
+      for (const m of matchedLiveSet) {
+        if (child.contains(m)) {
+          containsMatched = true;
+          break;
+        }
+      }
+      if (containsMatched) {
+        if (containerHasSubstantialUnmatchedChild(child, matchedLiveSet)) return true;
+        continue;
+      }
+      if (isMetadataOrHeading(child)) continue;
+      const textLen = getElementVisibleTextLen(child);
+      const hasImg = Boolean(child.querySelector('img') || child.tagName === 'IMG');
+      if (textLen >= 30 || hasImg) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function detectArticleLiveDom() {
+    const baseUrl = document.baseURI || window.location.href;
+    const idToLive = new Map();
+    let seq = 0;
+
+    let docClone = null;
+    try {
+      const body = document.body;
+      if (body) {
+        const walker = document.createTreeWalker(body, NodeFilter.SHOW_ELEMENT);
+        let node = walker.currentNode;
+        while (node) {
+          if (
+            node !== body &&
+            node.id !== OVERLAY_HOST_ID &&
+            !node.closest(`#${OVERLAY_HOST_ID}`) &&
+            !/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(node.tagName)
+          ) {
+            const id = String(++seq);
+            node.setAttribute(TEMP_ID_ATTR, id);
+            idToLive.set(id, node);
+          }
+          node = walker.nextNode();
+        }
+      }
+      docClone = document.cloneNode(true);
+    } finally {
+      cleanupTempIds();
+    }
+
+    if (docClone) {
+      const overlayClone = docClone.getElementById(OVERLAY_HOST_ID);
+      if (overlayClone) overlayClone.remove();
+      normalizeDomUrls(docClone, baseUrl);
+    }
+
+    let parsed = null;
+    if (docClone && typeof Readability === 'function') {
+      try {
+        parsed = new Readability(docClone).parse();
+      } catch {
+        parsed = null;
+      }
+    }
+
+    let selectedElements = [];
+    let summary = { words: 0, images: 0 };
+
+    if (parsed && parsed.content) {
+      const container = document.createElement('div');
+      container.innerHTML = parsed.content;
+
+      const matchedLive = [];
+      const matchedLiveSet = new Set();
+      for (const el of Array.from(container.querySelectorAll(`[${TEMP_ID_ATTR}]`))) {
+        const id = el.getAttribute(TEMP_ID_ATTR);
+        const liveEl = idToLive.get(id);
+        if (
+          liveEl &&
+          liveEl.isConnected &&
+          liveEl !== document.body &&
+          liveEl !== document.documentElement &&
+          getVisibleRect(liveEl)
+        ) {
+          if (!matchedLiveSet.has(liveEl)) {
+            matchedLiveSet.add(liveEl);
+            matchedLive.push(liveEl);
+          }
+        }
+      }
+
+      // Filter out overly broad containers that include substantial unmatched siblings in the live DOM
+      const cleanMatched = matchedLive.filter(
+        (el) => !containerHasSubstantialUnmatchedChild(el, matchedLiveSet)
+      );
+      const topMost = dedupeTopMostInDocumentOrder(cleanMatched.length > 0 ? cleanMatched : matchedLive);
+
+      if (topMost.length === 1) {
+        selectedElements = topMost;
+      } else if (topMost.length > 1) {
+        const lca = lowestCommonAncestor(topMost);
+        if (
+          lca &&
+          lca !== document.body &&
+          lca !== document.documentElement &&
+          getVisibleRect(lca) &&
+          !containerHasSubstantialUnmatchedChild(lca, matchedLiveSet)
+        ) {
+          selectedElements = [lca];
+        } else {
+          selectedElements = topMost;
+        }
+      }
+
+      // If single matched element is a child of an <article> whose only extra children are title/byline,
+      // promote to the <article> so the box covers the full article block.
+      if (selectedElements.length === 1) {
+        const articleAncestor = selectedElements[0].closest('article');
+        if (
+          articleAncestor &&
+          articleAncestor !== selectedElements[0] &&
+          articleAncestor !== document.body &&
+          getVisibleRect(articleAncestor) &&
+          !containerHasSubstantialUnmatchedChild(articleAncestor, matchedLiveSet)
+        ) {
+          selectedElements = [articleAncestor];
+        }
+      }
+
+      // Clean temp IDs from parsed.content summary calculation
+      summary = summarizeContainer(container, baseUrl);
+    }
+
+    if (selectedElements.length === 0) {
+      const fallback =
+        document.querySelector('article') ||
+        document.querySelector('main') ||
+        document.body;
+      if (fallback && getVisibleRect(fallback)) {
+        selectedElements = [fallback];
+      }
+      summary = summarizeLiveElements(selectedElements);
+    }
+
+    return { elements: selectedElements, parsed, summary };
+  }
+
+  function captureElementsAsMarkdown(elements) {
+    const baseUrl = document.baseURI || window.location.href;
+    const pageUrl = window.location.href;
+    const fallbackTitle = (document.title || '').trim() || window.location.hostname || 'Clipped Page';
+    const siteName = getMetaContent(['meta[property="og:site_name"]']) || undefined;
+
+    const ordered = dedupeTopMostInDocumentOrder(elements || []);
+    const wrapper = document.createElement('div');
+    for (const el of ordered) {
+      if (!el || !el.isConnected || isLiveElementHidden(el)) continue;
+      wrapper.appendChild(cloneVisibleElement(el));
+    }
+
+    stripUnsafeElements(wrapper, ADJUSTED_UNSAFE_SELECTOR);
+    normalizeDomUrls(wrapper, baseUrl);
+    const images = tokenizeImages(wrapper);
+    const html = wrapper.innerHTML.trim();
+    if (!html) {
+      throw new Error('The selected region contains no clippable content.');
+    }
+
+    return {
+      url: pageUrl,
+      title: fallbackTitle,
+      html,
+      format: 'markdown',
+      siteName,
+      images,
+    };
+  }
+
+  globalThis.__joplinClipperLib = {
+    OVERLAY_HOST_ID,
+    TEMP_ID_ATTR,
+    isLiveElementHidden,
+    getVisibleRect,
+    dedupeTopMostInDocumentOrder,
+    lowestCommonAncestor,
+    detectArticleLiveDom,
+    captureElementsAsMarkdown,
+    summarizeLiveElements,
+    summarizeSelection,
+    cleanupTempIds,
+  };
+
+  globalThis.__joplinClipperInspect = () => {
+    const selSummary = summarizeSelection();
     const title =
       getMetaContent(['meta[property="og:title"]']) ||
       (document.title || '').trim() ||
       window.location.hostname;
+    const isPdf =
+      String(document.contentType || '').toLowerCase() === 'application/pdf' ||
+      Boolean(
+        document.body &&
+          document.body.children.length === 1 &&
+          document.body.children[0].tagName === 'EMBED' &&
+          String(document.body.children[0].getAttribute('type') || '').toLowerCase() === 'application/pdf'
+      );
     return {
       url: window.location.href,
       title,
-      hasSelection: selText.length > 0,
-      selectionLength: selText.length,
+      hasSelection: selSummary.hasSelection,
+      selectionWords: selSummary.words,
+      selectionImages: selSummary.images,
+      isPdf,
     };
   };
 
-  globalThis.__joplinClipperCapture = (mode) => {
+  globalThis.__joplinClipperCapture = (mode, options = {}) => {
     const baseUrl = document.baseURI || window.location.href;
     const pageUrl = window.location.href;
     const fallbackTitle = (document.title || '').trim() || window.location.hostname || 'Clipped Page';
@@ -312,8 +662,24 @@
       };
     }
 
-    // Default: 'article' mode via Readability on a clone of the live DOM
+    // Article mode: if the user adjusted the overlay area, save the highlighted elements
+    if (
+      options &&
+      options.useOverlaySelection &&
+      globalThis.__joplinClipperOverlay &&
+      typeof globalThis.__joplinClipperOverlay.isAdjusted === 'function' &&
+      globalThis.__joplinClipperOverlay.isAdjusted()
+    ) {
+      const selected = globalThis.__joplinClipperOverlay.getSelectedElements();
+      if (Array.isArray(selected) && selected.length > 0) {
+        return captureElementsAsMarkdown(selected);
+      }
+    }
+
+    // Default / unadjusted 'article' mode: Readability on a clone of the live DOM
     const docClone = document.cloneNode(true);
+    const overlayClone = docClone.getElementById(OVERLAY_HOST_ID);
+    if (overlayClone) overlayClone.remove();
     normalizeDomUrls(docClone, baseUrl);
 
     let parsed = null;
