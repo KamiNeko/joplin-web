@@ -4,6 +4,10 @@ Notable changes to Joplin Web. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Changed
+
+- Faster search on large accounts: each search word is compiled once per query into a case-insensitive pattern and tested against titles and bodies as stored, instead of lower-casing every note for every query, and list previews are kept per note. The search results pane shows 100 results at a time (more on scroll or with *Show more*), and a search that was overtaken by further typing is cancelled.
+
 ## [1.1.1] – 2026-10-19
 
 ### Changed

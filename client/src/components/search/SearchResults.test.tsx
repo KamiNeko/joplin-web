@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { HighlightedText, SearchResults } from "./SearchResults";
+import { SEARCH_RESULTS_PAGE_SIZE } from "@/lib/ui-constants";
 import type { SearchResult } from "@/lib/types";
 
 afterEach(cleanup);
@@ -109,5 +110,62 @@ describe("SearchResults", () => {
     expect(screen.queryByText("No matches found")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
     expect(onClearQuery).toHaveBeenCalled();
+  });
+
+  const makeManyResults = (count: number, prefix = "Match"): SearchResult[] =>
+    Array.from({ length: count }, (_, i) =>
+      result({
+        id: (i + 1).toString(16).padStart(32, "0"),
+        title: `${prefix} ${i + 1}`,
+        preview: `Preview ${i + 1}`,
+      })
+    );
+
+  const renderedCards = (container: HTMLElement) => container.querySelectorAll('[role="button"][tabindex="0"]');
+
+  it("renders large result lists progressively, loads more via button or scroll, and resets on query/results change", () => {
+    const many = makeManyResults(250);
+    const { container, rerender } = render(<SearchResults query="ba" results={many} onSelectNote={() => {}} />);
+
+    expect(screen.getByText("250 found")).toBeTruthy();
+    expect(renderedCards(container)).toHaveLength(SEARCH_RESULTS_PAGE_SIZE);
+    expect(screen.getByRole("button", { name: "Show more (150 remaining)" })).toBeTruthy();
+
+    // Button loads the next page
+    fireEvent.click(screen.getByRole("button", { name: "Show more (150 remaining)" }));
+    expect(renderedCards(container)).toHaveLength(200);
+    expect(screen.getByRole("button", { name: "Show more (50 remaining)" })).toBeTruthy();
+
+    // Scrolling near the bottom loads the remaining items
+    const viewport = container.querySelector("[data-radix-scroll-area-viewport]") as HTMLElement;
+    Object.defineProperty(viewport, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(viewport, "clientHeight", { value: 400, configurable: true });
+    Object.defineProperty(viewport, "scrollTop", { value: 500, configurable: true });
+    fireEvent.scroll(viewport);
+    expect(renderedCards(container)).toHaveLength(250);
+    expect(screen.queryByRole("button", { name: /^Show more/ })).toBeNull();
+
+    // Changing query resets the visible slice back to one page
+    rerender(<SearchResults query="bank" results={many} onSelectNote={() => {}} />);
+    expect(renderedCards(container)).toHaveLength(SEARCH_RESULTS_PAGE_SIZE);
+
+    // Expand again, then replace results array for the same query -> also resets
+    fireEvent.click(screen.getByRole("button", { name: "Show more (150 remaining)" }));
+    expect(renderedCards(container)).toHaveLength(200);
+    rerender(<SearchResults query="bank" results={makeManyResults(250, "Refreshed")} onSelectNote={() => {}} />);
+    expect(renderedCards(container)).toHaveLength(SEARCH_RESULTS_PAGE_SIZE);
+  });
+
+  it("extends the rendered slice to include a selected note beyond the first page", () => {
+    const many = makeManyResults(250);
+    const target = many[149]; // 150th result (index 149)
+    const { container } = render(
+      <SearchResults query="ba" results={many} selectedNoteId={target.id} onSelectNote={() => {}} />
+    );
+
+    expect(screen.getByText("250 found")).toBeTruthy();
+    expect(renderedCards(container)).toHaveLength(150);
+    expect(screen.getByText("Match 150")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Show more (100 remaining)" })).toBeTruthy();
   });
 });

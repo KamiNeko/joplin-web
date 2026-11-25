@@ -21,7 +21,7 @@ export function useSearch(query: string) {
 
   const queryResult = useQuery<SearchResult[], Error>({
     queryKey: ["search", debouncedQuery],
-    queryFn: () => searchNotes(debouncedQuery),
+    queryFn: ({ signal }) => searchNotes(debouncedQuery, signal),
     enabled,
     staleTime: 10 * 1000,
   });

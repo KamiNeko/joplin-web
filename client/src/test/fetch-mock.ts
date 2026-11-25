@@ -5,6 +5,7 @@ export interface FetchCall {
   method: string;
   path: string;
   body: unknown;
+  signal?: AbortSignal | null;
 }
 
 type Handler = (call: FetchCall) => Response | undefined | Promise<Response | undefined>;
@@ -36,7 +37,12 @@ export function mockFetch(handler: Handler): FetchCall[] {
           // not JSON
         }
       }
-      const call = { method: (init.method ?? "GET").toUpperCase(), path: url.pathname + url.search, body };
+      const call: FetchCall = {
+        method: (init.method ?? "GET").toUpperCase(),
+        path: url.pathname + url.search,
+        body,
+        signal: init.signal,
+      };
       calls.push(call);
       return (await handler(call)) ?? jsonResponse([]);
     })

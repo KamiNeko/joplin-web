@@ -159,6 +159,13 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
   return pending;
 }
 
+function isAbortError(err: unknown, signal?: AbortSignal | null): boolean {
+  return (
+    Boolean(signal?.aborted) ||
+    (typeof err === "object" && err !== null && (err as { name?: unknown }).name === "AbortError")
+  );
+}
+
 async function send<T>(endpoint: string, init: RequestInit, skipAuthRedirect: boolean, isRead: boolean): Promise<T> {
   const headers: Record<string, string> = {
     Accept: "application/json",
@@ -176,7 +183,10 @@ async function send<T>(endpoint: string, init: RequestInit, skipAuthRedirect: bo
       ...init,
       headers,
     });
-  } catch {
+  } catch (err) {
+    if (isAbortError(err, init.signal)) {
+      throw err;
+    }
     // fetch only rejects when no response arrived (offline, DNS, connection refused)
     const message = "Can't reach the server";
     recordNetworkError(message);
@@ -185,6 +195,9 @@ async function send<T>(endpoint: string, init: RequestInit, skipAuthRedirect: bo
 
   if (!response.ok) {
     const { message, data } = await readErrorMessage(response);
+    if (init.signal?.aborted) {
+      throw init.signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+    }
     // Login and the startup check handle their own errors and don't feed the connection status
     if (!skipAuthRedirect) recordResponse(response.status, isRead, message);
     if (response.status === 401 && !skipAuthRedirect) {
@@ -192,6 +205,9 @@ async function send<T>(endpoint: string, init: RequestInit, skipAuthRedirect: bo
       throw new ApiError(401, "Your session has expired. Please sign in again.", data);
     }
     throw new ApiError(response.status, message, data, parseRetryAfter(response.headers.get("Retry-After")));
+  }
+  if (init.signal?.aborted) {
+    throw init.signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
   }
   if (!skipAuthRedirect) recordResponse(response.status, isRead, "");
 
@@ -324,13 +340,13 @@ export async function getTags(): Promise<Tag[]> {
 /**
  * Searches notes by query string.
  */
-export async function searchNotes(query: string): Promise<SearchResult[]> {
+export async function searchNotes(query: string, signal?: AbortSignal): Promise<SearchResult[]> {
   const trimmed = query.trim();
   if (!trimmed) {
     return [];
   }
   const urlQuery = new URLSearchParams({ q: trimmed });
-  return request<SearchResult[]>(`/api/search?${urlQuery.toString()}`);
+  return request<SearchResult[]>(`/api/search?${urlQuery.toString()}`, { signal });
 }
 
 /**
