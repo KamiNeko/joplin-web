@@ -1,13 +1,51 @@
 import {
+  AiFeatureStatus,
+  AskNotesResponse,
+  AudioTranscribeResponse,
+  BatchNoteRequest,
+  BatchNoteResult,
+  ClipResponse,
+  EmailIngestResponse,
+  HygieneReport,
   Notebook,
+  NoteAssistAction,
+  NoteAssistResponse,
+  NoteAttachment,
   NoteListItem,
   Note,
+  NoteRevisionDetail,
+  NoteRevisionMeta,
+  OrganizeApplyItemInput,
+  OrganizeApplyResponse,
+  OrganizeDeleteResponse,
+  OrganizeJobResponse,
+  OrganizeJobStatus,
+  OrganizeJobSummary,
+  OrganizeRetryResponse,
+  OrganizeStatus,
+  OrganizeUndoResponse,
+  RecentNotesResponse,
+  SavedSearch,
   Tag,
+  TasksResponse,
   SearchResult,
   LoginResponse,
   TrashedNotebook,
+  UserPreferences,
   WriteState,
+  TwoFactorStatus,
+  PasskeyItem,
+  TrustedDeviceItem,
+  TotpSetupResponse,
+  TwoFactorCompleteResponse,
+  TwoFactorMethod,
 } from "./types";
+import type {
+  PublicKeyCredentialCreationOptionsJSON,
+  PublicKeyCredentialRequestOptionsJSON,
+  RegistrationResponseJSON,
+  AuthenticationResponseJSON,
+} from "@simplewebauthn/browser";
 import { changePendingWrites, recordNetworkError, recordResponse } from "./connection";
 
 /**
@@ -246,6 +284,188 @@ export async function checkSession(): Promise<SessionInfo | null> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Two-Factor Authentication
+// ---------------------------------------------------------------------------
+
+export function isStepUpRequiredError(error: unknown): error is ApiError {
+  return (
+    error instanceof ApiError &&
+    error.status === 403 &&
+    Boolean((error.data as { stepUpRequired?: unknown } | undefined)?.stepUpRequired)
+  );
+}
+
+export function getStepUpMethodsFromError(error: unknown): TwoFactorMethod[] {
+  if (!(error instanceof ApiError)) return [];
+  const methods = (error.data as { methods?: unknown } | undefined)?.methods;
+  return Array.isArray(methods) ? (methods as TwoFactorMethod[]) : [];
+}
+
+export function isPendingExpiredError(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 401 &&
+    Boolean((error.data as { expired?: unknown } | undefined)?.expired)
+  );
+}
+
+export async function verifyTotpLogin(code: string, trustDevice: boolean): Promise<TwoFactorCompleteResponse> {
+  return request<TwoFactorCompleteResponse>("/api/auth/2fa/totp/verify", {
+    method: "POST",
+    body: JSON.stringify({ code, trustDevice }),
+    skipAuthRedirect: true,
+  });
+}
+
+export async function getPasskeyAuthOptions(): Promise<PublicKeyCredentialRequestOptionsJSON> {
+  return request<PublicKeyCredentialRequestOptionsJSON>("/api/auth/2fa/passkey/auth/options", {
+    method: "POST",
+    body: JSON.stringify({}),
+    skipAuthRedirect: true,
+  });
+}
+
+export async function verifyPasskeyLogin(
+  response: AuthenticationResponseJSON,
+  trustDevice: boolean
+): Promise<TwoFactorCompleteResponse> {
+  return request<TwoFactorCompleteResponse>("/api/auth/2fa/passkey/auth/verify", {
+    method: "POST",
+    body: JSON.stringify({ response, trustDevice }),
+    skipAuthRedirect: true,
+  });
+}
+
+export async function verifyRecoveryLogin(code: string, trustDevice: boolean): Promise<TwoFactorCompleteResponse> {
+  return request<TwoFactorCompleteResponse>("/api/auth/2fa/recovery/verify", {
+    method: "POST",
+    body: JSON.stringify({ code, trustDevice }),
+    skipAuthRedirect: true,
+  });
+}
+
+export async function setupTotp(skipAuthRedirect = false): Promise<TotpSetupResponse> {
+  return request<TotpSetupResponse>("/api/auth/2fa/totp/setup", {
+    method: "POST",
+    body: JSON.stringify({}),
+    skipAuthRedirect,
+  });
+}
+
+export async function confirmTotp(
+  code: string,
+  options: { trustDevice?: boolean; skipAuthRedirect?: boolean } = {}
+): Promise<TwoFactorCompleteResponse> {
+  return request<TwoFactorCompleteResponse>("/api/auth/2fa/totp/confirm", {
+    method: "POST",
+    body: JSON.stringify({ code, ...(options.trustDevice !== undefined ? { trustDevice: options.trustDevice } : {}) }),
+    skipAuthRedirect: options.skipAuthRedirect,
+  });
+}
+
+export async function getPasskeyRegisterOptions(
+  skipAuthRedirect = false
+): Promise<PublicKeyCredentialCreationOptionsJSON> {
+  return request<PublicKeyCredentialCreationOptionsJSON>("/api/auth/2fa/passkey/register/options", {
+    method: "POST",
+    body: JSON.stringify({}),
+    skipAuthRedirect,
+  });
+}
+
+export async function verifyPasskeyRegistration(
+  input: { response: RegistrationResponseJSON; name: string; trustDevice?: boolean },
+  skipAuthRedirect = false
+): Promise<TwoFactorCompleteResponse> {
+  return request<TwoFactorCompleteResponse>("/api/auth/2fa/passkey/register/verify", {
+    method: "POST",
+    body: JSON.stringify(input),
+    skipAuthRedirect,
+  });
+}
+
+export async function getTwoFactorStatus(): Promise<TwoFactorStatus> {
+  return request<TwoFactorStatus>("/api/auth/2fa/status");
+}
+
+export async function getPasskeys(): Promise<PasskeyItem[]> {
+  const res = await request<{ passkeys: PasskeyItem[] }>("/api/auth/2fa/passkeys");
+  return res.passkeys;
+}
+
+export async function renamePasskey(id: string, name: string): Promise<PasskeyItem> {
+  const res = await request<{ passkey: PasskeyItem }>(`/api/auth/2fa/passkeys/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify({ name }),
+  });
+  return res.passkey;
+}
+
+export async function deletePasskey(id: string): Promise<void> {
+  await request(`/api/auth/2fa/passkeys/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function removeTotp(): Promise<void> {
+  await request("/api/auth/2fa/totp", { method: "DELETE" });
+}
+
+export async function regenerateRecoveryCodes(): Promise<string[]> {
+  const res = await request<{ recoveryCodes: string[] }>("/api/auth/2fa/recovery/regenerate", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return res.recoveryCodes;
+}
+
+export async function getTrustedDevices(): Promise<TrustedDeviceItem[]> {
+  const res = await request<{ devices: TrustedDeviceItem[] }>("/api/auth/2fa/trusted-devices");
+  return res.devices;
+}
+
+export async function revokeAllTrustedDevices(): Promise<void> {
+  await request("/api/auth/2fa/trusted-devices", { method: "DELETE" });
+}
+
+export async function revokeTrustedDevice(id: string): Promise<void> {
+  await request(`/api/auth/2fa/trusted-devices/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function stepUpWithTotp(code: string): Promise<{ verified: boolean; stepUpExpiresAt: number }> {
+  return request<{ verified: boolean; stepUpExpiresAt: number }>("/api/auth/2fa/step-up/totp", {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  });
+}
+
+export async function getStepUpPasskeyOptions(): Promise<PublicKeyCredentialRequestOptionsJSON> {
+  return request<PublicKeyCredentialRequestOptionsJSON>("/api/auth/2fa/step-up/passkey/options", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function stepUpWithPasskey(
+  response: AuthenticationResponseJSON
+): Promise<{ verified: boolean; stepUpExpiresAt: number }> {
+  return request<{ verified: boolean; stepUpExpiresAt: number }>("/api/auth/2fa/step-up/passkey/verify", {
+    method: "POST",
+    body: JSON.stringify({ response }),
+  });
+}
+
+export async function stepUpWithRecovery(
+  code: string
+): Promise<{ verified: boolean; stepUpExpiresAt: number; recoveryCodesRemaining: number }> {
+  return request<{ verified: boolean; stepUpExpiresAt: number; recoveryCodesRemaining: number }>(
+    "/api/auth/2fa/step-up/recovery",
+    {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    }
+  );
+}
+
 /**
  * Asks whether the account accepts writes. Anything but an explicit `writable: false` counts as
  * writable: the server still refuses each write it can't take, so a missing answer only means the
@@ -363,6 +583,8 @@ export async function createNote(input: {
   title?: string;
   body?: string;
   isTodo?: boolean;
+  sourceUrl?: string;
+  author?: string;
 }): Promise<Note> {
   return request<Note>("/api/notes", { method: "POST", body: JSON.stringify(input) });
 }
@@ -399,6 +621,19 @@ export async function deleteNote(id: string, permanent = false): Promise<void> {
  */
 export async function restoreNote(id: string): Promise<Note> {
   return request<Note>(`/api/notes/${id}/restore`, { method: "POST" });
+}
+
+/** Maximum items sent in one POST /api/notes/batch request (matches server cap). */
+export const BATCH_CHUNK_SIZE = 1000;
+
+/**
+ * Applies a bulk update to up to 1000 notes; returns one outcome entry per item.
+ */
+export async function batchUpdateNotes(payload: BatchNoteRequest): Promise<BatchNoteResult[]> {
+  return request<BatchNoteResult[]>("/api/notes/batch", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 /**
@@ -456,16 +691,42 @@ export function getResourceIdFromUrl(src: string | undefined): string | null {
 
 // Resources are immutable, so each one is downloaded once per session
 const resourceObjectUrls = new Map<string, Promise<string>>();
+const resourceCacheClearers = new Set<() => void>();
 
 /**
- * Downloads a resource with the session cookie.
+ * Registers a cache-cleanup callback to run alongside `clearResourceCache()` (e.g. on logout).
  */
-async function fetchResourceBlob(resourceId: string): Promise<Blob> {
-  const response = await fetch(`${API_BASE_URL}/api/resources/${resourceId}`, SESSION_FETCH_OPTIONS);
+export function onClearResourceCache(clearer: () => void): () => void {
+  resourceCacheClearers.add(clearer);
+  return () => {
+    resourceCacheClearers.delete(clearer);
+  };
+}
+
+/**
+ * Fetches a resource response with the session cookie.
+ */
+async function fetchResource(resourceId: string, query = ""): Promise<Response> {
+  const response = await fetch(`${API_BASE_URL}/api/resources/${resourceId}${query}`, SESSION_FETCH_OPTIONS);
   if (!response.ok) {
     throw new ApiError(response.status, `Could not load resource (HTTP ${response.status})`);
   }
-  return response.blob();
+  return response;
+}
+
+/**
+ * Downloads a resource as a Blob with the session cookie.
+ */
+async function fetchResourceBlob(resourceId: string): Promise<Blob> {
+  return (await fetchResource(resourceId)).blob();
+}
+
+/**
+ * Fetches a resource's raw bytes with the session cookie. An optional query string (such as
+ * `"?view=pdf"`) lets callers share the browser cache key of an inline view.
+ */
+export async function fetchResourceBytes(resourceId: string, query = ""): Promise<Uint8Array> {
+  return new Uint8Array(await (await fetchResource(resourceId, query)).arrayBuffer());
 }
 
 function readAsDataUrl(blob: Blob): Promise<string> {
@@ -515,6 +776,9 @@ export function clearResourceCache(): void {
       .catch(() => undefined);
   }
   resourceObjectUrls.clear();
+  for (const clearer of resourceCacheClearers) {
+    clearer();
+  }
 }
 
 /**
@@ -550,6 +814,20 @@ export interface UploadedResource {
   title: string;
   mime: string;
   size: number;
+  ocrStatus?: "pending" | "done" | "failed" | "skipped";
+  ocrText?: string;
+}
+
+/**
+ * Triggers or waits for OCR extraction on an existing image/PDF attachment.
+ */
+export async function runResourceOcr(
+  resourceId: string
+): Promise<{ id: string; ocrStatus: "done" | "failed"; ocrText: string }> {
+  return request<{ id: string; ocrStatus: "done" | "failed"; ocrText: string }>(
+    `/api/resources/${encodeURIComponent(resourceId)}/ocr`,
+    { method: "POST" }
+  );
 }
 
 /**
@@ -582,4 +860,360 @@ export async function downloadResource(resourceId: string, fileName: string): Pr
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+// ---------------------------------------------------------------------------
+// Auto-organize
+// ---------------------------------------------------------------------------
+
+/**
+ * Checks whether Auto-organize is configured and enabled on the server.
+ */
+export async function getOrganizeStatus(): Promise<OrganizeStatus> {
+  const data = await request<{ enabled?: unknown; model?: unknown } | null>("/api/organize/status");
+  const enabled = data?.enabled === true;
+  return {
+    enabled,
+    ...(enabled && typeof data?.model === "string" ? { model: data.model } : {}),
+  };
+}
+
+/**
+ * Lists the user's persisted and active Auto-organize jobs, newest first.
+ */
+export async function listOrganizeJobs(): Promise<{ jobs: OrganizeJobSummary[] }> {
+  const data = await request<{ jobs?: unknown } | OrganizeJobSummary[] | null>("/api/organize/jobs");
+  if (Array.isArray(data)) {
+    return { jobs: data };
+  }
+  return {
+    jobs: Array.isArray(data?.jobs) ? (data.jobs as OrganizeJobSummary[]) : [],
+  };
+}
+
+/**
+ * Extracts `runningJobId` from a 409 response when starting or retrying while another job runs.
+ */
+export function getOrganizeRunningJobId(error: unknown): string | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  const details = (error.data as { details?: { runningJobId?: unknown } } | undefined)?.details;
+  return typeof details?.runningJobId === "string" ? details.runningJobId : null;
+}
+
+/**
+ * Starts a server-side Auto-organize job for the selected note IDs.
+ */
+export async function createOrganizeJob(payload: {
+  noteIds: string[];
+  excludeNotebookIds?: string[];
+}): Promise<{ jobId: string }> {
+  return request<{ jobId: string }>("/api/organize/jobs", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * Fetches job status, progress, token usage, and a page of note suggestions.
+ */
+export async function getOrganizeJob(
+  jobId: string,
+  params?: { offset?: number; limit?: number }
+): Promise<OrganizeJobResponse> {
+  const query = new URLSearchParams();
+  if (params?.offset !== undefined) query.set("offset", String(params.offset));
+  if (params?.limit !== undefined) query.set("limit", String(params.limit));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<OrganizeJobResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}${suffix}`);
+}
+
+/**
+ * Cancels an in-progress Auto-organize job.
+ */
+export async function cancelOrganizeJob(jobId: string): Promise<{ id: string; status: OrganizeJobStatus }> {
+  return request<{ id: string; status: OrganizeJobStatus }>(`/api/organize/jobs/${encodeURIComponent(jobId)}`, {
+    method: "DELETE",
+  });
+}
+
+/**
+ * Deletes a finished or cancelled Auto-organize job from disk and history.
+ */
+export async function deleteOrganizeJob(jobId: string): Promise<OrganizeDeleteResponse> {
+  return request<OrganizeDeleteResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}?remove=1`, {
+    method: "DELETE",
+  });
+}
+
+/**
+ * Re-queues retryable failed items on a job using the current notebook tree and resumes analysis.
+ */
+export async function retryOrganizeJob(jobId: string): Promise<OrganizeRetryResponse> {
+  return request<OrganizeRetryResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}/retry`, {
+    method: "POST",
+  });
+}
+
+/**
+ * Applies selected/edited suggestions from an organize job in bulk.
+ */
+export async function applyOrganizeJob(
+  jobId: string,
+  items: OrganizeApplyItemInput[]
+): Promise<OrganizeApplyResponse> {
+  return request<OrganizeApplyResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}/apply`, {
+    method: "POST",
+    body: JSON.stringify({ items }),
+  });
+}
+
+/**
+ * Reverts the last apply performed on this organize job (skipping notes changed since).
+ */
+export async function undoOrganizeJob(jobId: string): Promise<OrganizeUndoResponse> {
+  return request<OrganizeUndoResponse>(`/api/organize/jobs/${encodeURIComponent(jobId)}/undo`, {
+    method: "POST",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Preferences (Shortcuts, Saved Searches, Recent Reads, Scratchpad)
+// ---------------------------------------------------------------------------
+
+export const EMPTY_USER_PREFERENCES: UserPreferences = {
+  favoriteNoteIds: [],
+  favoriteNotebookIds: [],
+  savedSearches: [],
+  recentReads: [],
+  scratchpad: "",
+  favoriteNotes: [],
+  favoriteNotebooks: [],
+};
+
+function normalizePreferences(data: unknown): UserPreferences {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return EMPTY_USER_PREFERENCES;
+  }
+  const obj = data as Partial<UserPreferences>;
+  return {
+    favoriteNoteIds: Array.isArray(obj.favoriteNoteIds) ? obj.favoriteNoteIds : [],
+    favoriteNotebookIds: Array.isArray(obj.favoriteNotebookIds) ? obj.favoriteNotebookIds : [],
+    savedSearches: Array.isArray(obj.savedSearches) ? obj.savedSearches : [],
+    recentReads: Array.isArray(obj.recentReads) ? obj.recentReads : [],
+    scratchpad: typeof obj.scratchpad === "string" ? obj.scratchpad : "",
+    favoriteNotes: Array.isArray(obj.favoriteNotes) ? obj.favoriteNotes : [],
+    favoriteNotebooks: Array.isArray(obj.favoriteNotebooks) ? obj.favoriteNotebooks : [],
+  };
+}
+
+export async function getPreferences(): Promise<UserPreferences> {
+  const data = await request<unknown>("/api/preferences");
+  return normalizePreferences(data);
+}
+
+export async function favoriteNote(id: string): Promise<UserPreferences> {
+  const data = await request<unknown>(`/api/preferences/favorites/notes/${encodeURIComponent(id)}`, {
+    method: "POST",
+  });
+  return normalizePreferences(data);
+}
+
+export async function unfavoriteNote(id: string): Promise<UserPreferences> {
+  const data = await request<unknown>(`/api/preferences/favorites/notes/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  return normalizePreferences(data);
+}
+
+export async function favoriteNotebook(id: string): Promise<UserPreferences> {
+  const data = await request<unknown>(`/api/preferences/favorites/notebooks/${encodeURIComponent(id)}`, {
+    method: "POST",
+  });
+  return normalizePreferences(data);
+}
+
+export async function unfavoriteNotebook(id: string): Promise<UserPreferences> {
+  const data = await request<unknown>(`/api/preferences/favorites/notebooks/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  return normalizePreferences(data);
+}
+
+export async function createSavedSearch(name: string, query: string): Promise<SavedSearch> {
+  return request<SavedSearch>("/api/preferences/saved-searches", {
+    method: "POST",
+    body: JSON.stringify({ name, query }),
+  });
+}
+
+export async function deleteSavedSearch(id: string): Promise<void> {
+  await request(`/api/preferences/saved-searches/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+/** Records a note open without triggering pendingWrites tracking or session-expired dialogs. */
+export async function recordRecentRead(noteId: string): Promise<void> {
+  await request(`/api/preferences/recent-reads/${encodeURIComponent(noteId)}`, {
+    method: "POST",
+    isRead: true,
+    skipAuthRedirect: true,
+  });
+}
+
+export async function saveScratchpad(scratchpad: string): Promise<{ scratchpad: string }> {
+  const data = await request<{ scratchpad?: unknown } | null>("/api/preferences/scratchpad", {
+    method: "PUT",
+    body: JSON.stringify({ scratchpad }),
+  });
+  return { scratchpad: typeof data?.scratchpad === "string" ? data.scratchpad : scratchpad };
+}
+
+// ---------------------------------------------------------------------------
+// Recent, Attachments, Revisions, Tasks, Hygiene, AI & Capture Pipelines
+// ---------------------------------------------------------------------------
+
+export async function getRecentNotes(): Promise<RecentNotesResponse> {
+  const data = await request<Partial<RecentNotesResponse> | unknown[] | null>("/api/notes/recent");
+  if (!data || Array.isArray(data)) {
+    return { recentRead: [], recentCreated: [] };
+  }
+  return {
+    recentRead: Array.isArray(data.recentRead) ? data.recentRead : [],
+    recentCreated: Array.isArray(data.recentCreated) ? data.recentCreated : [],
+  };
+}
+
+export async function getNoteAttachments(noteId: string): Promise<NoteAttachment[]> {
+  const data = await request<unknown>(`/api/notes/${encodeURIComponent(noteId)}/attachments`);
+  return Array.isArray(data) ? (data as NoteAttachment[]) : [];
+}
+
+export async function getNoteRevisions(noteId: string): Promise<NoteRevisionMeta[]> {
+  const data = await request<unknown>(`/api/notes/${encodeURIComponent(noteId)}/revisions`);
+  return Array.isArray(data) ? (data as NoteRevisionMeta[]) : [];
+}
+
+export async function getNoteRevisionDetail(noteId: string, revId: string): Promise<NoteRevisionDetail> {
+  return request<NoteRevisionDetail>(
+    `/api/notes/${encodeURIComponent(noteId)}/revisions/${encodeURIComponent(revId)}`
+  );
+}
+
+export async function restoreNoteRevision(noteId: string, revId: string): Promise<Note> {
+  return request<Note>(
+    `/api/notes/${encodeURIComponent(noteId)}/revisions/${encodeURIComponent(revId)}/restore`,
+    { method: "POST" }
+  );
+}
+
+export async function getTasks(): Promise<TasksResponse> {
+  const data = await request<Partial<TasksResponse> | unknown[] | null>("/api/tasks");
+  if (!data || Array.isArray(data)) {
+    return { todoNotes: [], inlineTasks: [] };
+  }
+  return {
+    todoNotes: Array.isArray(data.todoNotes) ? data.todoNotes : [],
+    inlineTasks: Array.isArray(data.inlineTasks) ? data.inlineTasks : [],
+  };
+}
+
+export async function toggleInlineTask(payload: {
+  noteId: string;
+  line: number;
+  column: number;
+  checked: boolean;
+  baseUpdatedTime?: number;
+}): Promise<Note> {
+  return request<Note>("/api/tasks/toggle", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getHygieneReport(): Promise<HygieneReport> {
+  const data = await request<Partial<HygieneReport> | unknown[] | null>("/api/organize/hygiene");
+  if (!data || Array.isArray(data)) {
+    return { duplicateClusters: [], emptyNotes: [], untaggedNotes: [] };
+  }
+  return {
+    duplicateClusters: Array.isArray(data.duplicateClusters) ? data.duplicateClusters : [],
+    emptyNotes: Array.isArray(data.emptyNotes) ? data.emptyNotes : [],
+    untaggedNotes: Array.isArray(data.untaggedNotes) ? data.untaggedNotes : [],
+  };
+}
+
+export async function getAiStatus(): Promise<AiFeatureStatus> {
+  const data = await request<Partial<AiFeatureStatus> | unknown[] | null>("/api/ai/status");
+  if (!data || Array.isArray(data)) return { enabled: false, transcribeEnabled: false };
+  const enabled = data.enabled === true;
+  const transcribeEnabled = data.transcribeEnabled === true;
+  return {
+    enabled,
+    ...(enabled && typeof data.model === "string" ? { model: data.model } : {}),
+    transcribeEnabled,
+    ...(transcribeEnabled && typeof data.transcribeModel === "string"
+      ? { transcribeModel: data.transcribeModel }
+      : {}),
+  };
+}
+
+export async function transcribeAudio(blob: Blob, mime?: string): Promise<AudioTranscribeResponse> {
+  const resolvedMime = (mime || blob.type || "audio/wav").split(";")[0].trim() || "audio/wav";
+  return request<AudioTranscribeResponse>("/api/ai/transcribe", {
+    method: "POST",
+    body: blob,
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "X-File-Type": resolvedMime,
+    },
+  });
+}
+
+export async function askNotes(payload: {
+  question: string;
+  scopeNotebookId?: string;
+  scopeTagId?: string;
+}): Promise<AskNotesResponse> {
+  return request<AskNotesResponse>("/api/ai/ask", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function noteAssist(payload: {
+  noteId: string;
+  action: NoteAssistAction;
+}): Promise<NoteAssistResponse> {
+  return request<NoteAssistResponse>("/api/ai/note-assist", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function clipUrl(payload: {
+  url: string;
+  parentId?: string;
+  tags?: string[];
+  includeSourceBanner?: boolean;
+}): Promise<ClipResponse> {
+  return request<ClipResponse>("/api/clip", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function ingestEmail(payload: {
+  raw?: string;
+  subject?: string;
+  from?: string;
+  text?: string;
+  html?: string;
+  parentId?: string;
+  tags?: string[];
+}): Promise<EmailIngestResponse> {
+  return request<EmailIngestResponse>("/api/integrations/email", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }

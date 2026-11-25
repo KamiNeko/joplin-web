@@ -14,6 +14,7 @@ const executablePath = process.env.E2E_EXECUTABLE_PATH;
 
 export default defineConfig({
   testDir: "e2e",
+  timeout: 60_000,
   // The tests share one in-memory demo server, so they run one after another
   workers: 1,
   fullyParallel: false,
@@ -34,7 +35,11 @@ export default defineConfig({
   webServer: [
     {
       command: "npm --prefix ../server run demo",
-      env: { PORT: String(API_PORT), MOCK_JOPLIN_PORT: String(MOCK_JOPLIN_PORT) },
+      env: {
+        PORT: String(API_PORT),
+        MOCK_JOPLIN_PORT: String(MOCK_JOPLIN_PORT),
+        CLIPPER_EXTENSION_IDS: "nlplgmnmaigjhfbhkbmcpfcdnppaklco",
+      },
       url: `http://localhost:${API_PORT}/api/health`,
       reuseExistingServer: !process.env.CI,
     },

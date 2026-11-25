@@ -401,3 +401,33 @@ describe('derived counts', () => {
     assert.equal(tags.find((t) => t.title === 'cooking')?.noteCount, 2);
   });
 });
+
+describe('list thumbnails', () => {
+  test('a note lists its first linked image or PDF, skipping notes and other attachments', async () => {
+    const notebookId = mockItem(app.mock, NOTE)!.parentId;
+    const resource = (id: string, mime: string) =>
+      putMockItem(app.mock, { type_: JoplinItemType.Resource, id, title: id, properties: { mime, encryption_applied: '0' } });
+    const svg = 'abcdefabcdefabcdefabcdefabcdef11';
+    const pdf = 'abcdefabcdefabcdefabcdefabcdef12';
+    const png = 'abcdefabcdefabcdefabcdefabcdef13';
+    resource(svg, 'image/svg+xml');
+    resource(pdf, 'application/pdf');
+    resource(png, 'image/png');
+    const base = { type_: JoplinItemType.Note, parentId: notebookId, properties: { encryption_applied: '0' } };
+    const notes = {
+      pdfFirst: { id: 'abcdefabcdefabcdefabcdefabcdef14', body: `[n](:/${NOTE}) ![](:/${svg}) [a.pdf](:/${pdf.toUpperCase()}) ![](:/${png})` },
+      html: { id: 'abcdefabcdefabcdefabcdefabcdef15', body: `<p><img src=":/${png}"/></p>` },
+      none: { id: 'abcdefabcdefabcdefabcdefabcdef16', body: `![](:/${svg})` },
+    };
+    for (const [title, n] of Object.entries(notes)) putMockItem(app.mock, { ...base, ...n, title });
+    try {
+      await noteCache.refreshCache(session);
+      const listed = new Map((await noteCache.getNotes(session, { notebookId })).map((n) => [n.id, n.thumbnail]));
+      assert.deepEqual(listed.get(notes.pdfFirst.id), { resourceId: pdf, kind: 'pdf' });
+      assert.deepEqual(listed.get(notes.html.id), { resourceId: png, kind: 'image' });
+      assert.equal(listed.get(notes.none.id), undefined);
+    } finally {
+      for (const id of [svg, pdf, png, ...Object.values(notes).map((n) => n.id)]) app.mock.items.delete(`${id}.md`);
+    }
+  });
+});

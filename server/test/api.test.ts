@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
-import type { MockJoplinServer } from '../demo/mock-joplin-server.js';
+import { syncTargetInfoItem, type MockJoplinServer } from '../demo/mock-joplin-server.js';
 import { DEMO_EMAIL, DEMO_PASSWORD, demoId } from '../demo/seed.js';
+import { deserialize, serialize } from '../src/services/serializer.js';
+import { JoplinItemType } from '../src/types/index.js';
 import { startTestApp, type TestApp } from './helpers.js';
 
 /**
@@ -147,7 +149,28 @@ describe('reading', () => {
     assert.deepEqual(matches.terms, ['passport', 'biometric']);
     assert.equal(matches.inTitle, true);
     assert.equal(matches.inBody, true);
+    assert.equal(matches.matchedIn, undefined);
     assert.match(matches.snippet, /biometric/);
+  });
+
+  test('search finds notes by attachment OCR text and marks OCR-only matches', async () => {
+    const res = await api('/api/search?q=%22Backup%20Storage%22%20420.00');
+    assert.equal(res.status, 200);
+    assert.equal(res.data.length, 1);
+    assert.equal(res.data[0].id, demoId('note-scanned-invoice'));
+    assert.equal(res.data[0].title, '2024_03_11.pdf');
+    assert.deepEqual(res.data[0].matches.inTitle, false);
+    assert.deepEqual(res.data[0].matches.inBody, false);
+    assert.equal(res.data[0].matches.matchedIn, 'attachment');
+    assert.deepEqual(res.data[0].matches.terms, ['backup storage', '420.00']);
+    assert.match(res.data[0].matches.snippet, /Backup Storage/);
+
+    // Combining a title term and an attachment term clears matchedIn (not OCR-only)
+    const mixed = await api('/api/search?q=2024_03_11%20Storage');
+    assert.equal(mixed.status, 200);
+    assert.equal(mixed.data.length, 1);
+    assert.equal(mixed.data[0].matches.inTitle, true);
+    assert.equal(mixed.data[0].matches.matchedIn, undefined);
   });
 
   test('search filters by tag, notebook (with sub-notebooks), type and completion', async () => {
@@ -304,6 +327,414 @@ describe('writing', () => {
   });
 });
 
+describe('batch updates', () => {
+  async function createTestNote(title: string, parentId = demoId('nb-projects')) {
+    const res = await api('/api/notes', {
+      method: 'POST',
+      body: JSON.stringify({ title, body: `Body for ${title}`, parentId }),
+    });
+    assert.equal(res.status, 201);
+    return res.data as { id: string; updatedTime: number; parentId: string; title: string };
+  }
+
+  test('moves notes in bulk and supports per-item parentId and title updates', async () => {
+    const n1 = await createTestNote('Bulk Move 1', demoId('nb-projects'));
+    const n2 = await createTestNote('Bulk Move 2', demoId('nb-meetings'));
+
+    const moveRes = await api('/api/notes/batch', {
+      method: 'POST',
+      body: JSON.stringify({
+        items: [
+          { id: n1.id, baseUpdatedTime: n1.updatedTime },
+          { id: n2.id, baseUpdatedTime: n2.updatedTime },
+        ],
+        parentId: demoId('nb-reading'),
+      }),
+    });
+    assert.equal(moveRes.status, 200);
+    assert.equal(moveRes.data.length, 2);
+    assert.equal(moveRes.data[0].status, 'ok');
+    assert.equal(moveRes.data[1].status, 'ok');
+    assert.ok(moveRes.data[0].updatedTime > n1.updatedTime);
+
+    const readingList = await api(`/api/notes?notebook_id=${demoId('nb-reading')}`);
+    assert.ok(readingList.data.some((n: any) => n.id === n1.id));
+    assert.ok(readingList.data.some((n: any) => n.id === n2.id));
+
+    // Per-item undo / AI auto-organize shape: move back to original mixed notebooks + rename title
+    const undoRes = await api('/api/notes/batch', {
+      method: 'POST',
+      body: JSON.stringify({
+        items: [
+          { id: n1.id, baseUpdatedTime: moveRes.data[0].updatedTime, parentId: n1.parentId, title: 'Renamed 1' },
+          { id: n2.id, baseUpdatedTime: moveRes.data[1].updatedTime, parentId: n2.parentId },
+        ],
+      }),
+    });
+    assert.equal(undoRes.status, 200);
+    assert.deepEqual(
+      undoRes.data.map((r: any) => r.status),
+      ['ok', 'ok']
+    );
+    assert.equal((await api(`/api/notes/${n1.id}`)).data.parentId, demoId('nb-projects'));
+    assert.equal((await api(`/api/notes/${n1.id}`)).data.title, 'Renamed 1');
+    assert.equal((await api(`/api/notes/${n2.id}`)).data.parentId, demoId('nb-meetings'));
+  });
+
+  test('detects baseUpdatedTime conflicts per item and refreshes cache', async () => {
+    const n1 = await createTestNote('Batch Conflict', demoId('nb-projects'));
+    const raw = mock.items.get(`${n1.id}.md`)!.content.toString('utf8');
+    const serverCopy = deserialize(raw, `${n1.id}.md`);
+    const newerTime = n1.updatedTime + 5000;
+    mock.items.set(`${n1.id}.md`, {
+      content: Buffer.from(
+        serialize({
+          type_: JoplinItemType.Note,
+          title: serverCopy.title,
+          body: 'Edited elsewhere',
+          properties: { ...serverCopy.properties, updated_time: new Date(newerTime).toISOString() },
+        }),
+        'utf8'
+      ),
+      contentType: 'text/plain; charset=utf-8',
+      updatedTime: newerTime,
+    });
+
+    const res = await api('/api/notes/batch', {
+      method: 'POST',
+      body: JSON.stringify({
+        items: [{ id: n1.id, baseUpdatedTime: n1.updatedTime }],
+        parentId: demoId('nb-travel'),
+      }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.data[0].id, n1.id);
+    assert.equal(res.data[0].status, 'conflict');
+    assert.match(res.data[0].error, /changed elsewhere/i);
+    // Server note was untouched and cache got fresh server version
+    const fresh = await api(`/api/notes/${n1.id}`);
+    assert.equal(fresh.data.parentId, demoId('nb-projects'));
+    assert.equal(fresh.data.body, 'Edited elsewhere');
+  });
+
+  test('isolates bad ids, encrypted items, missing notes and 500 errors with bounded concurrency', async () => {
+    const ok1 = await createTestNote('Mixed OK 1');
+    const ok2 = await createTestNote('Mixed OK 2');
+    const conflictNote = await createTestNote('Mixed Conflict');
+    const encryptedId = demoId('batch-encrypted-note');
+    const encProps = {
+      id: encryptedId,
+      parent_id: demoId('nb-reading'),
+      updated_time: new Date().toISOString(),
+      deleted_time: '0',
+      encryption_applied: '1',
+      encryption_cipher_text: 'JED01000022abcd',
+    };
+    mock.items.set(`${encryptedId}.md`, {
+      content: Buffer.from(serialize({ type_: JoplinItemType.Note, properties: encProps }), 'utf8'),
+      contentType: 'text/plain; charset=utf-8',
+      updatedTime: Date.now(),
+    });
+
+    const extraNotes = await Promise.all(
+      Array.from({ length: 8 }, (_, i) => createTestNote(`Concurrency ${i}`))
+    );
+
+    // Trigger 500 on one specific Joplin Server read by failing after first read or tracking via onItemRequest
+    const failTarget = await createTestNote('Mixed 500');
+    const badId = '../evil';
+    const missingId = demoId('does-not-exist-in-mock');
+
+    let activeReads = 0;
+    let maxActiveReads = 0;
+    mock.onItemRequest = async ({ method, name }) => {
+      if (method === 'GET' && name !== '' && name !== 'info.json') {
+        activeReads++;
+        maxActiveReads = Math.max(maxActiveReads, activeReads);
+        await new Promise((r) => setTimeout(r, 15));
+        activeReads--;
+      }
+    };
+
+    try {
+      // Simulate server edit on conflictNote before calling batch
+      const raw = mock.items.get(`${conflictNote.id}.md`)!.content.toString('utf8');
+      const parsed = deserialize(raw, `${conflictNote.id}.md`);
+      mock.items.set(`${conflictNote.id}.md`, {
+        content: Buffer.from(
+          serialize({
+            type_: JoplinItemType.Note,
+            title: parsed.title,
+            body: parsed.body,
+            properties: { ...parsed.properties, updated_time: new Date(conflictNote.updatedTime + 4000).toISOString() },
+          }),
+          'utf8'
+        ),
+        contentType: 'text/plain; charset=utf-8',
+        updatedTime: conflictNote.updatedTime + 4000,
+      });
+
+      const batchItems = [
+        { id: ok1.id, baseUpdatedTime: ok1.updatedTime },
+        { id: badId },
+        { id: conflictNote.id, baseUpdatedTime: conflictNote.updatedTime },
+        { id: missingId },
+        { id: demoId('nb-travel') }, // notebook id passed as note id
+        { id: encryptedId },
+        ...extraNotes.map((n) => ({ id: n.id, baseUpdatedTime: n.updatedTime })),
+        { id: ok2.id, baseUpdatedTime: ok2.updatedTime },
+      ];
+
+      const res = await api('/api/notes/batch', {
+        method: 'POST',
+        body: JSON.stringify({ items: batchItems, parentId: demoId('nb-travel') }),
+      });
+
+      assert.equal(res.status, 200);
+      assert.equal(res.data.length, batchItems.length);
+      assert.equal(res.data[0].status, 'ok');
+      assert.equal(res.data[1].status, 'error');
+      assert.match(res.data[1].error, /Invalid note id/);
+      assert.equal(res.data[2].status, 'conflict');
+      assert.equal(res.data[3].status, 'error');
+      assert.match(res.data[3].error, /Note not found/);
+      assert.equal(res.data[4].status, 'error');
+      assert.match(res.data[4].error, /not a note/);
+      assert.equal(res.data[5].status, 'error');
+      assert.match(res.data[5].error, /end-to-end encrypted/);
+      for (let i = 6; i < batchItems.length; i++) {
+        assert.equal(res.data[i].status, 'ok');
+      }
+      assert.ok(maxActiveReads <= 4, `concurrency stayed <= 4 (observed ${maxActiveReads})`);
+
+      // Verify a Joplin Server 500 error for one item doesn't abort the batch or leak details.
+      // Fail on the next item request once batch item processing starts reading failTarget.
+      let injected = false;
+      mock.onItemRequest = ({ method, name }) => {
+        if (!injected && method === 'GET' && name === `${failTarget.id}.md`) {
+          injected = true;
+          mock.failNextItemRequests(500, 1);
+        }
+      };
+      const errBatch = await api('/api/notes/batch', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: [{ id: failTarget.id }, { id: ok1.id }],
+          trash: true,
+        }),
+      });
+      assert.equal(errBatch.status, 200);
+      const errResults = errBatch.data as Array<{ id: string; status: string; error?: string }>;
+      const failed = errResults.filter((r) => r.status === 'error');
+      const succeeded = errResults.filter((r) => r.status === 'ok');
+      assert.equal(failed.length, 1);
+      assert.equal(failed[0].error, 'The request to Joplin Server failed');
+      assert.doesNotMatch(failed[0].error ?? '', /Injected|127\.0\.0\.1/);
+      assert.equal(succeeded.length, 1);
+    } finally {
+      mock.onItemRequest = null;
+      mock.items.delete(`${encryptedId}.md`);
+      await api('/api/notebooks/refresh', { method: 'POST' });
+    }
+  });
+
+  test('adds and removes tags in bulk cleanly, reusing existing tags and creating new tags once', async () => {
+    const n1 = await createTestNote('Tag Batch 1');
+    const n2 = await createTestNote('Tag Batch 2');
+    const trashed = await createTestNote('Tag Batch Trashed');
+    await api(`/api/notes/${trashed.id}`, { method: 'DELETE' });
+
+    // Pre-tag n1 with 'planning' (already exists) and 'batch-unique' will be created once across both notes
+    await api(`/api/notes/${n1.id}/tags`, { method: 'POST', body: JSON.stringify({ title: 'planning' }) });
+
+    const res = await api('/api/notes/batch', {
+      method: 'POST',
+      body: JSON.stringify({
+        items: [
+          { id: n1.id, baseUpdatedTime: n1.updatedTime },
+          { id: n2.id, baseUpdatedTime: n2.updatedTime },
+          { id: trashed.id },
+        ],
+        addTags: ['PLANNING', 'batch-unique'],
+      }),
+    });
+
+    assert.equal(res.status, 200);
+    assert.equal(res.data[0].status, 'ok');
+    // n1 already had planning, so only batch-unique was newly linked
+    assert.deepEqual(res.data[0].addedTags, ['batch-unique']);
+    assert.equal(res.data[1].status, 'ok');
+    assert.deepEqual(res.data[1].addedTags, ['planning', 'batch-unique']);
+    assert.equal(res.data[2].status, 'error');
+    assert.match(res.data[2].error, /Note not found/);
+
+    const tagsAfter = await api('/api/tags');
+    const createdTags = tagsAfter.data.filter((t: any) => t.title === 'batch-unique');
+    assert.equal(createdTags.length, 1, 'concurrent batch created the new tag only once');
+
+    // Undo tag removal preserves pre-existing 'planning' on n1 when only 'batch-unique' is removed
+    const removeRes = await api('/api/notes/batch', {
+      method: 'POST',
+      body: JSON.stringify({
+        items: [{ id: n1.id, baseUpdatedTime: res.data[0].updatedTime }],
+        removeTags: ['batch-unique'],
+      }),
+    });
+    assert.equal(removeRes.status, 200);
+    assert.equal(removeRes.data[0].status, 'ok');
+    const n1Detail = await api(`/api/notes/${n1.id}`);
+    assert.deepEqual(
+      n1Detail.data.tags.map((t: any) => t.title),
+      ['planning']
+    );
+  });
+
+  test('supports per-item parentId, title, and addTags/removeTags merged with top-level tags', async () => {
+    const n1 = await createTestNote('Per-item 1', demoId('nb-projects'));
+    const n2 = await createTestNote('Per-item 2', demoId('nb-projects'));
+    await api(`/api/notes/${n1.id}/tags`, { method: 'POST', body: JSON.stringify({ title: 'planning' }) });
+
+    const applyRes = await api('/api/notes/batch', {
+      method: 'POST',
+      body: JSON.stringify({
+        addTags: ['shared-tag'],
+        items: [
+          {
+            id: n1.id,
+            baseUpdatedTime: n1.updatedTime,
+            title: '2024-03-11 Acme – Invoice',
+            parentId: demoId('nb-travel'),
+            addTags: ['PLANNING', 'invoice'],
+          },
+          {
+            id: n2.id,
+            baseUpdatedTime: n2.updatedTime,
+            title: 'Per-item 2 Renamed',
+            addTags: ['notes'],
+          },
+        ],
+      }),
+    });
+
+    assert.equal(applyRes.status, 200);
+    assert.equal(applyRes.data[0].status, 'ok');
+    // n1 already had planning, so only shared-tag + invoice are newly added
+    assert.deepEqual(applyRes.data[0].addedTags.sort(), ['invoice', 'shared-tag']);
+    assert.equal(applyRes.data[1].status, 'ok');
+    assert.deepEqual(applyRes.data[1].addedTags.sort(), ['notes', 'shared-tag']);
+
+    const n1After = await api(`/api/notes/${n1.id}`);
+    assert.equal(n1After.data.title, '2024-03-11 Acme – Invoice');
+    assert.equal(n1After.data.parentId, demoId('nb-travel'));
+    assert.deepEqual(n1After.data.tags.map((t: any) => t.title).sort(), ['invoice', 'planning', 'shared-tag']);
+
+    const n2After = await api(`/api/notes/${n2.id}`);
+    assert.equal(n2After.data.title, 'Per-item 2 Renamed');
+    assert.equal(n2After.data.parentId, demoId('nb-projects'));
+    assert.deepEqual(n2After.data.tags.map((t: any) => t.title).sort(), ['notes', 'shared-tag']);
+
+    // Per-item removeTags preserves n1's pre-existing planning tag
+    const undoRes = await api('/api/notes/batch', {
+      method: 'POST',
+      body: JSON.stringify({
+        items: [
+          {
+            id: n1.id,
+            baseUpdatedTime: applyRes.data[0].updatedTime,
+            title: 'Per-item 1',
+            parentId: demoId('nb-projects'),
+            removeTags: applyRes.data[0].addedTags,
+          },
+        ],
+      }),
+    });
+    assert.equal(undoRes.status, 200);
+    assert.equal(undoRes.data[0].status, 'ok');
+    const n1Reverted = await api(`/api/notes/${n1.id}`);
+    assert.equal(n1Reverted.data.title, 'Per-item 1');
+    assert.equal(n1Reverted.data.parentId, demoId('nb-projects'));
+    assert.deepEqual(n1Reverted.data.tags.map((t: any) => t.title), ['planning']);
+  });
+
+  test('trashes and restores notes in bulk', async () => {
+    const n1 = await createTestNote('Bulk Trash 1', demoId('nb-projects'));
+    const n2 = await createTestNote('Bulk Trash 2', demoId('nb-projects'));
+
+    const trashRes = await api('/api/notes/batch', {
+      method: 'POST',
+      body: JSON.stringify({
+        items: [
+          { id: n1.id, baseUpdatedTime: n1.updatedTime },
+          { id: n2.id, baseUpdatedTime: n2.updatedTime },
+        ],
+        trash: true,
+      }),
+    });
+    assert.equal(trashRes.status, 200);
+    assert.deepEqual(
+      trashRes.data.map((r: any) => r.status),
+      ['ok', 'ok']
+    );
+    assert.ok((await api(`/api/notes/${n1.id}`)).data.deletedTime > 0);
+    assert.ok((await api(`/api/notes/${n2.id}`)).data.deletedTime > 0);
+
+    const restoreRes = await api('/api/notes/batch', {
+      method: 'POST',
+      body: JSON.stringify({
+        items: [
+          { id: n1.id, baseUpdatedTime: trashRes.data[0].updatedTime },
+          { id: n2.id, baseUpdatedTime: trashRes.data[1].updatedTime },
+        ],
+        restore: true,
+      }),
+    });
+    assert.equal(restoreRes.status, 200);
+    assert.deepEqual(
+      restoreRes.data.map((r: any) => r.status),
+      ['ok', 'ok']
+    );
+    assert.equal((await api(`/api/notes/${n1.id}`)).data.deletedTime, 0);
+    assert.equal((await api(`/api/notes/${n2.id}`)).data.deletedTime, 0);
+  });
+
+  test('enforces batch size cap, validates payload, and blocks E2EE accounts', async () => {
+    const tooMany = Array.from({ length: 1001 }, (_, i) => ({ id: `${String(i).padStart(32, '0')}` }));
+    const capRes = await api('/api/notes/batch', {
+      method: 'POST',
+      body: JSON.stringify({ items: tooMany, trash: true }),
+    });
+    assert.equal(capRes.status, 400);
+    assert.match(capRes.data.error, /1000/);
+
+    const emptyRes = await api('/api/notes/batch', {
+      method: 'POST',
+      body: JSON.stringify({ items: [], trash: true }),
+    });
+    assert.equal(emptyRes.status, 400);
+
+    const noopRes = await api('/api/notes/batch', {
+      method: 'POST',
+      body: JSON.stringify({ items: [{ id: demoId('note-roadmap') }] }),
+    });
+    assert.equal(noopRes.status, 400);
+
+    const seededInfo = mock.items.get('info.json')!;
+    mock.items.set('info.json', syncTargetInfoItem(true, Date.now() + 10_000));
+    try {
+      await api('/api/notebooks/refresh', { method: 'POST' });
+      const e2eeRes = await api('/api/notes/batch', {
+        method: 'POST',
+        body: JSON.stringify({ items: [{ id: demoId('note-roadmap') }], trash: true }),
+      });
+      assert.equal(e2eeRes.status, 422);
+      assert.match(e2eeRes.data.error, /end-to-end encryption/);
+    } finally {
+      mock.items.set('info.json', seededInfo);
+      await api('/api/notebooks/refresh', { method: 'POST' });
+    }
+  });
+});
+
 describe('security', () => {
   async function upload(name: string, type: string, data: string | Buffer) {
     const res = await api('/api/resources', {
@@ -355,6 +786,28 @@ describe('security', () => {
     const res = await api(`/api/resources/${id}`);
     assert.equal(res.headers.get('content-type'), 'image/png');
     assert.match(res.headers.get('content-disposition') ?? '', /^inline; filename="pixel\.png"/);
+    assert.match(res.headers.get('content-security-policy') ?? '', /\bsandbox\b/);
+  });
+
+  test('serves PDF attachments inline without sandbox and allows only same-origin framing', async () => {
+    const id = await upload('report.pdf', 'application/pdf', '%PDF-1.4\n%');
+    const res = await api(`/api/resources/${id}`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'application/pdf');
+    assert.match(res.headers.get('content-disposition') ?? '', /^inline; filename="report\.pdf"/);
+    assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(res.headers.get('x-frame-options'), 'SAMEORIGIN');
+    const csp = res.headers.get('content-security-policy') ?? '';
+    assert.match(csp, /default-src 'none'/);
+    assert.match(csp, /frame-ancestors 'self'/);
+    assert.doesNotMatch(csp, /\bsandbox\b/);
+
+    // Sniffed PDF uploads (when upstream omits type) get the same inline type and CSP
+    const sniffedId = await upload('scan', 'application/octet-stream', '%PDF-1.7\n');
+    const sniffedRes = await api(`/api/resources/${sniffedId}`);
+    assert.equal(sniffedRes.headers.get('content-type'), 'application/pdf');
+    assert.match(sniffedRes.headers.get('content-disposition') ?? '', /^inline; filename="scan"/);
+    assert.doesNotMatch(sniffedRes.headers.get('content-security-policy') ?? '', /\bsandbox\b/);
   });
 
   test('encodes attachment file names safely in Content-Disposition', async () => {
@@ -371,11 +824,20 @@ describe('security', () => {
   });
 
   test('normalizes malformed or unknown resource types', async () => {
-    const { resourceResponseType } = await import('../src/routes/resources.js');
+    const { resourceCsp, resourceResponseType } = await import('../src/routes/resources.js');
+    assert.deepEqual(resourceResponseType('application/pdf'), { contentType: 'application/pdf', inline: true });
     assert.deepEqual(resourceResponseType('video/mp4'), { contentType: 'video/mp4', inline: true });
     assert.deepEqual(resourceResponseType('IMAGE/PNG; charset=x'), { contentType: 'image/png', inline: true });
     assert.deepEqual(resourceResponseType('audio/x\r\nX-Evil: 1'), { contentType: 'application/octet-stream', inline: false });
     assert.deepEqual(resourceResponseType(undefined), { contentType: 'application/octet-stream', inline: false });
+
+    assert.equal(
+      resourceCsp('APPLICATION/PDF; charset=binary'),
+      "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; frame-ancestors 'self'"
+    );
+    assert.match(resourceCsp('image/svg+xml'), /\bsandbox\b/);
+    assert.match(resourceCsp('image/png'), /\bsandbox\b/);
+    assert.match(resourceCsp('application/octet-stream'), /\bsandbox\b/);
   });
 
   test('validates resource ids', async () => {
@@ -454,6 +916,35 @@ describe('security', () => {
       'https://a.test',
       'https://b.test',
     ]);
+  });
+
+  test('validates AI_* config and disables organize by default when unset', async () => {
+    const { loadConfig, ConfigError } = await import('../src/config.js');
+    const base = { JOPLIN_SERVER_URL: 'https://notes.example.com' };
+    assert.equal(loadConfig(base).aiBaseUrl, null);
+    assert.equal(loadConfig(base).aiModel, null);
+    assert.equal(loadConfig(base).aiConcurrency, 4);
+
+    assert.throws(() => loadConfig({ ...base, AI_BASE_URL: 'ftp://bad.test' }), ConfigError);
+    assert.throws(() => loadConfig({ ...base, AI_BASE_URL: 'https://user:pw@ai.test/v1' }), ConfigError);
+    assert.throws(() => loadConfig({ ...base, AI_CONCURRENCY: '0' }), ConfigError);
+
+    const statusRes = await api('/api/organize/status');
+    assert.equal(statusRes.status, 200);
+    assert.deepEqual(statusRes.data, { enabled: false });
+
+    const startRes = await api('/api/organize/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ noteIds: [demoId('note-roadmap')] }),
+    });
+    assert.equal(startRes.status, 503);
+
+    const listRes = await api('/api/organize/jobs');
+    assert.equal(listRes.status, 200);
+    assert.deepEqual(listRes.data, { jobs: [] });
+
+    const retryRes = await api(`/api/organize/jobs/${'a'.repeat(32)}/retry`, { method: 'POST' });
+    assert.equal(retryRes.status, 503);
   });
 });
 

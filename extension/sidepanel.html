@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Clip to Joplin Web</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="panel-body">
+    <header class="header">
+      <div class="brand">
+        <img src="icons/icon32.png" alt="" />
+        <span>Clip to Joplin Web</span>
+      </div>
+      <button type="button" id="open-options-btn" class="icon-btn" title="Extension settings">Settings</button>
+    </header>
+
+    <main id="loading-view" class="center-state">
+      <p class="muted">Connecting to Joplin Web…</p>
+    </main>
+
+    <main id="setup-view" class="center-state hidden">
+      <h2>Set up Joplin Web</h2>
+      <p>Enter your Joplin Web server URL in extension settings to start clipping pages.</p>
+      <div class="btn-row">
+        <button type="button" id="setup-options-btn" class="btn btn-primary">Open Settings</button>
+      </div>
+    </main>
+
+    <main id="signin-view" class="center-state hidden">
+      <h2>Sign in required</h2>
+      <p id="signin-message">Sign in to Joplin Web in your browser, then return here to clip this page.</p>
+      <div class="btn-row">
+        <button type="button" id="signin-btn" class="btn btn-primary">Sign in to Joplin Web</button>
+        <button type="button" id="retry-btn" class="btn btn-secondary">Retry</button>
+      </div>
+    </main>
+
+    <main id="form-view" class="content panel-content hidden">
+      <div id="error-banner" class="banner banner-error hidden" role="alert"></div>
+      <div id="page-notice" class="banner banner-warn hidden" role="status"></div>
+
+      <div id="page-meta" class="page-meta hidden">
+        <span id="page-host" class="page-host"></span>
+      </div>
+
+      <div class="field">
+        <span class="section-label">Clip format</span>
+        <div class="mode-grid" role="group" aria-label="Clip mode">
+          <button type="button" class="mode-btn" data-mode="article" aria-pressed="true">Article</button>
+          <button type="button" class="mode-btn" data-mode="selection" aria-pressed="false" disabled>Selection</button>
+          <button type="button" class="mode-btn" data-mode="fullpage" aria-pressed="false">Full page</button>
+          <button type="button" class="mode-btn" data-mode="screenshot" aria-pressed="false">Screenshot</button>
+          <button type="button" class="mode-btn" data-mode="bookmark" aria-pressed="false">Bookmark</button>
+        </div>
+      </div>
+
+      <div id="selection-summary" class="summary-card hidden" aria-live="polite">
+        <div class="summary-top">
+          <span id="summary-text" class="summary-text"></span>
+          <button type="button" id="reset-overlay-btn" class="link-btn hidden">Reset</button>
+        </div>
+        <div id="summary-hint" class="summary-hint"></div>
+      </div>
+
+      <div class="field">
+        <label for="clip-title">Title</label>
+        <input id="clip-title" type="text" placeholder="Note title" autocomplete="off" />
+      </div>
+
+      <div class="field">
+        <label for="clip-notebook">Notebook</label>
+        <select id="clip-notebook"></select>
+      </div>
+
+      <div class="field">
+        <label for="clip-tag-input">Tags</label>
+        <div class="tags-box">
+          <div class="tags-input-wrap" id="tags-wrap">
+            <input id="clip-tag-input" type="text" placeholder="Add tags…" autocomplete="off" />
+          </div>
+          <ul id="tag-suggestions" class="suggestions hidden" role="listbox"></ul>
+        </div>
+      </div>
+
+      <div class="panel-actions">
+        <button type="button" id="save-btn" class="btn btn-primary btn-block">Save Clip</button>
+        <div id="progress-text" class="progress-line hidden"></div>
+      </div>
+    </main>
+
+    <main id="success-view" class="center-state hidden">
+      <div class="banner banner-success" id="success-message">Saved to notebook</div>
+      <div class="banner banner-warn hidden" id="skipped-banner"></div>
+      <div class="btn-row">
+        <a id="open-note-link" class="btn btn-primary" href="#" target="_blank" rel="noopener noreferrer">Open in Joplin Web</a>
+        <button type="button" id="clip-again-btn" class="btn btn-secondary">Clip again</button>
+      </div>
+    </main>
+
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>

@@ -50,7 +50,30 @@ describe("SearchResults", () => {
     const note = result({ matches: { inTitle: false, inBody: false, snippet: "", terms: [] } });
     const { container } = render(<SearchResults query="tag:home" results={[note]} onSelectNote={vi.fn()} />);
     expect(screen.getByText("Milk, eggs and bread")).toBeTruthy();
+    expect(screen.queryByText(/Found in attachment:/)).toBeNull();
     expect(marks(container)).toEqual([]);
+  });
+
+  it('prefixes OCR-only matches with "Found in attachment:" and highlights matched terms', () => {
+    const note = result({
+      title: "2024_03_11.pdf",
+      preview: "2024_03_11.pdf",
+      matches: {
+        inTitle: false,
+        inBody: false,
+        matchedIn: "attachment",
+        snippet: "...Description: Dedicated Backup Storage (2 TB) - Total Paid: $420.00",
+        terms: ["backup storage", "420.00"],
+      },
+    });
+    const { container } = render(
+      <SearchResults query='"Backup Storage" 420.00' results={[note]} onSelectNote={vi.fn()} />
+    );
+    const snippet = container.querySelector("p.line-clamp-2");
+    expect(snippet?.textContent).toBe(
+      "Found in attachment: ...Description: Dedicated Backup Storage (2 TB) - Total Paid: $420.00"
+    );
+    expect(marks(container)).toEqual(["Backup Storage", "420.00"]);
   });
 
   it("explains the search syntax when nothing matches", () => {

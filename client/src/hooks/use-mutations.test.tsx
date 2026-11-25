@@ -7,6 +7,7 @@ import { resetConnection } from "@/lib/connection";
 import { FetchCall, jsonResponse, mockFetch } from "@/test/fetch-mock";
 import {
   useAddTag,
+  useBulkUpdateNotes,
   useCreateNote,
   useCreateNotebook,
   useDeleteNote,
@@ -46,6 +47,7 @@ const LIST_KEYS = [["notes"], ["notebooks"], ["tags"], ["search"]];
 let queryClient: QueryClient;
 let calls: FetchCall[];
 let invalidated: unknown[];
+let invalidateFilters: Array<Parameters<QueryClient["invalidateQueries"]>[0]>;
 
 /** Seeds every query a write can touch, so we can see which ones were invalidated or removed */
 function seedCache() {
@@ -65,9 +67,11 @@ beforeEach(() => {
   queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
   seedCache();
   invalidated = [];
+  invalidateFilters = [];
   const original = queryClient.invalidateQueries.bind(queryClient);
   vi.spyOn(queryClient, "invalidateQueries").mockImplementation((filters, options) => {
     invalidated.push(filters?.queryKey);
+    invalidateFilters.push(filters);
     return original(filters, options);
   });
   calls = mockFetch(({ method, path }) => {
@@ -96,41 +100,49 @@ async function run<TVars>(hook: () => { mutateAsync: (v: TVars) => Promise<unkno
 }
 
 describe("note mutations", () => {
-  it("useCreateNote posts the note, caches it and invalidates the lists", async () => {
+  it("useCreateNote posts the note, caches it and invalidates lists and other notes lazily", async () => {
     await run(useCreateNote, { parentId: NB_ID, title: "New" });
     expect(calls).toContainEqual({ method: "POST", path: "/api/notes", body: { parentId: NB_ID, title: "New" } });
     expect(queryClient.getQueryData<Note>(["note", NOTE_ID])?.title).toBe("Saved");
     expectListsInvalidated();
+    expect(isStale(["note", NOTE_ID])).toBe(false);
+    expect(isStale(["note", OTHER_ID])).toBe(true);
+    expect(invalidateFilters.find((f) => JSON.stringify(f?.queryKey) === JSON.stringify(["note"]))?.refetchType).toBe("none");
   });
 
-  it("useUpdateNote replaces the cached note and invalidates the lists, but not other notes", async () => {
+  it("useUpdateNote replaces the cached note, invalidates lists, and marks other notes stale lazily", async () => {
     await run(useUpdateNote, { id: NOTE_ID, changes: { parentId: OTHER_ID } });
     expect(calls).toContainEqual({ method: "PUT", path: `/api/notes/${NOTE_ID}`, body: { parentId: OTHER_ID } });
     expect(queryClient.getQueryData<Note>(["note", NOTE_ID])?.updatedTime).toBe(2000);
     expectListsInvalidated();
-    expect(isStale(["note", OTHER_ID])).toBe(false);
+    expect(isStale(["note", NOTE_ID])).toBe(false);
+    expect(isStale(["note", OTHER_ID])).toBe(true);
+    expect(invalidateFilters.find((f) => JSON.stringify(f?.queryKey) === JSON.stringify(["note"]))?.refetchType).toBe("none");
   });
 
-  it("useDeleteNote (trash) invalidates the note so it shows as trashed", async () => {
+  it("useDeleteNote (trash) invalidates the trashed note and marks other notes stale lazily", async () => {
     await run(useDeleteNote, { id: NOTE_ID });
     expect(calls).toContainEqual({ method: "DELETE", path: `/api/notes/${NOTE_ID}`, body: undefined });
     expect(isStale(["note", NOTE_ID])).toBe(true);
-    expect(isStale(["note", OTHER_ID])).toBe(false);
+    expect(isStale(["note", OTHER_ID])).toBe(true);
     expectListsInvalidated();
   });
 
-  it("useDeleteNote (permanent) removes the note from the cache", async () => {
+  it("useDeleteNote (permanent) removes the note from cache and marks other notes stale lazily", async () => {
     await run(useDeleteNote, { id: NOTE_ID, permanent: true });
     expect(last()?.path).toBe(`/api/notes/${NOTE_ID}?permanent=true`);
     expect(queryClient.getQueryState(["note", NOTE_ID])).toBeUndefined();
     expect(queryClient.getQueryData(["note", OTHER_ID])).toBeDefined();
+    expect(isStale(["note", OTHER_ID])).toBe(true);
     expectListsInvalidated();
   });
 
-  it("useRestoreNote caches the restored note and invalidates the lists", async () => {
+  it("useRestoreNote caches the restored note, invalidates lists, and marks other notes stale lazily", async () => {
     await run(useRestoreNote, NOTE_ID);
     expect(last()).toMatchObject({ method: "POST", path: `/api/notes/${NOTE_ID}/restore` });
     expect(queryClient.getQueryData<Note>(["note", NOTE_ID])?.title).toBe("Saved");
+    expect(isStale(["note", NOTE_ID])).toBe(false);
+    expect(isStale(["note", OTHER_ID])).toBe(true);
     expectListsInvalidated();
   });
 
@@ -196,5 +208,123 @@ describe("tag mutations", () => {
     expectListsInvalidated();
     expect(isStale(["note", NOTE_ID])).toBe(true);
     expect(isStale(["note", OTHER_ID])).toBe(true);
+  });
+});
+
+describe("useBulkUpdateNotes", () => {
+  const makeId = (n: number) => n.toString(16).padStart(32, "0");
+
+  it("posts one batch request and invalidates lists and notes once", async () => {
+    const progress: Array<{ completed: number; total: number }> = [];
+    const batchCalls = mockFetch(({ method, path, body }) => {
+      if (method === "POST" && path === "/api/notes/batch") {
+        const items = (body as { items: Array<{ id: string }> }).items;
+        return jsonResponse(items.map((item, idx) => ({ id: item.id, status: "ok", updatedTime: 3000 + idx })));
+      }
+      return undefined;
+    });
+
+    const { result } = renderHook(useBulkUpdateNotes, { wrapper });
+    let out: unknown;
+    await act(async () => {
+      out = await result.current.mutateAsync({
+        items: [
+          { id: NOTE_ID, baseUpdatedTime: 1000 },
+          { id: OTHER_ID, baseUpdatedTime: 2000 },
+        ],
+        parentId: NB_ID,
+        onProgress: (p) => progress.push(p),
+      });
+    });
+
+    expect(batchCalls).toEqual([
+      {
+        method: "POST",
+        path: "/api/notes/batch",
+        body: {
+          items: [
+            { id: NOTE_ID, baseUpdatedTime: 1000 },
+            { id: OTHER_ID, baseUpdatedTime: 2000 },
+          ],
+          parentId: NB_ID,
+        },
+      },
+    ]);
+    expect(out).toEqual([
+      { id: NOTE_ID, status: "ok", updatedTime: 3000 },
+      { id: OTHER_ID, status: "ok", updatedTime: 3001 },
+    ]);
+    expect(progress).toEqual([
+      { completed: 0, total: 2 },
+      { completed: 2, total: 2 },
+    ]);
+    expectListsInvalidated();
+    // Each query key family invalidated once per batch, not once per note
+    expect(invalidated.filter((k) => JSON.stringify(k) === JSON.stringify(["notes"]))).toHaveLength(1);
+    expect(invalidated.filter((k) => JSON.stringify(k) === JSON.stringify(["note"]))).toHaveLength(1);
+  });
+
+  it("chunks >1000 items sequentially, reports progress, and invalidates once at the end", async () => {
+    const progress: Array<{ completed: number; total: number }> = [];
+    const batchCalls = mockFetch(({ method, path, body }) => {
+      if (method === "POST" && path === "/api/notes/batch") {
+        const items = (body as { items: Array<{ id: string }> }).items;
+        return jsonResponse(items.map((item) => ({ id: item.id, status: "ok", updatedTime: 4000 })));
+      }
+      return undefined;
+    });
+
+    const items = Array.from({ length: 2500 }, (_, i) => ({ id: makeId(i + 1), baseUpdatedTime: 100 }));
+    const { result } = renderHook(useBulkUpdateNotes, { wrapper });
+    let results: Array<{ id: string }> = [];
+    await act(async () => {
+      results = await result.current.mutateAsync({
+        items,
+        addTags: ["work"],
+        onProgress: (p) => progress.push(p),
+      });
+    });
+
+    expect(batchCalls).toHaveLength(3);
+    expect((batchCalls[0].body as { items: unknown[] }).items).toHaveLength(1000);
+    expect((batchCalls[1].body as { items: unknown[] }).items).toHaveLength(1000);
+    expect((batchCalls[2].body as { items: unknown[] }).items).toHaveLength(500);
+    expect(results).toHaveLength(2500);
+    expect(progress).toEqual([
+      { completed: 0, total: 2500 },
+      { completed: 1000, total: 2500 },
+      { completed: 2000, total: 2500 },
+      { completed: 2500, total: 2500 },
+    ]);
+    expect(invalidated.filter((k) => JSON.stringify(k) === JSON.stringify(["notes"]))).toHaveLength(1);
+    expect(invalidated.filter((k) => JSON.stringify(k) === JSON.stringify(["note"]))).toHaveLength(1);
+  });
+
+  it("invalidates only when at least one chunk succeeded", async () => {
+    mockFetch(() => jsonResponse({ error: "Server error" }, 500));
+    const { result } = renderHook(useBulkUpdateNotes, { wrapper });
+    await act(async () => {
+      await expect(
+        result.current.mutateAsync({ items: [{ id: NOTE_ID, baseUpdatedTime: 1000 }], trash: true })
+      ).rejects.toMatchObject({ status: 500 });
+    });
+    expect(invalidated).toEqual([]);
+
+    let chunk = 0;
+    mockFetch(() => {
+      chunk++;
+      if (chunk === 1) {
+        return jsonResponse([{ id: makeId(1), status: "ok", updatedTime: 5000 }]);
+      }
+      return jsonResponse({ error: "Timed out" }, 504);
+    });
+    const large = Array.from({ length: 1005 }, (_, i) => ({ id: makeId(i + 1) }));
+    await act(async () => {
+      await expect(result.current.mutateAsync({ items: large, trash: true })).rejects.toMatchObject({
+        status: 504,
+      });
+    });
+    expectListsInvalidated();
+    expect(invalidated.filter((k) => JSON.stringify(k) === JSON.stringify(["notes"]))).toHaveLength(1);
   });
 });

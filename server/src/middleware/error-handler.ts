@@ -40,7 +40,7 @@ async function respond(err: unknown, req: Request, res: Response): Promise<void>
     // The response may have been closed while the session was re-checked
     if (res.headersSent) return;
     if (gone) {
-      if (req.sessionId) invalidateSessionValidation(req.sessionId);
+      if (req.sessionId) invalidateSessionValidation(req.sessionId, req.authState, req.twoFactorStore);
       res.status(401).json({ error: 'Unauthorized: Session has expired or is invalid', status: 401 });
     } else {
       res.status(403).json({ error: 'Joplin Server refused this request', status: 403 });
@@ -49,7 +49,10 @@ async function respond(err: unknown, req: Request, res: Response): Promise<void>
   }
 
   if ((err as { type?: string })?.type === 'entity.too.large') {
-    res.status(413).json({ error: 'The file is too large to upload' });
+    const message = req.originalUrl.startsWith('/api/clip')
+      ? 'Clipped content exceeds the 10 MB size limit'
+      : 'The file is too large to upload';
+    res.status(413).json({ error: message });
     return;
   }
 

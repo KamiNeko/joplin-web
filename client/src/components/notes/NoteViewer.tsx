@@ -1,12 +1,17 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { MARKUP_HTML, Note, Notebook } from "@/lib/types";
+import { MARKUP_HTML, Note, NoteAssistAction, Notebook } from "@/lib/types";
 import { flattenNotebooks } from "@/lib/notebooks";
 import { setTaskChecked, type TaskLocation } from "@/lib/tasks";
 import { getConflictNote } from "@/lib/api";
+import { computeNoteStats, extractHeadings } from "@/lib/note-stats";
+import { findHeading, headingSlug } from "@/lib/heading-slug";
 import { MarkdownRenderer } from "@/components/common/MarkdownRenderer";
 import { ConfirmDialog } from "@/components/common/Dialogs";
+import { AttachmentsDrawer } from "./AttachmentsDrawer";
+import { VersionHistoryDrawer } from "./VersionHistoryDrawer";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -28,15 +33,23 @@ import {
   CheckCircle2,
   Circle,
   AlertCircle,
+  Copy,
+  ExternalLink,
   FileCode,
   FileText,
   GitCompareArrows,
   History,
+  Info,
   Link,
+  List,
+  Loader2,
   Lock,
   MoreHorizontal,
+  Paperclip,
   PencilLine,
   RotateCcw,
+  Sparkles,
+  Star,
   Trash2,
   X,
 } from "lucide-react";
@@ -44,8 +57,10 @@ import { formatRelativeTime, noteDisplayTitle } from "@/lib/format";
 import { TagEditor } from "@/components/tags/TagEditor";
 import { TodoDueDate } from "./TodoDueDate";
 import { Button } from "@/components/ui/button";
-import { useDeleteNote, useRestoreNote, useUpdateNote } from "@/hooks/use-mutations";
+import { useAddTag, useDeleteNote, useRestoreNote, useUpdateNote } from "@/hooks/use-mutations";
 import { useNoteSaver } from "@/hooks/use-note-saver";
+import { usePreferences, useToggleFavoriteNote } from "@/hooks/use-preferences";
+import { useAiStatus, useNoteAssist } from "@/hooks/use-workspace";
 import { cn } from "@/lib/utils";
 import { QueryError, StaleDataHint } from "@/components/common/QueryError";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
@@ -150,10 +165,39 @@ export function NoteViewer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadedNoteId]);
   const [confirmPurge, setConfirmPurge] = useState(false);
+  const [attachmentsOpen, setAttachmentsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [outlineOpen, setOutlineOpen] = useState(false);
+  const [propertiesOpen, setPropertiesOpen] = useState(false);
+  const [assistState, setAssistState] = useState<{
+    noteId: string;
+    action: NoteAssistAction;
+    result: string;
+    tags?: string[];
+  } | null>(null);
+  const viewerContentRef = useRef<HTMLDivElement>(null);
+  const skipOutlineFocusRestoreRef = useRef(false);
+
   const updateNote = useUpdateNote();
   const deleteNote = useDeleteNote();
   const restoreNote = useRestoreNote();
+  const addTag = useAddTag();
   const toggleTask = useTaskToggle(note?.id);
+  const { data: preferences } = usePreferences(Boolean(note && !readOnly && !note.encrypted));
+  const toggleFavorite = useToggleFavoriteNote();
+  const { data: aiStatus } = useAiStatus();
+  const assistMutation = useNoteAssist();
+
+  const noteBody = note?.body ?? "";
+  const isHtmlNote = note?.markupLanguage === MARKUP_HTML;
+  const headings = useMemo(
+    () => (note && !note.encrypted && !isHtmlNote ? extractHeadings(noteBody) : []),
+    [note, noteBody, isHtmlNote]
+  );
+  const stats = useMemo(
+    () => (note && !note.encrypted ? computeNoteStats(noteBody, isHtmlNote) : null),
+    [note, noteBody, isHtmlNote]
+  );
   // Fetch the editor chunk while the note is read, so Edit opens without a wait (and works offline)
   useEffect(() => {
     if (loadedNoteId) void loadNoteEditor().catch(() => undefined);
@@ -210,6 +254,41 @@ export function NoteViewer({
   const canEdit = !isTrashed && !locked;
   // Editing would overwrite the stored draft, so the user decides about it first
   const editing = isEditing && canEdit && !restorable;
+  const canClickToEdit = canEdit && !restorable && !isEncrypted && Boolean(note.body.trim());
+
+  const handleBodyClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!canClickToEdit) return;
+    const currentTarget = e.currentTarget;
+    const target = e.target;
+    if (!(currentTarget instanceof Element) || !(target instanceof Node)) return;
+    // Ignore React portal events (e.g. lightbox Dialog clicks bubbling through the React tree)
+    if (!currentTarget.contains(target)) return;
+
+    const el = target instanceof Element ? target : target.parentElement;
+    if (!el) return;
+    if (
+      el.closest(
+        'a, button, input, textarea, select, option, label, summary, details, audio, video, iframe, img, .cursor-zoom-in, [role="button"], [role="checkbox"], [data-no-edit]'
+      )
+    ) {
+      return;
+    }
+
+    const selection = window.getSelection?.();
+    if (selection && !selection.isCollapsed && selection.toString().trim().length > 0) {
+      return;
+    }
+
+    setIsEditing(true);
+  };
+  const isFavorite = Boolean(preferences?.favoriteNoteIds?.includes(note.id));
+  const aiEnabled = Boolean(aiStatus?.enabled);
+  const activeAssist = assistState?.noteId === note.id ? assistState : null;
+  const sourceUrl =
+    note.properties?.source_url && /^https?:\/\//i.test(note.properties.source_url)
+      ? note.properties.source_url
+      : null;
+  const author = note.properties?.author?.trim() || null;
   const title = noteDisplayTitle(note);
   const updatedRelative = formatRelativeTime(note.updatedTime);
   const createdDate = note.createdTime
@@ -244,6 +323,77 @@ export function NoteViewer({
     const link = noteMarkdownLink(note);
     if (await copyText(link)) toast.success("Markdown link copied");
     else toast.error("Could not copy the link", { description: link });
+  };
+
+  const handleToggleFavorite = () => {
+    toggleFavorite.mutate(
+      { id: note.id, favorited: isFavorite },
+      {
+        onSuccess: () =>
+          toast.success(isFavorite ? "Removed from shortcuts" : "Added to shortcuts"),
+        onError: (err) => toast.error("Could not update shortcuts", { description: err.message }),
+      }
+    );
+  };
+
+  const handleRunAssist = async (action: NoteAssistAction) => {
+    try {
+      const res = await assistMutation.mutateAsync({ noteId: note.id, action });
+      setAssistState({ noteId: note.id, action, result: res.result, tags: res.tags });
+    } catch (err) {
+      toast.error("AI Assist failed", { description: err instanceof Error ? err.message : undefined });
+    }
+  };
+
+  const handleAppendAssist = () => {
+    if (!activeAssist?.result) return;
+    const heading =
+      activeAssist.action === "summarize"
+        ? "## Summary"
+        : activeAssist.action === "action-items"
+          ? "## Action Items"
+          : activeAssist.action === "cleanup"
+            ? "## Polished Draft"
+            : "## AI Notes";
+    const nextBody = `${note.body.trimEnd()}\n\n${heading}\n\n${activeAssist.result.trim()}\n`;
+    updateNote.mutate(
+      { id: note.id, changes: { body: nextBody } },
+      {
+        onSuccess: () => toast.success("Appended to note"),
+        onError: (err) => toast.error("Could not append to note", { description: err.message }),
+      }
+    );
+  };
+
+  const handleApplySuggestedTags = async () => {
+    if (!activeAssist?.tags || activeAssist.tags.length === 0) return;
+    const existing = new Set((note.tags ?? []).map((t) => t.title.toLowerCase()));
+    const fresh = activeAssist.tags.filter((t) => !existing.has(t.toLowerCase()));
+    if (fresh.length === 0) {
+      toast.info("All suggested tags are already on this note");
+      return;
+    }
+    try {
+      for (const tagTitle of fresh) {
+        await addTag.mutateAsync({ noteId: note.id, title: tagTitle });
+      }
+      toast.success(`Added ${fresh.length} tag${fresh.length === 1 ? "" : "s"}`);
+    } catch (err) {
+      toast.error("Could not apply suggested tags", { description: err instanceof Error ? err.message : undefined });
+    }
+  };
+
+  const handleScrollToHeading = (slug: string) => {
+    skipOutlineFocusRestoreRef.current = true;
+    setOutlineOpen(false);
+    const container = viewerContentRef.current;
+    if (!container) return;
+    const domHeadings = Array.from(container.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6")).map((item) => ({
+      slug: headingSlug(item.textContent ?? ""),
+      item,
+    }));
+    const target = findHeading(domHeadings, slug);
+    target?.scrollIntoView?.({ behavior: "smooth", block: "start" });
   };
 
   const handleTrash = () => {
@@ -388,6 +538,128 @@ export function NoteViewer({
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
+          {!locked && !isTrashed && !editing && headings.length > 0 && (
+            <Popover open={outlineOpen} onOpenChange={setOutlineOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                  aria-label="Document outline"
+                  title="Outline"
+                >
+                  <List className="h-4 w-4" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent
+                align="end"
+                className="w-64 p-2 max-h-80 overflow-y-auto"
+                onCloseAutoFocus={(e) => {
+                  if (skipOutlineFocusRestoreRef.current) {
+                    skipOutlineFocusRestoreRef.current = false;
+                    e.preventDefault();
+                  }
+                }}
+              >
+                <p className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Outline
+                </p>
+                <div className="space-y-0.5 mt-1">
+                  {headings.map((h) => (
+                    <button
+                      key={h.slug}
+                      type="button"
+                      onClick={() => handleScrollToHeading(h.slug)}
+                      style={{ paddingLeft: `${8 + (h.level - 1) * 10}px` }}
+                      className="w-full text-left text-xs py-1.5 pr-2 rounded-md hover:bg-muted text-foreground/90 hover:text-foreground truncate block"
+                    >
+                      {h.text}
+                    </button>
+                  ))}
+                </div>
+              </PopoverContent>
+            </Popover>
+          )}
+
+          {!locked && !isTrashed && (
+            <>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                onClick={handleToggleFavorite}
+                disabled={toggleFavorite.isPending}
+                aria-pressed={isFavorite}
+                aria-label={isFavorite ? "Remove from shortcuts" : "Add to shortcuts"}
+                title={isFavorite ? "Remove from shortcuts" : "Add to shortcuts"}
+              >
+                <Star className={cn("h-4 w-4", isFavorite && "fill-amber-500 text-amber-500")} />
+              </Button>
+
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                onClick={() => setAttachmentsOpen(true)}
+                aria-label="Attachments"
+                title="Attachments & OCR"
+              >
+                <Paperclip className="h-4 w-4" />
+              </Button>
+
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                onClick={() => setHistoryOpen(true)}
+                aria-label="Version history"
+                title="Version history"
+              >
+                <History className="h-4 w-4" />
+              </Button>
+
+              {aiEnabled && !isConflict && !editing && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      disabled={assistMutation.isPending}
+                      className="h-8 w-8 text-primary hover:text-primary"
+                      aria-label="AI Note Assist"
+                      title="AI Note Assist"
+                    >
+                      {assistMutation.isPending ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Sparkles className="h-4 w-4" />
+                      )}
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-48">
+                    <DropdownMenuItem onClick={() => void handleRunAssist("summarize")}>
+                      Summarize note
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => void handleRunAssist("action-items")}>
+                      Extract action items
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => void handleRunAssist("suggest-tags")}>
+                      Suggest tags
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => void handleRunAssist("cleanup")}>
+                      Cleanup formatting
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
+            </>
+          )}
+
           {locked ? null : isTrashed ? (
             <>
               <Button size="sm" variant="outline" className="h-8" onClick={handleRestore} disabled={restoreNote.isPending}>
@@ -620,10 +892,135 @@ export function NoteViewer({
                   readOnly={!canEdit || isConflict}
                   onTagClick={onTagClick}
                 />
+
+                {stats && stats.words > 0 && (
+                  <span className="text-[11px] font-mono text-muted-foreground/90">
+                    {stats.words} {stats.words === 1 ? "word" : "words"} · {stats.readingMinutes} min read
+                  </span>
+                )}
+
+                {!isEncrypted && (
+                  <button
+                    type="button"
+                    onClick={() => setPropertiesOpen((prev) => !prev)}
+                    className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+                  >
+                    <Info className="h-3 w-3" />
+                    <span>Properties</span>
+                  </button>
+                )}
               </div>
+
+              {propertiesOpen && !isEncrypted && (
+                <div className="rounded-xl border border-border/60 bg-muted/30 p-3 text-xs grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div>
+                    <span className="text-muted-foreground">Note ID:</span>{" "}
+                    <code className="font-mono text-[11px]">{note.id}</code>
+                  </div>
+                  {stats && (
+                    <div>
+                      <span className="text-muted-foreground">Length:</span>{" "}
+                      <span>{stats.words} words ({stats.characters} chars)</span>
+                    </div>
+                  )}
+                  {author && (
+                    <div>
+                      <span className="text-muted-foreground">Author:</span> <span>{author}</span>
+                    </div>
+                  )}
+                  {sourceUrl && (
+                    <div className="sm:col-span-2 truncate">
+                      <span className="text-muted-foreground">Source URL:</span>{" "}
+                      <a
+                        href={sourceUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-primary hover:underline"
+                      >
+                        <span className="truncate">{sourceUrl}</span>
+                        <ExternalLink className="h-3 w-3 shrink-0" />
+                      </a>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {activeAssist && (
+                <div className="rounded-xl border border-primary/30 bg-primary/5 p-4 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-primary">
+                      <Sparkles className="h-3.5 w-3.5" />
+                      <span>
+                        AI Assist ·{" "}
+                        {activeAssist.action === "summarize"
+                          ? "Summary"
+                          : activeAssist.action === "action-items"
+                            ? "Action items"
+                            : activeAssist.action === "suggest-tags"
+                              ? "Suggested tags"
+                              : "Cleaned draft"}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 px-2 text-xs gap-1"
+                        onClick={async () => {
+                          if (await copyText(activeAssist.result)) toast.success("Copied AI result");
+                        }}
+                      >
+                        <Copy className="h-3 w-3" />
+                        Copy
+                      </Button>
+                      {activeAssist.action === "suggest-tags" && activeAssist.tags && activeAssist.tags.length > 0 ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-7 px-2 text-xs"
+                          disabled={addTag.isPending}
+                          onClick={() => void handleApplySuggestedTags()}
+                        >
+                          Apply tags
+                        </Button>
+                      ) : canEdit ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-7 px-2 text-xs"
+                          disabled={updateNote.isPending}
+                          onClick={handleAppendAssist}
+                        >
+                          Append to note
+                        </Button>
+                      ) : null}
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        className="h-7 w-7"
+                        aria-label="Close AI result"
+                        onClick={() => setAssistState(null)}
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="text-xs whitespace-pre-wrap text-foreground/95 leading-relaxed">
+                    {activeAssist.result}
+                  </div>
+                </div>
+              )}
             </div>
 
-            <div className="pt-2">
+            <div
+              ref={viewerContentRef}
+              onClick={handleBodyClick}
+              className={cn("pt-2", canClickToEdit && "cursor-text")}
+            >
               {isEncrypted ? (
                 <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-primary/10 border border-primary/25 text-foreground text-xs">
                   <Lock className="h-4 w-4 shrink-0 text-primary" />
@@ -650,8 +1047,54 @@ export function NoteViewer({
                 <p className="text-sm text-muted-foreground italic">This note is empty.</p>
               )}
             </div>
+
+            {!isEncrypted && note.backlinks && note.backlinks.length > 0 && (
+              <section className="pt-6 border-t border-border/50 space-y-2.5" aria-label="Backlinks">
+                <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+                  <Link className="h-3.5 w-3.5" />
+                  <span>
+                    Referenced in {note.backlinks.length} {note.backlinks.length === 1 ? "note" : "notes"}
+                  </span>
+                </h2>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {note.backlinks.map((bl) => (
+                    <button
+                      key={bl.id}
+                      type="button"
+                      onClick={() => onOpenNote?.(bl.id)}
+                      className="rounded-xl border border-border/60 bg-card/40 hover:bg-muted/50 p-3 text-left transition-colors space-y-1"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium text-xs text-foreground truncate">
+                          {bl.title || "Untitled Note"}
+                        </span>
+                        <span className="text-[10px] font-mono text-muted-foreground shrink-0">
+                          {formatRelativeTime(bl.updatedTime)}
+                        </span>
+                      </div>
+                      {bl.snippet && (
+                        <p className="text-[11px] text-muted-foreground line-clamp-2">{bl.snippet}</p>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </section>
+            )}
           </div>
         </ScrollArea>
+      )}
+
+      {attachmentsOpen && (
+        <AttachmentsDrawer noteId={note.id} open={attachmentsOpen} onOpenChange={setAttachmentsOpen} />
+      )}
+      {historyOpen && (
+        <VersionHistoryDrawer
+          noteId={note.id}
+          currentBody={note.body}
+          readOnly={!canEdit}
+          open={historyOpen}
+          onOpenChange={setHistoryOpen}
+        />
       )}
 
       <ConfirmDialog
@@ -738,14 +1181,17 @@ function useTaskToggle(noteId: string | undefined) {
     saveRef.current = save;
   });
 
-  return (location: TaskLocation, checked: boolean) => {
-    if (!noteId) return;
-    const cached = queryClient.getQueryData<Note>(["note", noteId]);
-    if (!cached) return;
-    const body = setTaskChecked(cached.body, location, checked);
-    if (body === null) return;
-    queryClient.setQueryData<Note>(["note", noteId], { ...cached, body });
-    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-    timerRef.current = window.setTimeout(() => void save(), TASK_SAVE_DELAY_MS);
-  };
+  return useCallback(
+    (location: TaskLocation, checked: boolean) => {
+      if (!noteId) return;
+      const cached = queryClient.getQueryData<Note>(["note", noteId]);
+      if (!cached) return;
+      const body = setTaskChecked(cached.body, location, checked);
+      if (body === null) return;
+      queryClient.setQueryData<Note>(["note", noteId], { ...cached, body });
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      timerRef.current = window.setTimeout(() => void saveRef.current?.(), TASK_SAVE_DELAY_MS);
+    },
+    [noteId, queryClient]
+  );
 }

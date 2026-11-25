@@ -1,3 +1,4 @@
+import fs from "fs";
 import path from "path";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
@@ -13,12 +14,28 @@ const appVersion = rawVersion && /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/.test(rawVe
 const rawSha = process.env.GIT_SHA?.trim().toLowerCase();
 const gitSha = rawSha && /^[0-9a-f]{7,40}$/.test(rawSha) ? rawSha : null;
 
+// pdf.js loads its no-WASM decoders by fixed file name from one directory (lib/pdf-thumbnail.ts).
+// assets/ is cached as immutable, so the directory carries the version instead of a file hash.
+const pdfjsVersion = JSON.parse(
+  fs.readFileSync(path.resolve(__dirname, "node_modules/pdfjs-dist/package.json"), "utf8")
+).version;
+
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
   define: {
     __APP_VERSION__: JSON.stringify(appVersion),
     __GIT_SHA__: JSON.stringify(gitSha),
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        assetFileNames: (asset) =>
+          asset.names.some((name) => name.endsWith("_nowasm_fallback.js"))
+            ? `assets/pdfjs-${pdfjsVersion}/[name][extname]`
+            : "assets/[name]-[hash][extname]",
+      },
+    },
   },
   resolve: {
     alias: {

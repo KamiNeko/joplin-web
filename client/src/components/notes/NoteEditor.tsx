@@ -1,13 +1,28 @@
-import { useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, Check, Circle, Columns2, Eye, FileCode, Loader2, Lock, Paperclip, PencilLine } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  Circle,
+  Columns2,
+  Eye,
+  FileCode,
+  Loader2,
+  Lock,
+  Mic,
+  Paperclip,
+  PencilLine,
+  Type,
+} from "lucide-react";
 import { MARKUP_HTML, Note } from "@/lib/types";
 import { ApiError, getConflictNote, isReadOnlyError } from "@/lib/api";
 import { invalidateLists } from "@/hooks/use-mutations";
 import { useNoteSaver } from "@/hooks/use-note-saver";
 import { setTaskChecked } from "@/lib/tasks";
 import { MarkdownEditor, MarkdownEditorHandle, UPLOAD_PLACEHOLDER } from "./MarkdownEditor";
+import type { RichEditorHandle } from "./RichEditor";
+import { VoiceNoteModal } from "./VoiceNoteModal";
 import { TagEditor } from "@/components/tags/TagEditor";
 import { MarkdownRenderer } from "@/components/common/MarkdownRenderer";
 import { Button } from "@/components/ui/button";
@@ -29,7 +44,9 @@ import { asSentence } from "@/lib/format";
 const AUTOSAVE_DELAY_MS = 1500;
 const MODE_STORAGE_KEY = "joplin-editor-mode";
 
-type EditorMode = "edit" | "split" | "preview";
+const RichEditor = lazy(() => import("./RichEditor").then((m) => ({ default: m.RichEditor })));
+
+type EditorMode = "rich" | "edit" | "split" | "preview";
 type SaveStatus = "saved" | "dirty" | "saving" | "error" | "conflict";
 
 interface Draft {
@@ -44,7 +61,7 @@ function sameDraft(a: Draft, b: Draft) {
 function loadMode(): EditorMode {
   try {
     const stored = localStorage.getItem(MODE_STORAGE_KEY);
-    if (stored === "edit" || stored === "split" || stored === "preview") return stored;
+    if (stored === "rich" || stored === "edit" || stored === "split" || stored === "preview") return stored;
   } catch {
     // storage unavailable
   }
@@ -61,6 +78,9 @@ interface NoteEditorProps {
 }
 
 const isSessionExpired = (err: unknown) => err instanceof ApiError && err.status === 401;
+
+const escapeVoiceHtml = (text: string) =>
+  text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 /**
  * Markdown note editor with debounced autosave, Ctrl+S, and conflict detection.
@@ -89,7 +109,9 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
   const [remoteChange, setRemoteChange] = useState<Note | null>(null);
   const [editorKey, setEditorKey] = useState(0);
   const [uploadCount, setUploadCount] = useState(0);
+  const [voiceModalOpen, setVoiceModalOpen] = useState(false);
   const editorRef = useRef<MarkdownEditorHandle>(null);
+  const richEditorRef = useRef<RichEditorHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const uploadsRef = useRef(0);
 
@@ -426,21 +448,50 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
 
   // Narrow screens have no room for split view (its tab is hidden there), so it behaves like Edit
   const effectiveMode: EditorMode = noRoomForSplit && mode === "split" ? "edit" : mode;
+  const isRichMode = effectiveMode === "rich";
   const showEditor = effectiveMode === "edit" || effectiveMode === "split";
   const showPreview = effectiveMode === "preview" || effectiveMode === "split";
+  const showUploadTools = showEditor || isRichMode;
+
+  const modeOptions = [
+    { id: "rich" as const, label: "Rich", icon: Type },
+    { id: "edit" as const, label: "Edit", icon: PencilLine },
+    { id: "split" as const, label: "Split", icon: Columns2 },
+    { id: "preview" as const, label: "Preview", icon: Eye },
+  ];
+
+  const handleVoiceUploaded = (resource: { id: string; title: string; transcript?: string }) => {
+    const safeTitle = resource.title.replace(/[[\]]/g, (c) => (c === "[" ? "(" : ")"));
+    const transcript = resource.transcript?.trim();
+    const snippet = isHtml
+      ? `<a href=":/${resource.id}">${escapeVoiceHtml(resource.title)}</a>${
+          transcript ? `<blockquote><p>${escapeVoiceHtml(transcript).replace(/\r?\n/g, "<br>")}</p></blockquote>` : ""
+        }`
+      : `[${safeTitle}](:/${resource.id})${
+          transcript
+            ? `\n\n${transcript
+                .split(/\r?\n/)
+                .map((line) => `> ${line}`)
+                .join("\n")}\n`
+            : ""
+        }`;
+    if (isRichMode && richEditorRef.current?.insertText) {
+      richEditorRef.current.insertText(snippet);
+      return;
+    }
+    if (showEditor && editorRef.current?.insertText) {
+      editorRef.current.insertText(snippet);
+      return;
+    }
+    updateDraft({ body: draftRef.current.body ? `${draftRef.current.body}\n${snippet}` : snippet });
+  };
 
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Editor toolbar */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-2 border-b border-border/40">
         <div className="flex items-center rounded-lg bg-muted p-0.5" role="group" aria-label="Editor layout">
-          {(
-            [
-              { id: "edit", label: "Edit", icon: PencilLine },
-              { id: "split", label: "Split", icon: Columns2 },
-              { id: "preview", label: "Preview", icon: Eye },
-            ] as const
-          ).map(({ id, label, icon: Icon }) => (
+          {modeOptions.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               type="button"
@@ -462,7 +513,7 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
         </div>
 
         <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-          {showEditor && (
+          {showUploadTools && (
             <>
               <Button
                 variant="ghost"
@@ -475,6 +526,17 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
                 <Paperclip className="h-3.5 w-3.5" />
                 <span className="hidden lg:inline">Attach</span>
               </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 text-muted-foreground hover:text-foreground"
+                onClick={() => setVoiceModalOpen(true)}
+                aria-label="Record voice note"
+                title="Record voice note"
+              >
+                <Mic className="h-3.5 w-3.5" />
+                <span className="hidden lg:inline">Voice note</span>
+              </Button>
               <input
                 ref={fileInputRef}
                 type="file"
@@ -483,7 +545,11 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
                 onChange={(e) => {
                   const files = Array.from(e.target.files ?? []);
                   e.target.value = "";
-                  editorRef.current?.insertFiles(files);
+                  if (isRichMode) {
+                    richEditorRef.current?.insertFiles(files);
+                  } else {
+                    editorRef.current?.insertFiles(files);
+                  }
                 }}
               />
             </>
@@ -554,8 +620,9 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
         >
           <FileCode className="h-3.5 w-3.5 mt-px shrink-0" aria-hidden="true" />
           <span>
-            This is an HTML note (for example a page saved with the Joplin Web Clipper). You are editing its raw
-            HTML; Markdown formatting does not apply here.
+            {isRichMode
+              ? "This is an HTML note (for example a page saved with the Joplin Web Clipper). Editing visually in Rich mode; complex custom layout or CSS may be simplified by TipTap."
+              : "This is an HTML note (for example a page saved with the Joplin Web Clipper). You are editing its raw HTML; Markdown formatting does not apply here."}
           </span>
         </div>
       )}
@@ -570,7 +637,11 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
               e.preventDefault();
               // In preview-only mode there is no editor to jump to, so open the split view first
               if (mode === "preview") setMode("split");
-              window.setTimeout(() => (document.querySelector(".cm-content") as HTMLElement | null)?.focus(), 0);
+              window.setTimeout(() => {
+                const target = (document.querySelector(".cm-content") ??
+                  document.querySelector(".rich-editor-content")) as HTMLElement | null;
+                target?.focus();
+              }, 0);
             }
           }}
           autoFocus={focusTitle}
@@ -593,6 +664,31 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
           effectiveMode === "split" ? "grid-cols-1 lg:grid-cols-2" : "grid-cols-1"
         )}
       >
+        {isRichMode && (
+          <div className="min-h-0 overflow-hidden px-4 sm:px-10 lg:px-12 pt-2">
+            <div className="h-full max-w-4xl mx-auto">
+              <Suspense
+                fallback={
+                  <div className="flex items-center gap-2 py-8 text-xs text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" /> Loading rich editor...
+                  </div>
+                }
+              >
+                <RichEditor
+                  ref={richEditorRef}
+                  key={`rich-${isHtml ? "html" : "md"}-${editorKey}`}
+                  html={isHtml}
+                  onUploadsChange={handleUploadsChange}
+                  noteId={note.id}
+                  value={draft.body}
+                  onChange={(body) => updateDraft({ body })}
+                  autoFocus={!focusTitle}
+                  className="h-full"
+                />
+              </Suspense>
+            </div>
+          </div>
+        )}
         {showEditor && (
           <div
             className={cn(
@@ -671,6 +767,12 @@ export function NoteEditor({ note, focusTitle = false, initialDraft = null, onDo
           </p>
         </DialogContent>
       </Dialog>
+      {/* Voice note recorder */}
+      <VoiceNoteModal
+        open={voiceModalOpen}
+        onOpenChange={setVoiceModalOpen}
+        onUploaded={handleVoiceUploaded}
+      />
     </div>
   );
 }
