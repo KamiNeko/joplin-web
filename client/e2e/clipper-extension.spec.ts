@@ -97,11 +97,11 @@ function buildArticleHtml({ includeImages = true } = {}): string {
         </p>
       </article>
 
-      <footer class="post-footer">
+      <div class="comments">
         <p id="outside-para">
           Outside appendix paragraph sitting below the article element for drag-to-expand testing.
         </p>
-      </footer>
+      </div>
 
       <section id="pick-section">
         Standalone sidebar section for click-to-pick verification.
@@ -141,7 +141,7 @@ const FIXTURE_CSS = `
   article p, article div {
     margin: 12px 0;
   }
-  .post-footer {
+  .comments {
     margin-top: 16px;
     padding: 16px 24px;
     background: #fff7ed;
@@ -184,6 +184,119 @@ async function startFixtureServer(): Promise<{ url: string; close: () => Promise
         "Content-Security-Policy": "default-src 'none'; style-src 'self'",
       });
       res.end(buildArticleHtml({ includeImages: false }));
+      return;
+    }
+    if (reqPath === "/heading-above-content") {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Designing Resilient Web Clippers | Engineering Blog</title>
+    <link rel="stylesheet" href="/fixture.css" />
+  </head>
+  <body>
+    <header class="site-header"><nav><a href="/">Home</a></nav></header>
+    <main class="page-main">
+      <div id="post-wrapper">
+        <header><h1 id="post-h1">Designing Resilient Web Clippers</h1></header>
+        <p class="byline" id="post-byline">Nov. 28, 2024 · By Ada Lovelace</p>
+        <div id="post-content">
+          <p>
+            First long prose paragraph inside a dedicated post content container that sits below the
+            separate headline header and byline metadata block.
+          </p>
+          <p>
+            Second long prose paragraph giving Readability a high content score on the inner content
+            div while excluding the outer headline and publication date.
+          </p>
+          <p>
+            Third long prose paragraph confirming that the default detected clip region expands up
+            to include the matching headline and byline automatically.
+          </p>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>`);
+      return;
+    }
+    if (reqPath === "/intro-before-readability") {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Picture Element Reference - HTML | Docs</title>
+    <link rel="stylesheet" href="/fixture.css" />
+  </head>
+  <body>
+    <header class="site-header"><nav><a href="/">Docs</a></nav></header>
+    <main id="doc-main" class="page-main">
+      <div id="doc-header">
+        <h1 id="doc-h1">Picture Element Reference</h1>
+        <p id="doc-intro">
+          Essential introductory summary paragraph explaining the element before the interactive examples begin.
+        </p>
+      </div>
+      <aside id="doc-toc">
+        <nav><p>SIDEBAR_TOC_MARKER</p><a href="#try">Try it</a></nav>
+      </aside>
+      <div id="doc-body">
+        <section>
+          <h2 id="try">Try it</h2>
+          <p>
+            Detailed first body paragraph with plenty of words so Mozilla Readability selects the
+            doc-body container as its primary candidate and drops the header intro block above the sidebar.
+          </p>
+          <p>
+            Detailed second body paragraph continuing the technical reference documentation with
+            concrete responsive image art direction guidance and browser selection rules.
+          </p>
+          <p>
+            Detailed third body paragraph describing fallback image sources, media conditions, and
+            format negotiation across modern rendering engines.
+          </p>
+        </section>
+      </div>
+    </main>
+  </body>
+</html>`);
+      return;
+    }
+    if (reqPath === "/site-header-h1") {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Quarterly Architecture Review — Acme Engineering Notes</title>
+    <link rel="stylesheet" href="/fixture.css" />
+  </head>
+  <body>
+    <header class="site-header" id="site-header">
+      <h1 id="brand-h1">Acme Engineering Notes</h1>
+      <nav><a href="/">Home</a> <a href="/archive">Archive</a></nav>
+    </header>
+    <main class="page-main">
+      <div id="entry-body">
+        <h2>Quarterly Architecture Review</h2>
+        <p>
+          First substantial paragraph describing our quarterly architecture review, storage engine
+          benchmarks, and replication latency targets across every cluster.
+        </p>
+        <p>
+          Second substantial paragraph covering failure drills, schema migration safeguards, and
+          automated rollback verification in staging environments.
+        </p>
+        <p>
+          Third substantial paragraph summarizing next quarter milestones and operational ownership
+          across the platform engineering team.
+        </p>
+      </div>
+    </main>
+  </body>
+</html>`);
       return;
     }
     res.writeHead(404);
@@ -946,6 +1059,143 @@ test.describe("Clip to Joplin Web browser extension", () => {
 
       await panel.close();
       await assertOverlayAndTempAttrsCleaned(cspPage);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("extends default box to include headline and intro, and never grows to body for site-header h1", async ({
+    baseURL,
+  }) => {
+    const serverUrl = baseURL!;
+    const { context, extensionId, serviceWorker, cleanup } = await launchExtensionContext();
+    try {
+      const appPage = await configureSignedInExtension(context, extensionId, serverUrl);
+      const runTag = uniqueWord("hdr");
+      const createdNoteIds: string[] = [];
+
+      try {
+        // 1. Heading + byline above a separate content div: box and saved note must include h1 and byline
+        {
+          const url = `${fixture.url}/heading-above-content`;
+          const page = await context.newPage();
+          await page.goto(url, { waitUntil: "load" });
+          const tabId = await findTabIdByUrl(serviceWorker, url);
+
+          const panel = await openPanelForTab(context, extensionId, tabId);
+          await panel.locator('button[data-mode="article"]').click();
+
+          await page.bringToFront();
+          await expect.poll(() => getOverlayBoxRect(page)).not.toBeNull();
+          const h1Rect = await page.locator("#post-h1").boundingBox();
+          const contentRect = await page.locator("#post-content").boundingBox();
+          const overlayRect = await getOverlayBoxRect(page);
+          expect(h1Rect).not.toBeNull();
+          expect(contentRect).not.toBeNull();
+          expect(overlayRect).not.toBeNull();
+          expect(overlayRect!.top).toBeLessThanOrEqual(h1Rect!.y + 4);
+          expect(overlayRect!.bottom).toBeGreaterThanOrEqual(
+            contentRect!.y + contentRect!.height - 4
+          );
+
+          await panel.bringToFront();
+          await panel.locator("#clip-title").fill(`Heading ${runTag}`);
+          await panel.locator("#save-btn").click();
+          const noteId = await extractNoteIdFromOpenLink(panel);
+          createdNoteIds.push(noteId);
+          await panel.close();
+          await page.close();
+
+          const note = await fetchNote(appPage, noteId);
+          expect(note.body).toContain("Designing Resilient Web Clippers");
+          expect(note.body).toContain("Nov. 28, 2024");
+          expect(note.body).toContain("First long prose paragraph");
+        }
+
+        // 2. Intro paragraph before the part Readability keeps (separated by <aside> TOC): box and note must include it, without sidebar
+        {
+          const url = `${fixture.url}/intro-before-readability`;
+          const page = await context.newPage();
+          await page.goto(url, { waitUntil: "load" });
+          const tabId = await findTabIdByUrl(serviceWorker, url);
+
+          const panel = await openPanelForTab(context, extensionId, tabId);
+          await panel.locator('button[data-mode="article"]').click();
+
+          await page.bringToFront();
+          await expect.poll(() => getOverlayBoxRect(page)).not.toBeNull();
+          const h1Rect = await page.locator("#doc-h1").boundingBox();
+          const introRect = await page.locator("#doc-intro").boundingBox();
+          const bodyRect = await page.locator("#doc-body").boundingBox();
+          const overlayRect = await getOverlayBoxRect(page);
+          expect(h1Rect).not.toBeNull();
+          expect(introRect).not.toBeNull();
+          expect(bodyRect).not.toBeNull();
+          expect(overlayRect).not.toBeNull();
+          expect(overlayRect!.top).toBeLessThanOrEqual(h1Rect!.y + 4);
+          expect(overlayRect!.bottom).toBeGreaterThanOrEqual(bodyRect!.y + bodyRect!.height - 4);
+
+          await panel.bringToFront();
+          await panel.locator("#clip-title").fill(`Intro ${runTag}`);
+          await panel.locator("#save-btn").click();
+          const noteId = await extractNoteIdFromOpenLink(panel);
+          createdNoteIds.push(noteId);
+          await panel.close();
+          await page.close();
+
+          const note = await fetchNote(appPage, noteId);
+          expect(note.body).toContain("Picture Element Reference");
+          expect(note.body).toContain("Essential introductory summary paragraph");
+          expect(note.body).toContain("Detailed first body paragraph");
+          expect(note.body).not.toContain("SIDEBAR_TOC_MARKER");
+        }
+
+        // 3. Page whose only h1 is in a site header next to a nav: box must NOT grow to body or include the site header
+        {
+          const url = `${fixture.url}/site-header-h1`;
+          const page = await context.newPage();
+          await page.goto(url, { waitUntil: "load" });
+          const tabId = await findTabIdByUrl(serviceWorker, url);
+
+          const panel = await openPanelForTab(context, extensionId, tabId);
+          await panel.locator('button[data-mode="article"]').click();
+
+          await page.bringToFront();
+          await expect.poll(() => getOverlayBoxRect(page)).not.toBeNull();
+          const siteHeaderRect = await page.locator("#site-header").boundingBox();
+          const entryRect = await page.locator("#entry-body").boundingBox();
+          const bodyRect = await page.locator("body").boundingBox();
+          const overlayRect = await getOverlayBoxRect(page);
+          expect(siteHeaderRect).not.toBeNull();
+          expect(entryRect).not.toBeNull();
+          expect(bodyRect).not.toBeNull();
+          expect(overlayRect).not.toBeNull();
+          expect(overlayRect!.top).toBeGreaterThanOrEqual(
+            siteHeaderRect!.y + siteHeaderRect!.height - 2
+          );
+          expect(overlayRect!.top).toBeLessThanOrEqual(entryRect!.y + 4);
+          expect(overlayRect!.bottom).toBeGreaterThanOrEqual(
+            entryRect!.y + entryRect!.height - 4
+          );
+          expect(overlayRect!.height).toBeLessThan(bodyRect!.height - 20);
+          const selectedIncludesBodyOrHeader = await page.evaluate(() => {
+            const g = globalThis as unknown as {
+              document: { body: unknown; getElementById(id: string): unknown };
+              __joplinClipperOverlay?: { getSelectedElements(): Array<{ contains?(n: unknown): boolean }> };
+            };
+            const els = g.__joplinClipperOverlay?.getSelectedElements() || [];
+            const header = g.document.getElementById("site-header");
+            return els.some((el) => el === g.document.body || (header && el.contains?.(header)));
+          });
+          expect(selectedIncludesBodyOrHeader).toBe(false);
+
+          await panel.close();
+          await assertOverlayAndTempAttrsCleaned(page);
+          await page.close();
+        }
+      } finally {
+        await cleanupDemoResources(appPage, createdNoteIds, [], []);
+      }
     } finally {
       await cleanup();
     }
