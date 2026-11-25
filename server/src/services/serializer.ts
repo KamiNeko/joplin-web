@@ -230,7 +230,11 @@ export function serialize(item: {
   const sections: string[] = [];
   if (typeof item.title === 'string') {
     // Only a line feed would break the format; a stray "\r" is written back as-is, like Joplin does
-    sections.push(item.title.replace(/\r*\n[\r\n]*/g, ' '));
+    sections.push(
+      item.title.includes('\n')
+        ? item.title.replace(/\r+(?:\n[\r\n]*)?|\n[\r\n]*/g, (m) => (m.includes('\n') ? ' ' : m))
+        : item.title
+    );
   }
   if (item.body && item.type_ === JoplinItemType.Note) {
     sections.push(item.body);
@@ -240,6 +244,41 @@ export function serialize(item: {
   }
 
   return sections.join('\n\n');
+}
+
+/**
+ * Replaces Markdown images (`![alt](url)`) or links (`[label](url)`) in a single linear scan.
+ */
+function replaceMarkdownLinks(text: string, images: boolean): string {
+  const needle = images ? '![' : '[';
+  let out = '';
+  let lastCopied = 0;
+  let nextCloseBracket = -1;
+  let pos = 0;
+
+  while (pos < text.length) {
+    const open = text.indexOf(needle, pos);
+    if (open === -1) break;
+    const labelStart = open + needle.length;
+    if (nextCloseBracket < labelStart) {
+      nextCloseBracket = text.indexOf(']', labelStart);
+      if (nextCloseBracket === -1) break;
+    }
+    if ((images || nextCloseBracket > labelStart) && text[nextCloseBracket + 1] === '(') {
+      const closeParen = text.indexOf(')', nextCloseBracket + 2);
+      if (closeParen === -1) break;
+      out += text.slice(lastCopied, open);
+      if (!images) {
+        out += text.slice(labelStart, nextCloseBracket);
+      }
+      lastCopied = closeParen + 1;
+      pos = lastCopied;
+    } else {
+      pos = labelStart;
+    }
+  }
+
+  return lastCopied === 0 ? text : out + text.slice(lastCopied);
 }
 
 /**
@@ -253,21 +292,25 @@ export function serialize(item: {
 export function stripMarkdown(markdown?: string, maxChars = 150): string {
   if (!markdown) return '';
 
-  const text = markdown
+  let text = markdown
     // Remove code blocks
     .replace(/```[\s\S]*?```/g, '')
     // Remove inline code
-    .replace(/`([^`]+)`/g, '$1')
-    // Remove images: ![alt](url)
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '')
-    // Replace links with label text: [text](url) -> text
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/`([^`]+)`/g, '$1');
+
+  // Remove images and replace links with label text
+  if (text.includes('[')) {
+    if (text.includes('![')) text = replaceMarkdownLinks(text, true);
+    text = replaceMarkdownLinks(text, false);
+  }
+
+  text = text
     // Remove headings: # Heading
     .replace(/^#{1,6}\s+/gm, '')
     // Remove blockquotes: > quote
     .replace(/^>\s+/gm, '')
     // Remove horizontal rules
-    .replace(/^[-*_]{3,}\s*$/gm, '')
+    .replace(/^[-*_]{3,}[ \t]*$/gm, '')
     // Remove unordered list markers: - item, * item
     .replace(/^[\*\-+]\s+/gm, '')
     // Remove ordered list markers: 1. item
@@ -278,10 +321,10 @@ export function stripMarkdown(markdown?: string, maxChars = 150): string {
     // Remove strikethrough
     .replace(/~~(.*?)~~/g, '$1')
     // Remove table separator rows (| --- | :---: |) and the remaining cell pipes
-    .replace(/^\s*\|?(\s*:?-{3,}:?\s*\|)+\s*:?-*:?\s*$/gm, '')
-    .replace(/\s*\|\s*/g, ' ')
+    .replace(/^[ \t]*(?:\|[ \t]*)?(?::?-{3,}:?[ \t]*\|[ \t]*)+(?::?-+:?[ \t]*)?$/gm, '')
+    .replace(/\|/g, ' ')
     // Remove HTML tags
-    .replace(/<[^>]+>/g, '')
+    .replace(/<[^<>]+>/g, '')
     // Collapse consecutive whitespaces and newlines into single spaces
     .replace(/\s+/g, ' ')
     .trim();

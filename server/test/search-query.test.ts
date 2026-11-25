@@ -74,5 +74,19 @@ describe('matchesNamePattern', () => {
     assert.equal(matchesNamePattern('a.b', 'a.b'), true);
     assert.equal(matchesNamePattern('axb', 'a.b'), false);
     assert.equal(matchesNamePattern('C++ (notes)', 'c++*'), true);
+    assert.equal(matchesNamePattern('afoobbarc', 'a***b*c'), true);
+    assert.equal(matchesNamePattern('abc', '*abc*'), true);
+    assert.equal(matchesNamePattern('ab', 'abc*'), false);
+  });
+
+  test('matches repeated wildcards and long inputs in linear time', () => {
+    const startedAt = performance.now();
+    assert.equal(matchesNamePattern(`${'a'.repeat(500)}c`, `${'a*'.repeat(60)}b`), false);
+    assert.equal(matchesNamePattern(`${'a'.repeat(40_000)}c`, `*${'a'.repeat(20_000)}b`), false);
+    assert.equal(matchesNamePattern(`${'a'.repeat(40_000)}c`, `*${'a'.repeat(20_000)}b*`), false);
+    const parsed = parseSearchQuery('a '.repeat(20_000));
+    assert.equal(parsed.terms.length, 20_000);
+    const elapsedMs = performance.now() - startedAt;
+    assert.ok(elapsedMs < 300, `Expected linear wildcard/query matching, took ${elapsedMs.toFixed(1)}ms`);
   });
 });
