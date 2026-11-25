@@ -165,3 +165,11 @@ export function matchesNamePattern(title: string, pattern: string): boolean {
   );
   return regex.test(lower);
 }
+
+/**
+ * Compiles a lower-cased search term once per query into a case-insensitive (Unicode) matcher
+ * for titles and bodies as stored, so a search does not have to lower-case every note.
+ */
+export function compileSearchTerm(term: string): RegExp {
+  return new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'iu');
+}

@@ -401,3 +401,23 @@ describe('derived counts', () => {
     assert.equal(tags.find((t) => t.title === 'cooking')?.noteCount, 2);
   });
 });
+
+describe('list previews', () => {
+  test('a cached preview follows the note body and markup language', async () => {
+    const entry = await noteCache.getEntry(session);
+    const note = entry.notes.get(NOTE)!;
+    const { body, properties } = note;
+    const preview = async () => (await noteCache.getNotes(session)).find((n) => n.id === NOTE)?.preview;
+    try {
+      await preview();
+      note.body = '# Changed **in place**';
+      assert.equal(await preview(), 'Changed in place');
+      note.properties = { ...properties, markup_language: '2' };
+      note.body = '<p>Now <b>HTML</b></p>';
+      assert.equal(await preview(), 'Now HTML');
+    } finally {
+      note.body = body;
+      note.properties = properties;
+    }
+  });
+});
