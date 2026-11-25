@@ -121,6 +121,15 @@ describe(":/id#heading links (#93)", () => {
     expect(screen.getByRole("button", { name: "Other note" })).toBeTruthy();
   });
 
+  it("rewrites Markdown links quickly even with many unmatched brackets and img tags", () => {
+    const start = performance.now();
+    renderMarkdown(
+      `${"![".repeat(15000)}\n\n${'<img src=":abc" '.repeat(3000)}\n\n[Other note](:/${NOTE_ID}#intro)`
+    );
+    expect(performance.now() - start).toBeLessThan(2000);
+    expect(screen.getByRole("button", { name: "Other note" })).toBeTruthy();
+  });
+
   it("scrolls in the current note when the route already has a heading fragment, once", async () => {
     const { rerender } = render(
       <QueryClientProvider client={new QueryClient()}>

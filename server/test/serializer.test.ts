@@ -554,6 +554,24 @@ describe('stripMarkdown', () => {
     assert.equal(stripMarkdown('a'.repeat(200), 10), `${'a'.repeat(10)}...`);
     assert.equal(stripMarkdown(`ab ${'c'.repeat(100)}`, 10), `ab ${'c'.repeat(7)}...`);
   });
+
+  test('handles long repetitive markdown and title inputs in linear time', () => {
+    const startedAt = performance.now();
+    assert.equal(stripMarkdown(`|---|${' '.repeat(40_000)}x`, 20), '--- x');
+    assert.equal(stripMarkdown(`${' '.repeat(40_000)}|x`, 20), 'x');
+    assert.equal(stripMarkdown('!['.repeat(40_000), 10), `${'!['.repeat(5)}...`);
+    assert.equal(stripMarkdown('['.repeat(40_000), 10), `${'['.repeat(10)}...`);
+    assert.equal(stripMarkdown('<'.repeat(40_000), 10), `${'<'.repeat(10)}...`);
+    const serialized = serialize({
+      type_: JoplinItemType.Note,
+      title: `${'\r'.repeat(40_000)}a`,
+      body: '',
+      properties: baseProps,
+    });
+    assert.ok(serialized.startsWith(`${'\r'.repeat(40_000)}a\n\n`));
+    const elapsedMs = performance.now() - startedAt;
+    assert.ok(elapsedMs < 300, `Expected linear-time markdown stripping/serialization, took ${elapsedMs.toFixed(1)}ms`);
+  });
 });
 
 describe('HTML notes', () => {

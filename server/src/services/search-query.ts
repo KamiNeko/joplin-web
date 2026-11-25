@@ -43,6 +43,8 @@ interface Token {
 
 const FILTERS = new Set(['tag', 'notebook', 'type', 'iscompleted']);
 
+const FILTER_PREFIX_RE = /([a-z]+):(?=\S)/iy;
+
 /** Splits a query into tokens, honouring double quotes (an unclosed quote runs to the end) */
 function tokenize(query: string): Token[] {
   const tokens: Token[] = [];
@@ -60,7 +62,8 @@ function tokenize(query: string): Token[] {
     }
 
     let filter: string | undefined;
-    const filterMatch = /^([a-z]+):(?=\S)/i.exec(query.slice(i));
+    FILTER_PREFIX_RE.lastIndex = i;
+    const filterMatch = FILTER_PREFIX_RE.exec(query);
     if (filterMatch && FILTERS.has(filterMatch[1].toLowerCase())) {
       filter = filterMatch[1].toLowerCase();
       i += filterMatch[0].length;
@@ -156,12 +159,24 @@ export function isEmptySearchQuery(q: ParsedSearchQuery): boolean {
 export function matchesNamePattern(title: string, pattern: string): boolean {
   const lower = title.toLowerCase();
   if (!pattern.includes('*')) return lower === pattern;
-  const regex = new RegExp(
-    `^${pattern
-      .split('*')
-      .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-      .join('.*')}$`,
-    's'
-  );
-  return regex.test(lower);
+
+  const parts = pattern.split('*');
+  const first = parts[0];
+  const last = parts[parts.length - 1];
+
+  if (first && !lower.startsWith(first)) return false;
+  let pos = first.length;
+
+  if (last && (!lower.endsWith(last) || lower.length - last.length < pos)) return false;
+  const end = lower.length - last.length;
+
+  for (let i = 1; i < parts.length - 1; i++) {
+    const part = parts[i];
+    if (!part) continue;
+    const idx = lower.indexOf(part, pos);
+    if (idx === -1 || idx + part.length > end) return false;
+    pos = idx + part.length;
+  }
+
+  return true;
 }

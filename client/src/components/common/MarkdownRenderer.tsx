@@ -181,20 +181,21 @@ const sanitizeSchema = {
  */
 function preprocessJoplinMarkdown(raw: string): string {
   if (!raw) return "";
+  if (!raw.includes(":")) return raw;
 
   // Replace Markdown image syntax: ![alt](:/id "title") -> ![alt](/api/resources/id "title").
   // The ":/" form has to go: the sanitizer would drop it as an unknown URL protocol.
   // All rewrites keep whitespace and line breaks, so line/column positions of the result match
   // the original (task checkboxes map clicks back to the source by position).
   let transformed = raw.replace(
-    /!\[([^\]]*)\]\((\s*):\/?([0-9a-fA-F]{32})(\s+"[^"]*")?(\s*)\)/g,
+    /!\[([^[\]]*)\]\((\s*):\/?([0-9a-fA-F]{32})(\s+"[^"]*")?(\s*)\)/g,
     (_, alt, lead, id, title = "", trail) => `![${alt}](${lead}${getResourceUrl(id)}${title}${trail})`
   );
 
   // Replace links to notes/attachments: [text](:/id) -> /joplin-item/id, keeping a "#heading"
   // fragment. A ":/" href would be dropped by the sanitizer as an unknown protocol.
   transformed = transformed.replace(
-    /(^|[^!])\[([^\]]*)\]\((\s*):\/?([0-9a-fA-F]{32})(#[^\s()"'<>]*)?(\s+"[^"]*")?(\s*)\)/g,
+    /(^|[^!])\[([^[\]]*)\]\((\s*):\/?([0-9a-fA-F]{32})(#[^\s()"'<>]*)?(\s+"[^"]*")?(\s*)\)/g,
     (_, before, text, lead, id, fragment = "", title = "", trail) =>
       `${before}[${text}](${lead}${JOPLIN_ITEM_PATH}${id.toLowerCase()}${fragment}${title}${trail})`
   );
@@ -208,16 +209,17 @@ function preprocessJoplinMarkdown(raw: string): string {
  */
 function preprocessJoplinHtml(raw: string): string {
   if (!raw) return "";
+  if (!raw.includes(":")) return raw;
 
   // Replace HTML image src: <img src=":/id" ...> -> <img src="/api/resources/id" ...>
   let transformed = raw.replace(
-    /<img([^>]{1,500}?)src=["']:\/?([a-zA-Z0-9_-]+)["']([^>]*)>/gi,
+    /<img([^<>]{1,500}?)src=["']:\/?([a-zA-Z0-9_-]+)["']([^<>]*)>/gi,
     (_, before, id, after) => `<img${before}src="${getResourceUrl(id)}"${after}>`
   );
 
   // Replace links to notes/attachments: <a href=":/id"> -> /joplin-item/id, keeping a "#heading" fragment
   transformed = transformed.replace(
-    /<a([^>]{1,500}?)href=(["']):\/?([0-9a-fA-F]{32})(#[^\s"'<>]*)?\2/gi,
+    /<a([^<>]{1,500}?)href=(["']):\/?([0-9a-fA-F]{32})(#[^\s"'<>]*)?\2/gi,
     (_, before, _quote, id, fragment = "") => `<a${before}href="${JOPLIN_ITEM_PATH}${id.toLowerCase()}${fragment}"`
   );
 
