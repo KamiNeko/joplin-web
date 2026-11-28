@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { encodeBase32 } from './totp.js';
@@ -7,6 +7,7 @@ export const PENDING_LOGIN_TTL_MS = 5 * 60 * 1000;
 export const PENDING_LOGIN_MAX_ATTEMPTS = 5;
 export const STEP_UP_TTL_MS = 5 * 60 * 1000;
 export const TRUSTED_DEVICE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+export const REMEMBER_ME_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const SETUP_TTL_MS = 10 * 60 * 1000;
 export const WEBAUTHN_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 export const RECOVERY_CODE_COUNT = 10;
@@ -16,7 +17,13 @@ export const LOCKOUT_MAX_MS = 60 * 60 * 1000;
 
 const MAX_PENDING_LOGINS = 1000;
 const MAX_TRUSTED_DEVICES = 50;
+export const MAX_REMEMBER_ENTRIES_PER_USER = 20;
 const SESSIONS_FILE = 'sessions.json';
+const REMEMBER_FILE = 'remember.json';
+const REMEMBER_ID_BYTES = 16;
+const REMEMBER_KEY_BYTES = 32;
+const REMEMBER_IV_BYTES = 12;
+const REMEMBER_TAG_BYTES = 16;
 
 export type TwoFactorMethod = 'passkey' | 'totp' | 'recovery';
 
@@ -70,6 +77,24 @@ export interface WebAuthnChallengeRecord {
   kind: 'register' | 'authenticate' | 'step-up';
 }
 
+export interface StoredRememberEntry {
+  idHash: string;
+  userId: string;
+  email: string;
+  iv: string;
+  ciphertext: string;
+  tag: string;
+  createdAt: number;
+  expiresAt: number;
+  userAgent: string;
+  lastUsedAt: number;
+}
+
+export interface PendingRememberMe {
+  entry: StoredRememberEntry;
+  cookieValue: string;
+}
+
 export interface PendingLogin {
   tokenHash: string;
   joplinSessionId: string;
@@ -83,6 +108,7 @@ export interface PendingLogin {
   inFlight: boolean;
   pendingTotpSecret: string | null;
   webAuthnChallenge: WebAuthnChallengeRecord | null;
+  rememberMe: PendingRememberMe | null;
 }
 
 export interface SessionRecord {
@@ -99,6 +125,108 @@ export interface SessionRecord {
  */
 export function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
+}
+
+function rememberAad(idHash: string, userId: string): Buffer {
+  return Buffer.from(`${idHash}:${userId}`, 'utf8');
+}
+
+/**
+ * Parses a remember-me cookie of the form `base64url(id).base64url(K)` where `id` is 16 bytes
+ * and `K` is 32 bytes. Returns null for any malformed value.
+ */
+export function parseRememberCookie(raw: string): { id: Buffer; idHash: string; key: Buffer } | null {
+  if (!raw || raw.length > 256) return null;
+  const parts = raw.split('.');
+  if (parts.length !== 2) return null;
+  const [idPart, keyPart] = parts;
+  if (!/^[A-Za-z0-9_-]{22}$/.test(idPart) || !/^[A-Za-z0-9_-]{43}$/.test(keyPart)) {
+    return null;
+  }
+  const id = Buffer.from(idPart, 'base64url');
+  const key = Buffer.from(keyPart, 'base64url');
+  if (
+    id.length !== REMEMBER_ID_BYTES ||
+    key.length !== REMEMBER_KEY_BYTES ||
+    id.toString('base64url') !== idPart ||
+    key.toString('base64url') !== keyPart
+  ) {
+    return null;
+  }
+  const idHash = createHash('sha256').update(id).digest('hex');
+  return { id, idHash, key };
+}
+
+/**
+ * Generates a split-key remember-me entry in memory: random 16-byte id + 32-byte key K,
+ * AES-256-GCM encrypted `{ email, password }` bound to `idHash + userId` via AAD.
+ * The key K lives only in `cookieValue` and is never persisted on disk.
+ */
+export function prepareRememberEntry(input: {
+  userId: string;
+  email: string;
+  password: string;
+  userAgent: string | undefined;
+  now?: number;
+}): PendingRememberMe {
+  const now = input.now ?? Date.now();
+  const id = randomBytes(REMEMBER_ID_BYTES);
+  const key = randomBytes(REMEMBER_KEY_BYTES);
+  const iv = randomBytes(REMEMBER_IV_BYTES);
+  const idHash = createHash('sha256').update(id).digest('hex');
+
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  cipher.setAAD(rememberAad(idHash, input.userId));
+  const plaintext = JSON.stringify({ email: input.email, password: input.password });
+  const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+
+  const entry: StoredRememberEntry = {
+    idHash,
+    userId: input.userId,
+    email: input.email,
+    iv: iv.toString('base64url'),
+    ciphertext: ciphertext.toString('base64url'),
+    tag: tag.toString('base64url'),
+    createdAt: now,
+    expiresAt: now + REMEMBER_ME_TTL_MS,
+    userAgent: summarizeUserAgent(input.userAgent),
+    lastUsedAt: now,
+  };
+
+  return {
+    entry,
+    cookieValue: `${id.toString('base64url')}.${key.toString('base64url')}`,
+  };
+}
+
+/**
+ * Decrypts a persisted remember-me entry using the key K carried in the browser cookie.
+ * Returns null if the key, IV, tag, AAD, or ciphertext is invalid.
+ */
+export function decryptRememberEntry(
+  entry: StoredRememberEntry,
+  key: Buffer
+): { email: string; password: string } | null {
+  if (key.length !== REMEMBER_KEY_BYTES) return null;
+  try {
+    const iv = Buffer.from(entry.iv, 'base64url');
+    const tag = Buffer.from(entry.tag, 'base64url');
+    const ciphertext = Buffer.from(entry.ciphertext, 'base64url');
+    if (iv.length !== REMEMBER_IV_BYTES || tag.length !== REMEMBER_TAG_BYTES) return null;
+
+    const decipher = createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAAD(rememberAad(entry.idHash, entry.userId));
+    decipher.setAuthTag(tag);
+    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+    const parsed = JSON.parse(plaintext) as unknown;
+    if (!parsed || typeof parsed !== 'object') return null;
+    const { email, password } = parsed as { email?: unknown; password?: unknown };
+    if (typeof email !== 'string' || typeof password !== 'string' || !email || !password) return null;
+    return { email, password };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -310,6 +438,7 @@ function validateUserRecord(raw: unknown, expectedUserId: string): UserTwoFactor
 export class TwoFactorStore {
   private readonly cacheDir: string | null;
   private readonly userLocks = new Map<string, Promise<unknown>>();
+  private rememberLock: Promise<unknown> = Promise.resolve();
   private readonly pendingLogins = new Map<string, PendingLogin>();
   private readonly inMemorySessions = new Map<string, SessionRecord>();
   private sessionsLoaded = false;
@@ -564,6 +693,7 @@ export class TwoFactorStore {
     joplinSessionId: string;
     userId: string;
     email: string;
+    rememberMe?: PendingRememberMe | null;
     now?: number;
   }): { token: string; pending: PendingLogin; evictedSessions: string[] } {
     const now = input.now ?? Date.now();
@@ -592,6 +722,7 @@ export class TwoFactorStore {
       inFlight: false,
       pendingTotpSecret: null,
       webAuthnChallenge: null,
+      rememberMe: input.rememberMe ?? null,
     };
     this.pendingLogins.set(tokenHash, pending);
     return { token, pending, evictedSessions };
@@ -791,6 +922,250 @@ export class TwoFactorStore {
       }
     }
     return revokedTokens;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Remember-Me Persistent Sign-In Store (CACHE_DIR/auth/remember.json)
+  // ---------------------------------------------------------------------------
+
+  private rememberFilePath(): string | null {
+    return this.cacheDir ? path.join(authDirPath(this.cacheDir), REMEMBER_FILE) : null;
+  }
+
+  private async withRememberLock<T>(fn: () => Promise<T> | T): Promise<T> {
+    const prev = this.rememberLock;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const chain = prev.then(() => gate);
+    this.rememberLock = chain;
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+
+  private readRememberEntries(): Record<string, StoredRememberEntry> {
+    const filePath = this.rememberFilePath();
+    if (!filePath) return Object.create(null) as Record<string, StoredRememberEntry>;
+    let text: string;
+    try {
+      text = readFileSync(filePath, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+        return Object.create(null) as Record<string, StoredRememberEntry>;
+      }
+      throw err;
+    }
+    const parsed = JSON.parse(text) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Invalid remember-me store: expected object');
+    }
+    const obj = parsed as Record<string, unknown>;
+    const out: Record<string, StoredRememberEntry> = Object.create(null);
+    for (const key of Object.keys(obj)) {
+      const entry = obj[key] as Partial<StoredRememberEntry> | undefined;
+      if (
+        entry &&
+        typeof entry === 'object' &&
+        typeof entry.idHash === 'string' &&
+        entry.idHash === key &&
+        typeof entry.userId === 'string' &&
+        typeof entry.email === 'string' &&
+        typeof entry.iv === 'string' &&
+        typeof entry.ciphertext === 'string' &&
+        typeof entry.tag === 'string' &&
+        typeof entry.createdAt === 'number' &&
+        typeof entry.expiresAt === 'number' &&
+        typeof entry.userAgent === 'string' &&
+        typeof entry.lastUsedAt === 'number'
+      ) {
+        out[key] = entry as StoredRememberEntry;
+      }
+    }
+    return out;
+  }
+
+  private writeRememberEntries(entries: Record<string, StoredRememberEntry>, now = Date.now()): void {
+    const filePath = this.rememberFilePath();
+    if (!filePath) {
+      throw new Error('CACHE_DIR must be configured to persist remembered sign-ins');
+    }
+    this.ensureAuthDir();
+
+    // Prune expired entries on write and group active entries by user to enforce per-user cap
+    const byUser = new Map<string, StoredRememberEntry[]>();
+    for (const hash of Object.keys(entries)) {
+      const entry = entries[hash];
+      if (!entry || entry.expiresAt <= now) continue;
+      const list = byUser.get(entry.userId) ?? [];
+      list.push(entry);
+      byUser.set(entry.userId, list);
+    }
+
+    const pruned: Record<string, StoredRememberEntry> = Object.create(null);
+    for (const list of byUser.values()) {
+      list.sort((a, b) => a.createdAt - b.createdAt);
+      const kept = list.slice(-MAX_REMEMBER_ENTRIES_PER_USER);
+      for (const entry of kept) {
+        pruned[entry.idHash] = entry;
+      }
+    }
+    atomicWriteJson(filePath, pruned);
+  }
+
+  /**
+   * Persists a pre-encrypted remember-me entry (e.g. promoted from a pending 2FA login).
+   * Stamps a fixed 30-day expiry from `now`, prunes expired entries, and enforces the per-user cap.
+   */
+  public async savePreparedRememberEntry(
+    entry: StoredRememberEntry,
+    now = Date.now()
+  ): Promise<StoredRememberEntry> {
+    return this.withRememberLock(() => {
+      const entries = this.readRememberEntries();
+      const stamped: StoredRememberEntry = {
+        ...entry,
+        createdAt: now,
+        expiresAt: now + REMEMBER_ME_TTL_MS,
+        lastUsedAt: now,
+      };
+      entries[stamped.idHash] = stamped;
+      this.writeRememberEntries(entries, now);
+      return stamped;
+    });
+  }
+
+  /**
+   * Encrypts credentials under a fresh random split-key and persists the remember-me entry.
+   */
+  public async createRememberEntry(input: {
+    userId: string;
+    email: string;
+    password: string;
+    userAgent: string | undefined;
+    now?: number;
+  }): Promise<{ entry: StoredRememberEntry; cookieValue: string }> {
+    const now = input.now ?? Date.now();
+    const prepared = prepareRememberEntry({ ...input, now });
+    const entry = await this.savePreparedRememberEntry(prepared.entry, now);
+    return { entry, cookieValue: prepared.cookieValue };
+  }
+
+  /**
+   * Looks up a persisted remember-me entry by `idHash` (without mutating state).
+   */
+  public getRememberEntry(idHash: string): StoredRememberEntry | null {
+    if (!this.cacheDir || !/^[0-9a-f]{64}$/.test(idHash)) return null;
+    const entries = this.readRememberEntries();
+    return entries[idHash] ?? null;
+  }
+
+  /**
+   * Lists active, non-expired remembered sign-ins for a user (most recently used first).
+   */
+  public listRememberEntriesForUser(userId: string, now = Date.now()): StoredRememberEntry[] {
+    if (!this.cacheDir) return [];
+    const entries = this.readRememberEntries();
+    return Object.values(entries)
+      .filter((entry) => entry.userId === userId && entry.expiresAt > now)
+      .sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+  }
+
+  /**
+   * Updates `lastUsedAt` for an active remember-me entry without extending its fixed `expiresAt`.
+   * Returns false if the entry was deleted or expired in the meantime.
+   */
+  public async touchRememberEntry(idHash: string, now = Date.now()): Promise<boolean> {
+    if (!this.cacheDir) return false;
+    return this.withRememberLock(() => {
+      const entries = this.readRememberEntries();
+      const existing = entries[idHash];
+      if (!existing) return false;
+      if (existing.expiresAt <= now) {
+        delete entries[idHash];
+        this.writeRememberEntries(entries, now);
+        return false;
+      }
+      entries[idHash] = { ...existing, lastUsedAt: now };
+      this.writeRememberEntries(entries, now);
+      return true;
+    });
+  }
+
+  /**
+   * Deletes a single remember-me entry by `idHash`.
+   */
+  public async deleteRememberEntry(idHash: string): Promise<boolean> {
+    if (!this.cacheDir || !/^[0-9a-f]{64}$/.test(idHash)) return false;
+    return this.withRememberLock(() => {
+      const entries = this.readRememberEntries();
+      if (!(idHash in entries)) return false;
+      delete entries[idHash];
+      this.writeRememberEntries(entries);
+      return true;
+    });
+  }
+
+  /**
+   * Deletes a single remember-me entry owned by `userId`.
+   */
+  public async deleteRememberEntryForUser(userId: string, idHash: string): Promise<boolean> {
+    if (!this.cacheDir || !/^[0-9a-f]{64}$/.test(idHash)) return false;
+    return this.withRememberLock(() => {
+      const entries = this.readRememberEntries();
+      const existing = entries[idHash];
+      if (!existing || existing.userId !== userId) return false;
+      delete entries[idHash];
+      this.writeRememberEntries(entries);
+      return true;
+    });
+  }
+
+  /**
+   * Deletes the remember-me entry corresponding to a raw cookie value (e.g. on logout),
+   * verifying the key K against the stored entry before removing it.
+   */
+  public async deleteRememberEntryByCookie(rawCookie: string): Promise<boolean> {
+    if (!this.cacheDir) return false;
+    const parsed = parseRememberCookie(rawCookie);
+    if (!parsed) return false;
+    return this.withRememberLock(() => {
+      const entries = this.readRememberEntries();
+      const existing = entries[parsed.idHash];
+      if (!existing) return false;
+      const now = Date.now();
+      if (existing.expiresAt > now && !decryptRememberEntry(existing, parsed.key)) {
+        return false;
+      }
+      delete entries[parsed.idHash];
+      this.writeRememberEntries(entries, now);
+      return true;
+    });
+  }
+
+  /**
+   * Deletes all remember-me entries belonging to `userId`.
+   */
+  public async deleteAllRememberEntriesForUser(userId: string): Promise<number> {
+    if (!this.cacheDir) return 0;
+    return this.withRememberLock(() => {
+      const entries = this.readRememberEntries();
+      let removed = 0;
+      for (const hash of Object.keys(entries)) {
+        if (entries[hash].userId === userId) {
+          delete entries[hash];
+          removed += 1;
+        }
+      }
+      if (removed > 0) {
+        this.writeRememberEntries(entries);
+      }
+      return removed;
+    });
   }
 
   // ---------------------------------------------------------------------------

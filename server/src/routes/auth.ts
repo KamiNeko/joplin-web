@@ -3,17 +3,21 @@ import { resolveWebAuthnRp, type AppConfig } from '../config.js';
 import {
   cacheSessionValidation,
   getPendingToken,
+  getRememberToken,
   getSessionToken,
   getTrustedDeviceToken,
   invalidateSessionValidation,
   isWellFormedToken,
+  readRememberCookies,
   requireAuth,
 } from '../middleware/auth.js';
 import {
   clearPendingCookies,
+  clearRememberCookies,
   clearSessionCookies,
   endJoplinSessionSafe,
   pendingCookie,
+  rememberCookie,
   sessionCookie,
 } from '../services/auth-cookies.js';
 import { joplinApi, JoplinAuthError } from '../services/joplin-api.js';
@@ -24,11 +28,13 @@ import {
   getEnrolledMethods,
   getLockoutRetryAfterSeconds,
   hasPrimaryFactor,
+  parseRememberCookie,
+  prepareRememberEntry,
   recordFailedSecondFactor,
   type TwoFactorMethod,
   TwoFactorStore,
 } from '../services/two-factor-store.js';
-import { createTwoFactorRouter } from './two-factor.js';
+import { createTwoFactorRouter, requireStepUpSession } from './two-factor.js';
 
 export { sessionCookie };
 
@@ -44,6 +50,16 @@ export function createAuthRouter(
   const router = Router();
 
   /**
+   * GET /api/auth/options
+   * Unauthenticated login capabilities so the client knows whether to offer "Remember me for 30 days".
+   */
+  router.get('/options', (_req, res) => {
+    res.status(200).json({
+      rememberMeAvailable: Boolean(config.cacheDir),
+    });
+  });
+
+  /**
    * POST /api/auth/login
    * Authenticates with Joplin Server using email and password.
    * When 2FA is active or required, browser logins enter a server-side pending state (httpOnly
@@ -52,7 +68,7 @@ export function createAuthRouter(
    */
   router.post('/login', async (req, res) => {
     try {
-      const { email, password, totpCode, recoveryCode } = req.body ?? {};
+      const { email, password, totpCode, recoveryCode, rememberMe } = req.body ?? {};
 
       if (typeof email !== 'string' || typeof password !== 'string' || !email || !password) {
         res.status(400).json({ error: 'Email and password are required' });
@@ -64,6 +80,10 @@ export function createAuthRouter(
       }
       if (recoveryCode !== undefined && typeof recoveryCode !== 'string') {
         res.status(400).json({ error: 'Invalid recoveryCode format' });
+        return;
+      }
+      if (rememberMe !== undefined && typeof rememberMe !== 'boolean') {
+        res.status(400).json({ error: 'Invalid rememberMe format' });
         return;
       }
       const hasTotpCode = typeof totpCode === 'string' && totpCode.trim().length > 0;
@@ -84,6 +104,7 @@ export function createAuthRouter(
         }
 
         const isApiClient = req.headers.origin === undefined;
+        const wantsRememberMe = rememberMe === true && !isApiClient && Boolean(config.cacheDir);
         const { token: tdToken, duplicateCookies: duplicateTd } = getTrustedDeviceToken(req);
 
         type LoginDecision =
@@ -198,10 +219,20 @@ export function createAuthRouter(
           }
 
           // Browser 2FA step required: hold Joplin session server-side behind a pending cookie
+          const pendingRememberMe = wantsRememberMe
+            ? prepareRememberEntry({
+                userId: session.userId,
+                email,
+                password,
+                userAgent: req.headers['user-agent'],
+                now,
+              })
+            : null;
           const { token: pendingToken, evictedSessions } = activeStore.createPendingLogin({
             joplinSessionId: session.sessionId,
             userId: session.userId,
             email,
+            rememberMe: pendingRememberMe,
             now,
           });
           return { kind: 'pending', pendingToken, evictedSessions, methods, mustEnroll };
@@ -220,6 +251,17 @@ export function createAuthRouter(
           clearSessionCookies(res, cookie.name);
           clearPendingCookies(res);
           res.cookie(cookie.name, session.sessionId, cookie.options);
+          if (wantsRememberMe) {
+            const { cookieValue } = await activeStore.createRememberEntry({
+              userId: session.userId,
+              email,
+              password,
+              userAgent: req.headers['user-agent'],
+            });
+            const rCookie = rememberCookie(config, req);
+            clearRememberCookies(res, rCookie.name);
+            res.cookie(rCookie.name, cookieValue, rCookie.options);
+          }
           res.status(200).json({
             userId: session.userId,
             ...(isApiClient ? { sessionId: session.sessionId } : {}),
@@ -311,8 +353,10 @@ export function createAuthRouter(
     const activeStore = req.twoFactorStore ?? store;
     const { token: sessionId } = getSessionToken(req);
     const { token: pendingToken } = getPendingToken(req);
+    const rememberCookies = readRememberCookies(req);
     clearSessionCookies(res);
     clearPendingCookies(res);
+    clearRememberCookies(res);
 
     // Malformed tokens are never cached or sent upstream (unauthenticated callers could flood both)
     if (sessionId && isWellFormedToken(sessionId)) {
@@ -329,6 +373,10 @@ export function createAuthRouter(
       }
     }
 
+    if (config.cacheDir && rememberCookies.length === 1) {
+      await activeStore.deleteRememberEntryByCookie(rememberCookies[0]);
+    }
+
     res.status(200).json({ message: 'Successfully logged out' });
   });
 
@@ -339,6 +387,67 @@ export function createAuthRouter(
    */
   router.get('/check', requireAuth, (_req, res) => {
     res.status(200).json({ valid: true, serverHost });
+  });
+
+  /**
+   * GET /api/auth/remembered
+   * Lists active non-expired remembered sign-ins for the signed-in user.
+   */
+  router.get('/remembered', requireAuth, (req, res) => {
+    if (!config.cacheDir || !req.userId) {
+      res.status(503).json({ error: 'Remembered sign-ins require CACHE_DIR to be configured on the server.' });
+      return;
+    }
+    const activeStore = req.twoFactorStore ?? store;
+    const { token: rawRemember, duplicateCookies } = getRememberToken(req);
+    const currentIdHash =
+      !duplicateCookies && rawRemember ? (parseRememberCookie(rawRemember)?.idHash ?? null) : null;
+    const entries = activeStore.listRememberEntriesForUser(req.userId).map((entry) => ({
+      id: entry.idHash,
+      userAgent: entry.userAgent,
+      createdAt: entry.createdAt,
+      lastUsedAt: entry.lastUsedAt,
+      expiresAt: entry.expiresAt,
+      current: currentIdHash !== null && entry.idHash === currentIdHash,
+    }));
+    res.status(200).json({ entries });
+  });
+
+  /**
+   * DELETE /api/auth/remembered
+   * Revokes all remembered sign-ins for the current user (requires step-up when 2FA is active).
+   */
+  router.delete('/remembered', async (req, res) => {
+    const activeStore = req.twoFactorStore ?? store;
+    const ctx = await requireStepUpSession(req, res, config, activeStore);
+    if (!ctx) return;
+
+    await activeStore.deleteAllRememberEntriesForUser(ctx.userId);
+    clearRememberCookies(res);
+    res.status(200).json({ revokedAll: true });
+  });
+
+  /**
+   * DELETE /api/auth/remembered/:id
+   * Revokes a single remembered sign-in owned by the current user (requires step-up when 2FA is active).
+   */
+  router.delete('/remembered/:id', async (req, res) => {
+    const activeStore = req.twoFactorStore ?? store;
+    const ctx = await requireStepUpSession(req, res, config, activeStore);
+    if (!ctx) return;
+
+    const { token: rawRemember, duplicateCookies } = getRememberToken(req);
+    const currentIdHash =
+      !duplicateCookies && rawRemember ? (parseRememberCookie(rawRemember)?.idHash ?? null) : null;
+    const removed = await activeStore.deleteRememberEntryForUser(ctx.userId, req.params.id);
+    if (!removed) {
+      res.status(404).json({ error: 'Remembered sign-in not found.' });
+      return;
+    }
+    if (currentIdHash !== null && req.params.id === currentIdHash) {
+      clearRememberCookies(res);
+    }
+    res.status(200).json({ removed: true });
   });
 
   router.use('/2fa', createTwoFactorRouter(config, store));

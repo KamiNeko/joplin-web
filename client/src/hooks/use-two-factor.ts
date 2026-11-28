@@ -4,13 +4,16 @@ import {
   deletePasskey,
   getPasskeyRegisterOptions,
   getPasskeys,
+  getRememberedSignIns,
   getStepUpPasskeyOptions,
   getTrustedDevices,
   getTwoFactorStatus,
   regenerateRecoveryCodes,
   removeTotp,
   renamePasskey,
+  revokeAllRememberedSignIns,
   revokeAllTrustedDevices,
+  revokeRememberedSignIn,
   revokeTrustedDevice,
   setupTotp,
   stepUpWithPasskey,
@@ -19,12 +22,13 @@ import {
   verifyPasskeyRegistration,
 } from "@/lib/api";
 import { startPasskeyAuthentication, startPasskeyRegistration } from "@/lib/webauthn";
-import type { PasskeyItem, TrustedDeviceItem, TwoFactorStatus } from "@/lib/types";
+import type { PasskeyItem, RememberedSignInItem, TrustedDeviceItem, TwoFactorStatus } from "@/lib/types";
 
 export const TWO_FACTOR_KEY_PREFIX = ["auth", "2fa"] as const;
 export const TWO_FACTOR_STATUS_KEY = ["auth", "2fa", "status"] as const;
 export const PASSKEYS_KEY = ["auth", "2fa", "passkeys"] as const;
 export const TRUSTED_DEVICES_KEY = ["auth", "2fa", "trusted-devices"] as const;
+export const REMEMBERED_SIGN_INS_KEY = ["auth", "2fa", "remembered"] as const;
 
 export function useTwoFactorStatus(enabled = true) {
   return useQuery<TwoFactorStatus, Error>({
@@ -47,6 +51,14 @@ export function useTrustedDevices(enabled = true) {
   return useQuery<TrustedDeviceItem[], Error>({
     queryKey: TRUSTED_DEVICES_KEY,
     queryFn: getTrustedDevices,
+    enabled,
+  });
+}
+
+export function useRememberedSignIns(enabled = true) {
+  return useQuery<RememberedSignInItem[], Error>({
+    queryKey: REMEMBERED_SIGN_INS_KEY,
+    queryFn: getRememberedSignIns,
     enabled,
   });
 }
@@ -137,6 +149,26 @@ export function useRevokeTrustedDeviceMutation() {
     mutationFn: (id: string) => revokeTrustedDevice(id),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: TRUSTED_DEVICES_KEY });
+    },
+  });
+}
+
+export function useRevokeAllRememberedSignInsMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: revokeAllRememberedSignIns,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: REMEMBERED_SIGN_INS_KEY });
+    },
+  });
+}
+
+export function useRevokeRememberedSignInMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => revokeRememberedSignIn(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: REMEMBERED_SIGN_INS_KEY });
     },
   });
 }

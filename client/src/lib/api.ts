@@ -10,6 +10,7 @@ import {
   TwoFactorStatus,
   PasskeyItem,
   TrustedDeviceItem,
+  RememberedSignInItem,
   TotpSetupResponse,
   TwoFactorCompleteResponse,
   TwoFactorMethod,
@@ -171,7 +172,17 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
   return pending;
 }
 
-async function send<T>(endpoint: string, init: RequestInit, skipAuthRedirect: boolean, isRead: boolean): Promise<T> {
+function isRetryableAuthError(data: unknown): boolean {
+  return Boolean((data as { retryable?: unknown } | undefined)?.retryable === true);
+}
+
+async function send<T>(
+  endpoint: string,
+  init: RequestInit,
+  skipAuthRedirect: boolean,
+  isRead: boolean,
+  hasRetried = false
+): Promise<T> {
   const headers: Record<string, string> = {
     Accept: "application/json",
     ...(init.headers as Record<string, string>),
@@ -197,6 +208,11 @@ async function send<T>(endpoint: string, init: RequestInit, skipAuthRedirect: bo
 
   if (!response.ok) {
     const { message, data } = await readErrorMessage(response);
+    // Mid-use expiry: the backend invalidated the stale cached session and signaled a remember-me
+    // cookie is present; retry once so authenticateSession restores a fresh session seamlessly.
+    if (response.status === 401 && !skipAuthRedirect && !hasRetried && isRetryableAuthError(data)) {
+      return send<T>(endpoint, init, skipAuthRedirect, isRead, true);
+    }
     // Login and the startup check handle their own errors and don't feed the connection status
     if (!skipAuthRedirect) recordResponse(response.status, isRead, message);
     if (response.status === 401 && !skipAuthRedirect) {
@@ -215,12 +231,24 @@ async function send<T>(endpoint: string, init: RequestInit, skipAuthRedirect: bo
 }
 
 /**
+ * Queries public login capabilities (such as whether "Remember me for 30 days" is available).
+ */
+export async function getAuthOptions(): Promise<{ rememberMeAvailable: boolean }> {
+  try {
+    const data = await request<{ rememberMeAvailable?: unknown }>("/api/auth/options", { skipAuthRedirect: true });
+    return { rememberMeAvailable: data?.rememberMeAvailable === true };
+  } catch {
+    return { rememberMeAvailable: false };
+  }
+}
+
+/**
  * Authenticates user with email and password. The backend sets the session cookie.
  */
-export async function login(email: string, password: string): Promise<LoginResponse> {
+export async function login(email: string, password: string, rememberMe?: boolean): Promise<LoginResponse> {
   return request<LoginResponse>("/api/auth/login", {
     method: "POST",
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, ...(rememberMe ? { rememberMe: true } : {}) }),
     skipAuthRedirect: true,
   });
 }
@@ -403,6 +431,19 @@ export async function revokeAllTrustedDevices(): Promise<void> {
 
 export async function revokeTrustedDevice(id: string): Promise<void> {
   await request(`/api/auth/2fa/trusted-devices/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function getRememberedSignIns(): Promise<RememberedSignInItem[]> {
+  const res = await request<{ entries?: RememberedSignInItem[] }>("/api/auth/remembered");
+  return Array.isArray(res?.entries) ? res.entries : [];
+}
+
+export async function revokeAllRememberedSignIns(): Promise<void> {
+  await request("/api/auth/remembered", { method: "DELETE" });
+}
+
+export async function revokeRememberedSignIn(id: string): Promise<void> {
+  await request(`/api/auth/remembered/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 export async function stepUpWithTotp(code: string): Promise<{ verified: boolean; stepUpExpiresAt: number }> {
@@ -652,11 +693,17 @@ export function getResourceIdFromUrl(src: string | undefined): string | null {
 const resourceObjectUrls = new Map<string, Promise<string>>();
 
 /**
- * Downloads a resource with the session cookie.
+ * Downloads a resource with the session cookie, retrying once on a retryable mid-use 401.
  */
-async function fetchResourceBlob(resourceId: string): Promise<Blob> {
+async function fetchResourceBlob(resourceId: string, hasRetried = false): Promise<Blob> {
   const response = await fetch(`${API_BASE_URL}/api/resources/${resourceId}`, SESSION_FETCH_OPTIONS);
   if (!response.ok) {
+    if (response.status === 401 && !hasRetried) {
+      const { data } = await readErrorMessage(response);
+      if (isRetryableAuthError(data)) {
+        return fetchResourceBlob(resourceId, true);
+      }
+    }
     throw new ApiError(response.status, `Could not load resource (HTTP ${response.status})`);
   }
   return response.blob();

@@ -1,16 +1,28 @@
 import type { CookieOptions, Request, Response } from 'express';
 import type { AppConfig } from '../config.js';
-import {
-  cacheSessionValidation,
-  PENDING_COOKIE,
-  SECURE_PENDING_COOKIE,
-  SECURE_SESSION_COOKIE,
-  SECURE_TRUSTED_DEVICE_COOKIE,
-  SESSION_COOKIE,
-  TRUSTED_DEVICE_COOKIE,
-} from '../middleware/auth.js';
+import { cacheSessionValidation } from '../middleware/auth.js';
 import { joplinApi } from './joplin-api.js';
-import { PendingLogin, TwoFactorStore } from './two-factor-store.js';
+import { PendingLogin, REMEMBER_ME_TTL_MS, TRUSTED_DEVICE_TTL_MS, TwoFactorStore } from './two-factor-store.js';
+
+/** httpOnly cookie that carries the session for the browser client over plain HTTP */
+export const SESSION_COOKIE = 'joplin_web_session';
+/**
+ * Name used when the cookie is Secure. The __Host- prefix makes browsers refuse versions of it set
+ * with a Domain or another Path, so sibling hosts and other apps on this host can't plant one.
+ */
+export const SECURE_SESSION_COOKIE = '__Host-joplin_web_session';
+
+/** Short-lived httpOnly cookie holding the pending-2FA login identifier */
+export const PENDING_COOKIE = 'joplin_web_2fa_pending';
+export const SECURE_PENDING_COOKIE = '__Host-joplin_web_2fa_pending';
+
+/** 30-day httpOnly cookie holding the "Trust this device" token */
+export const TRUSTED_DEVICE_COOKIE = 'joplin_web_trusted_device';
+export const SECURE_TRUSTED_DEVICE_COOKIE = '__Host-joplin_web_trusted_device';
+
+/** 30-day httpOnly cookie holding the split-key "Remember me" token (`base64url(id).base64url(K)`) */
+export const REMEMBER_COOKIE = 'joplin_web_remember';
+export const SECURE_REMEMBER_COOKIE = '__Host-joplin_web_remember';
 
 export function isSecureCookieRequest(
   config: Pick<AppConfig, 'cookieSecure' | 'publicUrl'>,
@@ -75,7 +87,7 @@ export function trustedDeviceCookie(
   req: Request
 ): { name: string; options: CookieOptions } {
   const secure = isSecureCookieRequest(config, req);
-  const maxAge = 30 * 24 * 60 * 60 * 1000;
+  const maxAge = TRUSTED_DEVICE_TTL_MS;
   return secure
     ? {
         name: SECURE_TRUSTED_DEVICE_COOKIE,
@@ -94,6 +106,34 @@ export function clearTrustedDeviceCookies(res: Response, keep?: string): void {
   }
   if (keep !== SECURE_TRUSTED_DEVICE_COOKIE) {
     res.clearCookie(SECURE_TRUSTED_DEVICE_COOKIE, { httpOnly: true, sameSite: 'strict', secure: true, path: '/' });
+  }
+}
+
+/** 30-day httpOnly cookie attributes for "Remember me for 30 days". */
+export function rememberCookie(
+  config: Pick<AppConfig, 'cookieSecure' | 'publicUrl'>,
+  req: Request
+): { name: string; options: CookieOptions } {
+  const secure = isSecureCookieRequest(config, req);
+  const maxAge = REMEMBER_ME_TTL_MS;
+  return secure
+    ? {
+        name: SECURE_REMEMBER_COOKIE,
+        options: { httpOnly: true, sameSite: 'strict', secure: true, path: '/', maxAge },
+      }
+    : {
+        name: REMEMBER_COOKIE,
+        options: { httpOnly: true, sameSite: 'strict', secure: false, path: '/api', maxAge },
+      };
+}
+
+/** Clears both remember-me cookie variants. */
+export function clearRememberCookies(res: Response, keep?: string): void {
+  if (keep !== REMEMBER_COOKIE) {
+    res.clearCookie(REMEMBER_COOKIE, { httpOnly: true, sameSite: 'strict', path: '/api' });
+  }
+  if (keep !== SECURE_REMEMBER_COOKIE) {
+    res.clearCookie(SECURE_REMEMBER_COOKIE, { httpOnly: true, sameSite: 'strict', secure: true, path: '/' });
   }
 }
 
@@ -143,5 +183,12 @@ export async function promotePendingLogin(
     const tdCookie = trustedDeviceCookie(config, req);
     clearTrustedDeviceCookies(res, tdCookie.name);
     res.cookie(tdCookie.name, token, tdCookie.options);
+  }
+
+  if (pending.rememberMe && config.cacheDir) {
+    await store.savePreparedRememberEntry(pending.rememberMe.entry);
+    const rCookie = rememberCookie(config, req);
+    clearRememberCookies(res, rCookie.name);
+    res.cookie(rCookie.name, pending.rememberMe.cookieValue, rCookie.options);
   }
 }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import * as webauthn from "@/lib/webauthn";
 import { jsonResponse, mockFetch } from "@/test/fetch-mock";
 import { renderWithProviders } from "@/test/render";
@@ -153,5 +153,94 @@ describe("SecurityDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(calls.some((c) => c.method === "PUT" && c.path === "/api/auth/2fa/passkeys/pk1")).toBe(true));
     expect(await screen.findByText("Work MacBook")).toBeTruthy();
+  });
+
+  it("lists remembered sign-ins and supports revoking one and revoking all with step-up", async () => {
+    vi.spyOn(webauthn, "isWebAuthnSupported").mockReturnValue(false);
+    let stepUpValid = false;
+    let entries = [
+      {
+        id: "rem1",
+        userAgent: "Firefox on macOS",
+        createdAt: Date.now() - 2 * 86_400_000,
+        lastUsedAt: Date.now() - 3600_000,
+        expiresAt: Date.now() + 28 * 86_400_000,
+        current: true,
+      },
+      {
+        id: "rem2",
+        userAgent: "Chrome on Android",
+        createdAt: Date.now() - 5 * 86_400_000,
+        lastUsedAt: Date.now() - 86_400_000,
+        expiresAt: Date.now() + 25 * 86_400_000,
+        current: false,
+      },
+    ];
+
+    const calls = mockFetch(({ method, path }) => {
+      if (path === "/api/auth/2fa/status") {
+        return jsonResponse({
+          persistenceEnabled: true,
+          require2fa: false,
+          passkeysAvailable: false,
+          enrolled: { totp: true, passkeysCount: 0, recoveryCodesRemaining: 10 },
+          methods: ["totp", "recovery"],
+          stepUpValid,
+          stepUpExpiresAt: stepUpValid ? Date.now() + 300_000 : null,
+        });
+      }
+      if (path === "/api/auth/2fa/passkeys") return jsonResponse({ passkeys: [] });
+      if (path === "/api/auth/2fa/trusted-devices") return jsonResponse({ devices: [] });
+      if (path === "/api/auth/remembered") {
+        if (method === "DELETE") {
+          if (!stepUpValid) {
+            return jsonResponse({ error: "Step up", stepUpRequired: true, methods: ["totp", "recovery"] }, 403);
+          }
+          entries = [];
+          return jsonResponse({ revokedAll: true });
+        }
+        return jsonResponse({ entries });
+      }
+      if (method === "DELETE" && path === "/api/auth/remembered/rem2") {
+        if (!stepUpValid) {
+          return jsonResponse({ error: "Step up", stepUpRequired: true, methods: ["totp", "recovery"] }, 403);
+        }
+        entries = entries.filter((e) => e.id !== "rem2");
+        return jsonResponse({ removed: true });
+      }
+      if (method === "POST" && path === "/api/auth/2fa/step-up/totp") {
+        stepUpValid = true;
+        return jsonResponse({ verified: true, stepUpExpiresAt: Date.now() + 300_000 });
+      }
+      return undefined;
+    });
+
+    renderWithProviders(<SecurityDialog open={true} onOpenChange={() => undefined} />);
+
+    const section = await screen.findByRole("region", { name: "Remembered sign-ins" });
+    expect(await within(section).findByText("Firefox on macOS")).toBeTruthy();
+    expect(within(section).getByText("Chrome on Android")).toBeTruthy();
+    expect(within(section).getByText("This device")).toBeTruthy();
+
+    // Revoking without step-up opens inline step-up verification
+    fireEvent.click(within(section).getByRole("button", { name: "Revoke remembered sign-in Chrome on Android" }));
+    expect(await screen.findByText("Identity verification required")).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("Authenticator 6-digit code"), { target: { value: "123456" } });
+    fireEvent.click(screen.getByRole("button", { name: "Verify" }));
+    expect(await screen.findByText("Identity verified for 5 minutes.")).toBeTruthy();
+
+    // Revoke one now succeeds
+    fireEvent.click(within(section).getByRole("button", { name: "Revoke remembered sign-in Chrome on Android" }));
+    await waitFor(() =>
+      expect(calls.some((c) => c.method === "DELETE" && c.path === "/api/auth/remembered/rem2")).toBe(true)
+    );
+    await waitFor(() => expect(within(section).queryByText("Chrome on Android")).toBeNull());
+    expect(within(section).getByText("Firefox on macOS")).toBeTruthy();
+
+    // Revoke all with confirmation
+    fireEvent.click(within(section).getByRole("button", { name: "Revoke all" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+    expect(await within(section).findByText("No remembered sign-ins.")).toBeTruthy();
   });
 });

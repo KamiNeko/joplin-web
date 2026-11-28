@@ -5,9 +5,12 @@ import {
   useDeletePasskeyMutation,
   usePasskeys,
   useRegenerateRecoveryCodesMutation,
+  useRememberedSignIns,
   useRemoveTotpMutation,
   useRenamePasskeyMutation,
+  useRevokeAllRememberedSignInsMutation,
   useRevokeAllTrustedDevicesMutation,
+  useRevokeRememberedSignInMutation,
   useRevokeTrustedDeviceMutation,
   useSetupTotpMutation,
   useStepUpPasskeyMutation,
@@ -35,6 +38,7 @@ import { Label } from "@/components/ui/label";
 import {
   AlertCircle,
   Check,
+  Clock,
   Copy,
   KeyRound,
   Laptop,
@@ -55,7 +59,8 @@ type ConfirmAction =
   | { type: "removeTotp" }
   | { type: "removePasskey"; id: string; name: string }
   | { type: "regenRecovery" }
-  | { type: "revokeAllDevices" };
+  | { type: "revokeAllDevices" }
+  | { type: "revokeAllRemembered" };
 
 function formatDate(ms: number | null): string {
   if (!ms) return "Never";
@@ -69,6 +74,7 @@ export function SecurityDialog({ open, onOpenChange }: SecurityDialogProps) {
 
   const passkeysQuery = usePasskeys(open && persistenceEnabled);
   const devicesQuery = useTrustedDevices(open && persistenceEnabled);
+  const rememberedQuery = useRememberedSignIns(open && persistenceEnabled);
 
   const setupTotpMutation = useSetupTotpMutation();
   const confirmTotpMutation = useConfirmTotpMutation();
@@ -79,6 +85,8 @@ export function SecurityDialog({ open, onOpenChange }: SecurityDialogProps) {
   const regenRecoveryMutation = useRegenerateRecoveryCodesMutation();
   const revokeAllMutation = useRevokeAllTrustedDevicesMutation();
   const revokeOneMutation = useRevokeTrustedDeviceMutation();
+  const revokeAllRememberedMutation = useRevokeAllRememberedSignInsMutation();
+  const revokeOneRememberedMutation = useRevokeRememberedSignInMutation();
   const stepUpTotpMutation = useStepUpTotpMutation();
   const stepUpPasskeyMutation = useStepUpPasskeyMutation();
   const stepUpRecoveryMutation = useStepUpRecoveryMutation();
@@ -110,6 +118,7 @@ export function SecurityDialog({ open, onOpenChange }: SecurityDialogProps) {
   const canAddPasskey = Boolean(status?.passkeysAvailable) && browserSupported;
   const passkeys = passkeysQuery.data ?? [];
   const devices = devicesQuery.data ?? [];
+  const remembered = rememberedQuery.data ?? [];
   const hasPrimary = Boolean(status?.enrolled.totp) || (status?.enrolled.passkeysCount ?? 0) > 0;
   const isLastFactorLocked = Boolean(status?.require2fa);
 
@@ -234,6 +243,9 @@ export function SecurityDialog({ open, onOpenChange }: SecurityDialogProps) {
       } else if (action.type === "revokeAllDevices") {
         await revokeAllMutation.mutateAsync();
         setNotice("All trusted devices have been revoked.");
+      } else if (action.type === "revokeAllRemembered") {
+        await revokeAllRememberedMutation.mutateAsync();
+        setNotice("All remembered sign-ins have been revoked.");
       }
     } catch (err) {
       handleMutationError(err, "Action failed.");
@@ -291,7 +303,7 @@ export function SecurityDialog({ open, onOpenChange }: SecurityDialogProps) {
             <span>Security settings</span>
           </DialogTitle>
           <DialogDescription>
-            Manage two-factor authentication, passkeys, recovery codes, and trusted devices.
+            Manage two-factor authentication, passkeys, recovery codes, trusted devices, and remembered sign-ins.
           </DialogDescription>
         </DialogHeader>
 
@@ -441,6 +453,8 @@ export function SecurityDialog({ open, onOpenChange }: SecurityDialogProps) {
                     "Generate 10 new recovery codes? All previous unused recovery codes will stop working."}
                   {confirmAction.type === "revokeAllDevices" &&
                     "Revoke all trusted devices? All browsers will ask for a second factor on next sign-in."}
+                  {confirmAction.type === "revokeAllRemembered" &&
+                    "Revoke all remembered sign-ins? Signed-in browsers will need to sign in again when their current session expires."}
                 </p>
                 <div className="flex flex-wrap justify-end gap-2">
                   <Button type="button" variant="ghost" size="sm" onClick={() => setConfirmAction(null)}>
@@ -796,6 +810,73 @@ export function SecurityDialog({ open, onOpenChange }: SecurityDialogProps) {
                 )}
               </section>
             )}
+
+            {/* Remembered sign-ins */}
+            <section className="rounded-lg border border-border p-3.5 space-y-3" aria-label="Remembered sign-ins">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Clock className="h-4 w-4 text-primary" />
+                  <h3 className="font-medium text-foreground">Remembered sign-ins</h3>
+                </div>
+                {remembered.length > 0 && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setConfirmAction({ type: "revokeAllRemembered" })}
+                    disabled={revokeAllRememberedMutation.isPending}
+                  >
+                    Revoke all
+                  </Button>
+                )}
+              </div>
+
+              {remembered.length > 0 ? (
+                <ul className="divide-y divide-border">
+                  {remembered.map((entry) => (
+                    <li
+                      key={entry.id}
+                      className="py-2 first:pt-0 last:pb-0 flex flex-wrap items-center justify-between gap-2"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-medium text-foreground truncate">{entry.userAgent}</span>
+                          {entry.current && (
+                            <Badge variant="secondary" className="text-[10px]">
+                              This device
+                            </Badge>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">
+                          Created {formatDate(entry.createdAt)} · Last used {formatDate(entry.lastUsedAt)} · Expires{" "}
+                          {formatDate(entry.expiresAt)}
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-xs text-muted-foreground hover:text-destructive"
+                        aria-label={`Revoke remembered sign-in ${entry.userAgent}`}
+                        disabled={revokeOneRememberedMutation.isPending}
+                        onClick={async () => {
+                          setError(null);
+                          try {
+                            await revokeOneRememberedMutation.mutateAsync(entry.id);
+                          } catch (err) {
+                            handleMutationError(err, "Could not revoke remembered sign-in.");
+                          }
+                        }}
+                      >
+                        Revoke
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-xs text-muted-foreground">No remembered sign-ins.</p>
+              )}
+            </section>
           </div>
         )}
       </DialogContent>

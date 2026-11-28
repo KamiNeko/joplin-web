@@ -1,6 +1,6 @@
 import { NextFunction, Request, Response } from 'express';
 import { JoplinApiError, JoplinAuthError, JoplinConnectionError, joplinApi } from '../services/joplin-api.js';
-import { invalidateSessionValidation } from './auth.js';
+import { getHeaderSessionToken, invalidateSessionValidation, readRememberCookies } from './auth.js';
 
 /**
  * Tells an expired session apart from a refused request after Joplin Server answered 401/403.
@@ -41,7 +41,17 @@ async function respond(err: unknown, req: Request, res: Response): Promise<void>
     if (res.headersSent) return;
     if (gone) {
       if (req.sessionId) invalidateSessionValidation(req.sessionId, req.authState, req.twoFactorStore);
-      res.status(401).json({ error: 'Unauthorized: Session has expired or is invalid', status: 401 });
+      // When a cookie-flow browser carries a remember-me cookie, signal that retrying once will
+      // hit authenticateSession (now invalidated) and restore a fresh Joplin Server session.
+      const retryable =
+        !getHeaderSessionToken(req) &&
+        Boolean(req.appConfig?.cacheDir) &&
+        readRememberCookies(req).length === 1;
+      res.status(401).json({
+        error: 'Unauthorized: Session has expired or is invalid',
+        status: 401,
+        ...(retryable ? { retryable: true } : {}),
+      });
     } else {
       res.status(403).json({ error: 'Joplin Server refused this request', status: 403 });
     }

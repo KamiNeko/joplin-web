@@ -18,6 +18,7 @@ import {
 } from '../middleware/auth.js';
 import {
   clearPendingCookies,
+  clearRememberCookies,
   clearTrustedDeviceCookies,
   endJoplinSessionSafe,
   promotePendingLogin,
@@ -249,7 +250,7 @@ async function resolveEnrollContext(
  * Middleware for Settings write routes requiring a full authenticated session and fresh step-up
  * (within 5 minutes) whenever at least one primary factor is enrolled.
  */
-async function requireStepUpSession(
+export async function requireStepUpSession(
   req: Request,
   res: Response,
   config: AppConfig,
@@ -413,7 +414,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
 
       const now = Date.now();
 
-      const outcome = await store.withUserLock(ctx.userId, () => {
+      const outcome = await store.withUserLock(ctx.userId, async () => {
         const record = store.getUserRecord(ctx.userId);
         if (ctx.mode === 'pending' && (!config.require2fa || hasPrimaryFactor(record))) {
           return { status: 'already_enrolled' as const };
@@ -429,6 +430,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
           record.recoverySalt = generated.salt;
           record.recoveryCodes = generated.hashedCodes;
           record.trustedDevices = [];
+          await store.deleteAllRememberEntriesForUser(ctx.userId);
           generatedRecoveryCodes = generated.plaintextCodes;
         }
 
@@ -467,6 +469,9 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
         if (outcome.isFirstFactor && !trustDevice) {
           clearTrustedDeviceCookies(res);
         }
+        if (outcome.isFirstFactor && !ctx.pending.rememberMe) {
+          clearRememberCookies(res);
+        }
         await promotePendingLogin(req, res, config, store, ctx.pending, { trustDevice: Boolean(trustDevice) });
         res.status(200).json({
           verified: true,
@@ -478,6 +483,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
         const stepUpExpiresAt = store.touchStepUp(ctx.sessionId, now);
         if (outcome.isFirstFactor) {
           clearTrustedDeviceCookies(res);
+          clearRememberCookies(res);
         }
         res.status(200).json({
           enrolled: true,
@@ -599,7 +605,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
       const { credential } = verification.registrationInfo;
       const now = Date.now();
 
-      const result = await store.withUserLock(ctx.userId, () => {
+      const result = await store.withUserLock(ctx.userId, async () => {
         const record = store.getUserRecord(ctx.userId);
         if (ctx.mode === 'pending' && (!config.require2fa || hasPrimaryFactor(record))) {
           return { status: 'already_enrolled' as const };
@@ -615,6 +621,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
           record.recoverySalt = generated.salt;
           record.recoveryCodes = generated.hashedCodes;
           record.trustedDevices = [];
+          await store.deleteAllRememberEntriesForUser(ctx.userId);
           generatedRecoveryCodes = generated.plaintextCodes;
         }
 
@@ -663,6 +670,9 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
         if (result.isFirstFactor && !trustDevice) {
           clearTrustedDeviceCookies(res);
         }
+        if (result.isFirstFactor && !ctx.pending.rememberMe) {
+          clearRememberCookies(res);
+        }
         await promotePendingLogin(req, res, config, store, ctx.pending, { trustDevice: Boolean(trustDevice) });
         res.status(200).json({
           verified: true,
@@ -679,6 +689,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
         const stepUpExpiresAt = store.touchStepUp(ctx.sessionId, now);
         if (result.isFirstFactor) {
           clearTrustedDeviceCookies(res);
+          clearRememberCookies(res);
         }
         res.status(200).json({
           enrolled: true,
@@ -1123,7 +1134,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
     if (!ctx) return;
 
     let clearedAllFactors = false;
-    const outcome = await store.withUserLock(ctx.userId, () => {
+    const outcome = await store.withUserLock(ctx.userId, async () => {
       const record = store.getUserRecord(ctx.userId);
       if (!record.totp) return 'not_found' as const;
       if (config.require2fa && record.passkeys.length === 0) {
@@ -1137,6 +1148,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
         clearedAllFactors = true;
       }
       store.saveUserRecord(record);
+      await store.deleteAllRememberEntriesForUser(ctx.userId);
       return 'removed' as const;
     });
 
@@ -1152,6 +1164,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
     }
 
     if (clearedAllFactors) clearTrustedDeviceCookies(res);
+    clearRememberCookies(res);
     res.status(200).json({ removed: true });
   });
 
@@ -1205,7 +1218,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
     if (!ctx) return;
 
     let clearedAllFactors = false;
-    const outcome = await store.withUserLock(ctx.userId, () => {
+    const outcome = await store.withUserLock(ctx.userId, async () => {
       const record = store.getUserRecord(ctx.userId);
       const idx = record.passkeys.findIndex((pk) => pk.credentialID === req.params.id);
       if (idx === -1) return 'not_found' as const;
@@ -1223,6 +1236,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
         clearedAllFactors = true;
       }
       store.saveUserRecord(record);
+      await store.deleteAllRememberEntriesForUser(ctx.userId);
       return 'removed' as const;
     });
 
@@ -1238,6 +1252,7 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
     }
 
     if (clearedAllFactors) clearTrustedDeviceCookies(res);
+    clearRememberCookies(res);
     res.status(200).json({ removed: true });
   });
 
@@ -1287,15 +1302,17 @@ export function createTwoFactorRouter(config: AppConfig, store: TwoFactorStore):
     const ctx = await requireStepUpSession(req, res, config, store);
     if (!ctx) return;
 
-    await store.withUserLock(ctx.userId, () => {
+    await store.withUserLock(ctx.userId, async () => {
       const record = store.getUserRecord(ctx.userId);
       if (record.trustedDevices.length > 0) {
         record.trustedDevices = [];
         store.saveUserRecord(record);
       }
+      await store.deleteAllRememberEntriesForUser(ctx.userId);
     });
 
     clearTrustedDeviceCookies(res);
+    clearRememberCookies(res);
     res.status(200).json({ revokedAll: true });
   });
 

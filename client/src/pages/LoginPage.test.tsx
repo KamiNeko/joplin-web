@@ -289,4 +289,46 @@ describe("LoginPage", () => {
     expect(await screen.findByText("Signed-in area")).toBeTruthy();
     expect(screen.getByTestId("location").textContent).toBe("/notes");
   });
+
+  it("hides Remember me checkbox when server reports rememberMeAvailable=false", async () => {
+    const calls = mockFetch(({ path }) => {
+      if (path === "/api/auth/check") return jsonResponse({ error: "No session" }, 401);
+      if (path === "/api/auth/options") return jsonResponse({ rememberMeAvailable: false });
+      return undefined;
+    });
+
+    renderLogin();
+    await waitFor(() => expect(calls.some((c) => c.path === "/api/auth/options")).toBe(true));
+    expect(screen.queryByLabelText("Remember me for 30 days")).toBeNull();
+  });
+
+  it("shows Remember me checkbox unchecked by default and sends rememberMe: true when checked", async () => {
+    let signedIn = false;
+    const calls = mockFetch(({ method, path }) => {
+      if (path === "/api/auth/check") {
+        return signedIn ? jsonResponse({ serverHost: "notes.example.com" }) : jsonResponse({ error: "No session" }, 401);
+      }
+      if (path === "/api/auth/options") return jsonResponse({ rememberMeAvailable: true });
+      if (method === "POST" && path === "/api/auth/login") {
+        signedIn = true;
+        return jsonResponse({ userId: "u1" });
+      }
+      return undefined;
+    });
+
+    renderLogin();
+    const checkbox = (await screen.findByLabelText("Remember me for 30 days")) as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+
+    fireEvent.click(checkbox);
+    expect(checkbox.checked).toBe(true);
+
+    signIn("demo@example.com", "demo");
+    expect(await screen.findByText("Signed-in area")).toBeTruthy();
+    expect(calls.find((c) => c.path === "/api/auth/login")?.body).toEqual({
+      email: "demo@example.com",
+      password: "demo",
+      rememberMe: true,
+    });
+  });
 });

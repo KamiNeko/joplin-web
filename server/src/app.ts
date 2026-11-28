@@ -114,6 +114,7 @@ export function createApp(config: AppConfig): Express {
     message: { error: 'Too many two-factor authentication requests, please try again later.' },
   });
   app.use('/api/auth/2fa', twoFactorLimiter);
+  app.use('/api/auth/remembered', twoFactorLimiter);
 
   // CSRF protection for cookie-authenticated writes
   app.use('/api/', createOriginCheck(config));

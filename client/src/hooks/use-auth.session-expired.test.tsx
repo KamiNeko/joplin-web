@@ -120,4 +120,44 @@ describe("session expiry", () => {
     expect(loadDraft(NOTE_ID)?.body).toBe("unsaved");
     expect(calls.some((c) => c.path === "/api/auth/logout")).toBe(false);
   });
+
+  it("retries once seamlessly on a retryable mid-use 401 without opening the session-expired dialog", async () => {
+    let notesAttempt = 0;
+    calls = mockFetch(({ path }) => {
+      if (path === "/api/auth/check") return jsonResponse({ serverHost: HOST });
+      if (path.startsWith("/api/notes")) {
+        notesAttempt += 1;
+        if (notesAttempt === 1) {
+          return jsonResponse({ error: "Session expired", status: 401, retryable: true }, 401);
+        }
+        return jsonResponse([{ id: NOTE_ID, title: "Restored note", preview: "", createdTime: 1, updatedTime: 1 }]);
+      }
+      return undefined;
+    });
+
+    await renderSignedIn();
+    const notes = await getNotes();
+    expect(notes).toHaveLength(1);
+    expect(notes[0].title).toBe("Restored note");
+    expect(notesAttempt).toBe(2);
+    expect(getConnectionSnapshot().sessionExpired).toBe(false);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("opens the session-expired dialog if a retryable 401 fails again on retry", async () => {
+    let notesAttempt = 0;
+    calls = mockFetch(({ path }) => {
+      if (path === "/api/auth/check") return jsonResponse({ serverHost: HOST });
+      if (path.startsWith("/api/notes")) {
+        notesAttempt += 1;
+        return jsonResponse({ error: "Session expired", status: 401, retryable: true }, 401);
+      }
+      return undefined;
+    });
+
+    await renderSignedIn();
+    await expect(getNotes()).rejects.toMatchObject({ status: 401 });
+    expect(notesAttempt).toBe(2);
+    expect(await screen.findByRole("dialog", { name: "Session expired" })).toBeTruthy();
+  });
 });

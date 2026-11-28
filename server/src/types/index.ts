@@ -209,8 +209,15 @@ export interface SessionInfo {
 import type { AppConfig } from '../config.js';
 import type { TwoFactorStore } from '../services/two-factor-store.js';
 
+export interface RestoredSessionResult {
+  sessionId: string;
+  userId: string;
+  email: string;
+}
+
 export interface AppAuthState {
   validationCache: Map<string, { isValid: boolean; validatedAt: number }>;
+  rememberRestoreInFlight: Map<string, Promise<RestoredSessionResult>>;
 }
 
 /**

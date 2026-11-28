@@ -66,6 +66,7 @@ In short: choose Joplin Web if you want quick, install-free access to your notes
 | 🔄 **Refresh & connection status** | Changes from other devices load when you return to the tab or click *Refresh*. The sidebar shows whether the server is reachable and when data was last updated. |
 | 🛟 **No lost typing** | Unsaved text is kept on the device while offline or after the session expires, saves retry when the connection returns, and you can restore a draft later. |
 | 🔐 **Two-factor authentication** | Optional WebAuthn passkeys and authenticator apps (TOTP), single-use recovery codes, and 30-day trusted devices (with optional `REQUIRE_2FA` enforcement). |
+| ⏱️ **Remember me (30 days)** | Optional 30-day persistent browser sign-in when `CACHE_DIR` is configured, automatically restoring sessions past Joplin Server's 12-hour TTL with split-key AES-256-GCM encryption and per-device revocation. |
 | 🌗 **Light & dark mode** | Switch themes with one click. |
 | 📱 **Responsive** | Works on phones and tablets as well as on the desktop. |
 

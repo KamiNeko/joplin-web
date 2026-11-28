@@ -173,6 +173,15 @@ export interface TrustedDeviceItem {
   current: boolean;
 }
 
+export interface RememberedSignInItem {
+  id: string;
+  userAgent: string;
+  createdAt: number;
+  lastUsedAt: number;
+  expiresAt: number;
+  current: boolean;
+}
+
 export interface TotpSetupResponse {
   secret: string;
   otpauthUri: string;

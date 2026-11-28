@@ -25,7 +25,7 @@ export interface AuthContextType {
   isAuthenticated: boolean;
   email: string | null;
   isLoading: boolean;
-  login: (email: string, password: string) => Promise<LoginResponse>;
+  login: (email: string, password: string, rememberMe?: boolean) => Promise<LoginResponse>;
   logout: () => Promise<void>;
   /** Active two-factor challenge when login needs a second step or mandatory enrollment */
   pendingChallenge: TwoFactorChallenge | null;
@@ -110,8 +110,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
   );
 
   const login = useCallback(
-    async (userEmail: string, password: string): Promise<LoginResponse> => {
-      const response = await apiLogin(userEmail, password);
+    async (userEmail: string, password: string, rememberMe?: boolean): Promise<LoginResponse> => {
+      const response = await apiLogin(userEmail, password, rememberMe);
       if ("twoFactor" in response && response.twoFactor) {
         setPendingChallenge(response.twoFactor);
         setPendingEmail(userEmail);

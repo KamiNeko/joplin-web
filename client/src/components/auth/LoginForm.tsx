@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { useAuth } from "@/hooks/use-auth";
 import {
   confirmTotp,
+  getAuthOptions,
   getPasskeyAuthOptions,
   getPasskeyRegisterOptions,
   isPendingExpiredError,
@@ -60,6 +61,8 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
   // Step 1 credentials
   const [email, setEmail] = useState(lastEmail ?? "");
   const [password, setPassword] = useState("");
+  const [rememberMe, setRememberMe] = useState(false);
+  const [rememberMeAvailable, setRememberMeAvailable] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -86,6 +89,16 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
       ? "passkey"
       : "recovery";
   const activeVerifyMode = verifyModeOverride ?? defaultVerifyMode;
+
+  useEffect(() => {
+    let cancelled = false;
+    void getAuthOptions().then((opts) => {
+      if (!cancelled) setRememberMeAvailable(opts.rememberMeAvailable);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!pendingChallenge?.mustEnroll || activeEnrollTab !== "totp" || totpSetup || recoveryCodes) {
@@ -144,7 +157,7 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
     try {
       setIsSubmitting(true);
       resetTwoFactorLocalState();
-      const result = await login(trimmedEmail, password);
+      const result = await login(trimmedEmail, password, rememberMeAvailable && rememberMe);
       if (!("twoFactor" in result) || !result.twoFactor) {
         onSuccess?.();
       }
@@ -164,6 +177,7 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
       await cancelTwoFactor(false);
       resetTwoFactorLocalState();
       setPassword("");
+      setRememberMe(false);
     } finally {
       setIsSubmitting(false);
     }
@@ -784,6 +798,20 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
                 />
               </div>
             </div>
+
+            {rememberMeAvailable && (
+              <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer select-none">
+                <input
+                  id="remember-me"
+                  type="checkbox"
+                  checked={rememberMe}
+                  onChange={(e) => setRememberMe(e.target.checked)}
+                  className="h-4 w-4 rounded border-border accent-primary"
+                  disabled={isSubmitting}
+                />
+                <span>Remember me for 30 days</span>
+              </label>
+            )}
           </CardContent>
 
           <CardFooter className="pt-2 pb-8">
