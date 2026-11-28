@@ -119,8 +119,81 @@ export interface SearchResult extends NoteListItem {
 }
 
 /**
- * Login response payload from API. The session itself is set as an httpOnly cookie.
+ * Available two-factor authentication methods.
  */
-export interface LoginResponse {
-  userId: string;
+export type TwoFactorMethod = "passkey" | "totp" | "recovery";
+
+export interface TwoFactorChallenge {
+  required: true;
+  methods: TwoFactorMethod[];
+  mustEnroll: boolean;
+  passkeysAvailable?: boolean;
+}
+
+/**
+ * Login response payload from API. The session itself is set as an httpOnly cookie when complete,
+ * or enters a server-side pending state when two-factor verification or enrollment is needed.
+ */
+export type LoginResponse =
+  | {
+      userId: string;
+      twoFactor?: undefined;
+    }
+  | {
+      twoFactor: TwoFactorChallenge;
+    };
+
+export interface TwoFactorStatus {
+  persistenceEnabled: boolean;
+  require2fa: boolean;
+  passkeysAvailable: boolean;
+  enrolled: {
+    totp: boolean;
+    passkeysCount: number;
+    recoveryCodesRemaining: number;
+  };
+  methods: TwoFactorMethod[];
+  stepUpValid: boolean;
+  stepUpExpiresAt: number | null;
+}
+
+export interface PasskeyItem {
+  id: string;
+  name: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+}
+
+export interface TrustedDeviceItem {
+  id: string;
+  label: string;
+  createdAt: number;
+  lastUsedAt: number;
+  expiresAt: number;
+  current: boolean;
+}
+
+export interface RememberedSignInItem {
+  id: string;
+  userAgent: string;
+  createdAt: number;
+  lastUsedAt: number;
+  expiresAt: number;
+  current: boolean;
+}
+
+export interface TotpSetupResponse {
+  secret: string;
+  otpauthUri: string;
+  qrDataUrl: string;
+}
+
+export interface TwoFactorCompleteResponse {
+  verified?: boolean;
+  enrolled?: boolean;
+  userId?: string;
+  stepUpExpiresAt?: number;
+  recoveryCodes?: string[];
+  recoveryCodesRemaining?: number;
+  passkey?: PasskeyItem;
 }

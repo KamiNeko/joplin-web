@@ -36,6 +36,8 @@ export interface MockJoplinServerOptions {
 export interface MockJoplinServer {
   url: string;
   items: Map<string, MockItem>;
+  /** Active session tokens on the mock Joplin Server */
+  sessions: Set<string>;
   /**
    * Makes the next `count` requests to /api/items answer with `status`, to simulate
    * Joplin Server failures (e.g. 500) in tests. Calls queue up in order.
@@ -47,6 +49,12 @@ export interface MockJoplinServer {
    * `name` is the item name ('' for the root listing), `suffix` '/content', '/children' or ''.
    */
   onItemRequest: ((request: { method: string; name: string; suffix: string }) => void | Promise<void>) | null;
+  /**
+   * Test hook called before every POST /api/sessions request is handled.
+   */
+  onCreateSession: (() => void | Promise<void>) | null;
+  /** Updates the password accepted by POST /api/sessions (to simulate a password change in tests). */
+  setPassword: (password: string) => void;
   close: () => Promise<void>;
 }
 
@@ -97,6 +105,7 @@ export async function startMockJoplinServer(
   const items = options.items ?? new Map<string, MockItem>();
   const pageSize = options.pageSize ?? 100;
   const sessions = new Set<string>();
+  let currentPassword = options.password;
   let clock = Date.now();
   const tick = () => (clock = Math.max(clock + 1, Date.now()));
   const failures: number[] = [];
@@ -104,10 +113,15 @@ export async function startMockJoplinServer(
   const handle: MockJoplinServer = {
     url: '',
     items,
+    sessions,
     failNextItemRequests: (status, count = 1) => {
       for (let i = 0; i < count; i++) failures.push(status);
     },
     onItemRequest: null,
+    onCreateSession: null,
+    setPassword: (password: string) => {
+      currentPassword = password;
+    },
     close: () => new Promise((resolve) => (server ? server.close(() => resolve()) : resolve())),
   };
 
@@ -117,9 +131,10 @@ export async function startMockJoplinServer(
     res.json({ status: 'ok', message: 'Joplin Server (mock) is running' });
   });
 
-  app.post('/api/sessions', express.json(), (req, res) => {
+  app.post('/api/sessions', express.json(), async (req, res) => {
+    if (handle.onCreateSession) await handle.onCreateSession();
     const { email, password } = req.body ?? {};
-    if (email !== options.email || password !== options.password) {
+    if (email !== options.email || password !== currentPassword) {
       res.status(403).json({ error: 'Invalid username or password' });
       return;
     }

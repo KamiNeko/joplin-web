@@ -7,6 +7,7 @@ import helmet from 'helmet';
 import path from 'path';
 
 import type { AppConfig } from './config.js';
+import { createAppAuthState } from './middleware/auth.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { createOriginCheck } from './middleware/origin-check.js';
 import { requestLogger } from './middleware/request-logger.js';
@@ -17,6 +18,7 @@ import { notesRouter } from './routes/notes.js';
 import { resourcesRouter } from './routes/resources.js';
 import { searchRouter } from './routes/search.js';
 import { tagsRouter } from './routes/tags.js';
+import { TwoFactorStore } from './services/two-factor-store.js';
 
 /**
  * Builds the Content-Security-Policy directives that differ from helmet's defaults.
@@ -42,6 +44,12 @@ export function cspDirectives(
  * Creates the Express application (API, static client, security middleware) for a configuration
  */
 export function createApp(config: AppConfig): Express {
+  const twoFactorStore = new TwoFactorStore(config.cacheDir);
+  if (config.require2fa) {
+    twoFactorStore.ensureAuthDir();
+  }
+  const authState = createAppAuthState();
+
   const app = express();
 
   // Behind a reverse proxy, req.ip/req.secure come from X-Forwarded-* only when configured
@@ -97,8 +105,27 @@ export function createApp(config: AppConfig): Express {
   });
   app.use('/api/auth/login', authLimiter);
 
+  const twoFactorLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 30,
+    skip: (req) => req.method === 'GET',
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Too many two-factor authentication requests, please try again later.' },
+  });
+  app.use('/api/auth/2fa', twoFactorLimiter);
+  app.use('/api/auth/remembered', twoFactorLimiter);
+
   // CSRF protection for cookie-authenticated writes
   app.use('/api/', createOriginCheck(config));
+
+  // Attach per-instance configuration, 2FA store, and session validation cache
+  app.use('/api/', (req, _res, next) => {
+    req.appConfig = config;
+    req.twoFactorStore = twoFactorStore;
+    req.authState = authState;
+    next();
+  });
 
   // Health check endpoint (public: build metadata only, never configuration or secrets)
   app.get('/api/health', (_req: Request, res: Response) => {
@@ -110,7 +137,7 @@ export function createApp(config: AppConfig): Express {
   });
 
   // API Routes
-  app.use('/api/auth', createAuthRouter(config));
+  app.use('/api/auth', createAuthRouter(config, twoFactorStore));
   app.use('/api/account', accountRouter);
   app.use('/api/notebooks', notebooksRouter);
   app.use('/api/notes', notesRouter);

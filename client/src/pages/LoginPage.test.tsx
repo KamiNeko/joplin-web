@@ -1,8 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { Route, Routes } from "react-router-dom";
 import { AuthProvider } from "@/hooks/use-auth";
 import { getStoredEmail } from "@/lib/api";
+import * as webauthn from "@/lib/webauthn";
 import { jsonResponse, mockFetch } from "@/test/fetch-mock";
 import { LocationProbe, renderWithProviders } from "@/test/render";
 import { LoginPage } from "./LoginPage";
@@ -46,7 +47,10 @@ function signIn(email: string, password: string) {
 }
 
 beforeEach(() => localStorage.clear());
-afterEach(cleanup);
+afterEach(() => {
+  vi.restoreAllMocks();
+  cleanup();
+});
 
 describe("LoginPage", () => {
   it("asks for the missing field without calling the server", async () => {
@@ -114,5 +118,217 @@ describe("LoginPage", () => {
 
     expect(await screen.findByText("Signed-in area")).toBeTruthy();
     expect(screen.getByTestId("location").textContent).toBe("/notes");
+  });
+
+  it("completes the second step with TOTP or recovery code and hides passkeys when unsupported", async () => {
+    vi.spyOn(webauthn, "isWebAuthnSupported").mockReturnValue(false);
+    let signedIn = false;
+    const calls = mockFetch(({ method, path, body }) => {
+      if (path === "/api/auth/check") {
+        return signedIn ? jsonResponse({ serverHost: "notes.example.com" }) : jsonResponse({ error: "No" }, 401);
+      }
+      if (method === "POST" && path === "/api/auth/login") {
+        return jsonResponse({
+          twoFactor: {
+            required: true,
+            mustEnroll: false,
+            methods: ["passkey", "totp", "recovery"],
+            passkeysAvailable: true,
+          },
+        });
+      }
+      if (method === "POST" && path === "/api/auth/2fa/totp/verify") {
+        const { code } = body as { code: string };
+        if (code === "123456") {
+          signedIn = true;
+          return jsonResponse({ verified: true, userId: "u1" });
+        }
+        return jsonResponse({ error: "Invalid verification code." }, 401);
+      }
+      if (method === "POST" && path === "/api/auth/2fa/recovery/verify") {
+        signedIn = true;
+        return jsonResponse({ verified: true, userId: "u1" });
+      }
+      if (method === "POST" && path === "/api/auth/logout") {
+        return jsonResponse({ message: "ok" });
+      }
+      return undefined;
+    });
+
+    renderLogin();
+    signIn("demo@example.com", "demo");
+
+    expect(await screen.findByText("Two-step verification")).toBeTruthy();
+    // Passkey option must stay hidden when WebAuthn is unsupported
+    expect(screen.queryByRole("button", { name: /Use a passkey/i })).toBeNull();
+
+    // Switch to recovery code, trust device, and verify
+    fireEvent.click(screen.getByRole("button", { name: "Use a recovery code" }));
+    fireEvent.change(screen.getByLabelText("Recovery code"), { target: { value: "ABCD-EFGH-IJKL-MNOP" } });
+    fireEvent.click(screen.getByLabelText("Trust this device for 30 days"));
+    fireEvent.click(screen.getByRole("button", { name: "Verify" }));
+
+    expect(await screen.findByText("Signed-in area")).toBeTruthy();
+    const verifyCall = calls.find((c) => c.path === "/api/auth/2fa/recovery/verify");
+    expect(verifyCall?.body).toEqual({ code: "ABCD-EFGH-IJKL-MNOP", trustDevice: true });
+  });
+
+  it("handles passkey login and Cancel during second step", async () => {
+    vi.spyOn(webauthn, "isWebAuthnSupported").mockReturnValue(true);
+    const authSpy = vi.spyOn(webauthn, "startPasskeyAuthentication").mockResolvedValue({
+      id: "cred-1",
+      rawId: "cred-1",
+      type: "public-key",
+      clientExtensionResults: {},
+      response: { clientDataJSON: "cd", authenticatorData: "ad", signature: "sig" },
+    });
+
+    let signedIn = false;
+    const calls = mockFetch(({ method, path }) => {
+      if (path === "/api/auth/check") {
+        return signedIn ? jsonResponse({ serverHost: "notes.example.com" }) : jsonResponse({ error: "No" }, 401);
+      }
+      if (method === "POST" && path === "/api/auth/login") {
+        return jsonResponse({
+          twoFactor: {
+            required: true,
+            mustEnroll: false,
+            methods: ["passkey", "recovery"],
+            passkeysAvailable: true,
+          },
+        });
+      }
+      if (method === "POST" && path === "/api/auth/2fa/passkey/auth/options") {
+        return jsonResponse({ challenge: "ch1", rpId: "localhost" });
+      }
+      if (method === "POST" && path === "/api/auth/2fa/passkey/auth/verify") {
+        signedIn = true;
+        return jsonResponse({ verified: true, userId: "u1" });
+      }
+      if (method === "POST" && path === "/api/auth/logout") {
+        return jsonResponse({ message: "ok" });
+      }
+      return undefined;
+    });
+
+    renderLogin();
+    signIn("demo@example.com", "demo");
+
+    const passkeyBtn = await screen.findByRole("button", { name: /Use a passkey/i });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByLabelText("Email Address")).toBeTruthy();
+    expect(calls.some((c) => c.path === "/api/auth/logout")).toBe(true);
+
+    // Re-enter password and authenticate with passkey
+    signIn("demo@example.com", "demo");
+    fireEvent.click(await screen.findByRole("button", { name: /Use a passkey/i }));
+    expect(await screen.findByText("Signed-in area")).toBeTruthy();
+    expect(authSpy).toHaveBeenCalledTimes(1);
+    expect(passkeyBtn).toBeTruthy();
+  });
+
+  it("walks through mandatory TOTP enrollment and one-time recovery codes before entering notes", async () => {
+    vi.spyOn(webauthn, "isWebAuthnSupported").mockReturnValue(true);
+    let signedIn = false;
+    const recoveryCodes = [
+      "AAAA-AAAA-AAAA-AAAA",
+      "BBBB-BBBB-BBBB-BBBB",
+      "CCCC-CCCC-CCCC-CCCC",
+      "DDDD-DDDD-DDDD-DDDD",
+      "EEEE-EEEE-EEEE-EEEE",
+      "FFFF-FFFF-FFFF-FFFF",
+      "GGGG-GGGG-GGGG-GGGG",
+      "HHHH-HHHH-HHHH-HHHH",
+      "IIII-IIII-IIII-IIII",
+      "JJJJ-JJJJ-JJJJ-JJJJ",
+    ];
+    mockFetch(({ method, path, body }) => {
+      if (path === "/api/auth/check") {
+        return signedIn ? jsonResponse({ serverHost: "notes.example.com" }) : jsonResponse({ error: "No" }, 401);
+      }
+      if (method === "POST" && path === "/api/auth/login") {
+        return jsonResponse({
+          twoFactor: { required: true, mustEnroll: true, methods: [], passkeysAvailable: true },
+        });
+      }
+      if (method === "POST" && path === "/api/auth/2fa/totp/setup") {
+        return jsonResponse({
+          secret: "JBSWY3DPEHPK3PXP",
+          otpauthUri: "otpauth://totp/Joplin%20Web:demo?secret=JBSWY3DPEHPK3PXP",
+          qrDataUrl: "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=",
+        });
+      }
+      if (method === "POST" && path === "/api/auth/2fa/totp/confirm") {
+        const { code } = body as { code: string };
+        expect(code).toBe("654321");
+        signedIn = true;
+        return jsonResponse({ verified: true, userId: "u1", recoveryCodes });
+      }
+      return undefined;
+    });
+
+    renderLogin();
+    signIn("demo@example.com", "demo");
+
+    expect(await screen.findByText("Set up two-factor authentication")).toBeTruthy();
+    expect(await screen.findByText("JBSWY3DPEHPK3PXP")).toBeTruthy();
+    expect(screen.getByAltText("Authenticator app QR code")).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("Enter the 6-digit code"), { target: { value: "654321" } });
+    fireEvent.click(screen.getByRole("button", { name: "Verify and continue" }));
+
+    // Recovery codes screen shown once before entering app
+    expect(await screen.findByText("Save your recovery codes")).toBeTruthy();
+    expect(screen.getByText("AAAA-AAAA-AAAA-AAAA")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Copy codes" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Download .txt" })).toBeTruthy();
+    // Not yet navigated until user acknowledges saving recovery codes
+    expect(screen.getByTestId("location").textContent).toBe("/login");
+
+    fireEvent.click(screen.getByRole("button", { name: "I saved them" }));
+    expect(await screen.findByText("Signed-in area")).toBeTruthy();
+    expect(screen.getByTestId("location").textContent).toBe("/notes");
+  });
+
+  it("hides Remember me checkbox when server reports rememberMeAvailable=false", async () => {
+    const calls = mockFetch(({ path }) => {
+      if (path === "/api/auth/check") return jsonResponse({ error: "No session" }, 401);
+      if (path === "/api/auth/options") return jsonResponse({ rememberMeAvailable: false });
+      return undefined;
+    });
+
+    renderLogin();
+    await waitFor(() => expect(calls.some((c) => c.path === "/api/auth/options")).toBe(true));
+    expect(screen.queryByLabelText("Remember me for 30 days")).toBeNull();
+  });
+
+  it("shows Remember me checkbox unchecked by default and sends rememberMe: true when checked", async () => {
+    let signedIn = false;
+    const calls = mockFetch(({ method, path }) => {
+      if (path === "/api/auth/check") {
+        return signedIn ? jsonResponse({ serverHost: "notes.example.com" }) : jsonResponse({ error: "No session" }, 401);
+      }
+      if (path === "/api/auth/options") return jsonResponse({ rememberMeAvailable: true });
+      if (method === "POST" && path === "/api/auth/login") {
+        signedIn = true;
+        return jsonResponse({ userId: "u1" });
+      }
+      return undefined;
+    });
+
+    renderLogin();
+    const checkbox = (await screen.findByLabelText("Remember me for 30 days")) as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+
+    fireEvent.click(checkbox);
+    expect(checkbox.checked).toBe(true);
+
+    signIn("demo@example.com", "demo");
+    expect(await screen.findByText("Signed-in area")).toBeTruthy();
+    expect(calls.find((c) => c.path === "/api/auth/login")?.body).toEqual({
+      email: "demo@example.com",
+      password: "demo",
+      rememberMe: true,
+    });
   });
 });

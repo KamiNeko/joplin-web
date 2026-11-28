@@ -28,6 +28,10 @@ export interface AppConfig {
   gitSha: string | null;
   /** Requests per client address and 15 minutes allowed on /api/ (RATE_LIMIT_MAX) */
   rateLimitMax: number;
+  /** Directory for persistent per-user state such as 2FA enrollments (CACHE_DIR), or null */
+  cacheDir: string | null;
+  /** Whether every login must pass a second factor (REQUIRE_2FA, default false) */
+  require2fa: boolean;
 }
 
 /**
@@ -160,16 +164,63 @@ export function parseRateLimitMax(raw: string | undefined): number {
   return parseInt(value, 10);
 }
 
+function parseCacheDir(raw: string | undefined): string | null {
+  const value = raw?.trim();
+  return value ? path.resolve(value) : null;
+}
+
+/**
+ * Whether WebAuthn passkeys are configured on the server. Requires PUBLIC_URL in production; in
+ * development/demo http://localhost origins are allowed.
+ */
+export function isWebAuthnConfigured(config: Pick<AppConfig, 'publicUrl' | 'nodeEnv'>): boolean {
+  return Boolean(config.publicUrl) || config.nodeEnv !== 'production';
+}
+
+/**
+ * Resolves the WebAuthn Relying Party ID and expected origin for the request.
+ * Uses PUBLIC_URL when configured; in non-production environments without PUBLIC_URL, allows only
+ * http://localhost origins (any port). Returns null when WebAuthn is not allowed for this request.
+ */
+export function resolveWebAuthnRp(
+  config: Pick<AppConfig, 'publicUrl' | 'nodeEnv'>,
+  requestOrigin: string | undefined
+): { rpId: string; expectedOrigin: string } | null {
+  if (config.publicUrl) {
+    const url = new URL(config.publicUrl);
+    return { rpId: url.hostname, expectedOrigin: url.origin };
+  }
+  if (config.nodeEnv !== 'production' && requestOrigin) {
+    let url: URL;
+    try {
+      url = new URL(requestOrigin);
+    } catch {
+      return null;
+    }
+    if (url.protocol === 'http:' && url.hostname === 'localhost' && !url.username && !url.password) {
+      return { rpId: 'localhost', expectedOrigin: url.origin };
+    }
+  }
+  return null;
+}
+
 // Resolved from this module, not process.cwd(): src/config.ts (tsx) and dist/config.js (compiled)
 // both sit two levels below the repo root, so this finds client/dist wherever the server is started.
 const defaultClientDistPath = fileURLToPath(new URL('../../client/dist', import.meta.url));
 
 /**
  * Builds the application config from environment variables. Throws ConfigError when
- * JOPLIN_SERVER_URL is missing or invalid.
+ * JOPLIN_SERVER_URL is missing or invalid, or when REQUIRE_2FA is enabled without CACHE_DIR.
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const nodeEnv = env.NODE_ENV || 'development';
+  const cacheDir = parseCacheDir(env.CACHE_DIR);
+  const require2fa = parseBoolean('REQUIRE_2FA', env.REQUIRE_2FA, false);
+  if (require2fa && !cacheDir) {
+    throw new ConfigError(
+      'REQUIRE_2FA is true, which requires CACHE_DIR to be set so two-factor authentication state persists across restarts.'
+    );
+  }
   return {
     port: parseInt(env.PORT || '3001', 10),
     joplinServerUrl: parseJoplinServerUrl(env.JOPLIN_SERVER_URL),
@@ -185,6 +236,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     appVersion: parseAppVersion(env.APP_VERSION),
     gitSha: parseGitSha(env.GIT_SHA),
     rateLimitMax: parseRateLimitMax(env.RATE_LIMIT_MAX),
+    cacheDir,
+    require2fa,
   };
 }
 
