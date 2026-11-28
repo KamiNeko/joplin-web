@@ -693,6 +693,37 @@ describe('remember me', () => {
     assert.ok(storedAfter.lastUsedAt >= storedBefore.lastUsedAt);
   });
 
+  test('REQUIRE_2FA turned on later: an unenrolled user is not restored and must sign in', async () => {
+    const { baseUrl, cacheDir } = await startRememberApp();
+    const jar = new CookieJar();
+    const login = await req(baseUrl, '/api/auth/login', {
+      method: 'POST',
+      headers: { Origin: baseUrl },
+      jar,
+      json: { email: DEMO_EMAIL, password: DEMO_PASSWORD, rememberMe: true },
+    });
+    assert.equal(login.status, 200);
+    assert.ok(jar.get('joplin_web_remember'));
+    jar.delete('joplin_web_session');
+
+    // Same cache dir, server restarted with REQUIRE_2FA=true
+    const strict = await startRememberApp({ cacheDir, require2fa: true });
+    let upstreamLogins = 0;
+    mock.onCreateSession = () => {
+      upstreamLogins++;
+    };
+    try {
+      const notes = await req(strict.baseUrl, '/api/notes', { jar });
+      assert.equal(notes.status, 401);
+      assert.equal(upstreamLogins, 0, 'no upstream login for a user who must enroll');
+      assert.equal(jar.get('joplin_web_remember'), undefined, 'remember cookie cleared');
+      const stored = JSON.parse(await readFile(path.join(cacheDir!, 'auth', 'remember.json'), 'utf8'));
+      assert.equal(Object.keys(stored).length, 0, 'entry deleted');
+    } finally {
+      mock.onCreateSession = null;
+    }
+  });
+
   test('uses __Host-joplin_web_remember when cookies are Secure', async () => {
     const { baseUrl } = await startRememberApp({ cookieSecure: true });
     const login = await req(baseUrl, '/api/auth/login', {

@@ -242,7 +242,10 @@ async function restoreSessionFromRememberCookie(
   }
 
   const entry = store.getRememberEntry(parsed.idHash);
-  if (!entry || entry.expiresAt <= Date.now()) {
+  // REQUIRE_2FA switched on after this entry was made: the user must sign in and enroll first
+  const mustEnroll =
+    entry !== null && activeConfig.require2fa && !hasPrimaryFactor(store.getUserRecord(entry.userId));
+  if (!entry || entry.expiresAt <= Date.now() || mustEnroll) {
     if (entry) {
       await store.deleteRememberEntry(parsed.idHash);
     }
